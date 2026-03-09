@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "session.discovered",
+    "phase": "translation",
+    "native_session_id": "opencode-session-123",
+    "payload": {
+      "adapter": "opencode",
+      "native_session_id": "opencode-session-123",
+      "stream": "stdout"
+    }
+  },
+  {
+    "kind": "assistant.message",
+    "phase": "translation",
+    "payload": {
+      "stream": "stdout",
+      "text": "OpenCode completed the task"
+    }
+  }
+]

@@ -17,6 +17,7 @@ import (
 	"github.com/yusefmosiah/cagent/internal/adapters"
 	"github.com/yusefmosiah/cagent/internal/core"
 	"github.com/yusefmosiah/cagent/internal/events"
+	handoffpkg "github.com/yusefmosiah/cagent/internal/handoff"
 	"github.com/yusefmosiah/cagent/internal/store"
 )
 
@@ -37,17 +38,19 @@ type Service struct {
 }
 
 type RunRequest struct {
-	Adapter      string
-	CWD          string
-	Prompt       string
-	PromptSource string
-	Label        string
-	Model        string
-	Profile      string
-	Detached     bool
-	EnvFile      string
-	ArtifactDir  string
-	SessionID    string
+	Adapter         string
+	CWD             string
+	Prompt          string
+	PromptSource    string
+	Label           string
+	Model           string
+	Profile         string
+	Detached        bool
+	EnvFile         string
+	ArtifactDir     string
+	SessionID       string
+	ParentSessionID string
+	HandoffID       string
 }
 
 type SendRequest struct {
@@ -63,6 +66,26 @@ type RunResult struct {
 	Job     core.JobRecord     `json:"job"`
 	Session core.SessionRecord `json:"session"`
 	Message string             `json:"message,omitempty"`
+}
+
+type HandoffExportRequest struct {
+	JobID      string
+	SessionID  string
+	OutputPath string
+}
+
+type HandoffExportResult struct {
+	Handoff core.HandoffRecord `json:"handoff"`
+	Path    string             `json:"path"`
+}
+
+type HandoffRunRequest struct {
+	HandoffRef string
+	Adapter    string
+	CWD        string
+	Model      string
+	Profile    string
+	Label      string
 }
 
 type StatusResult struct {
@@ -171,6 +194,15 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	var session core.SessionRecord
 
 	if sessionID == "" {
+		var parentSession *string
+		if req.ParentSessionID != "" {
+			parent := req.ParentSessionID
+			parentSession = &parent
+		}
+		metadata := map[string]any{}
+		if req.HandoffID != "" {
+			metadata["source_handoff_id"] = req.HandoffID
+		}
 		sessionID = core.GenerateID("ses")
 		session = core.SessionRecord{
 			SessionID:     sessionID,
@@ -182,8 +214,9 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 			OriginJobID:   jobID,
 			CWD:           cwd,
 			LatestJobID:   jobID,
+			ParentSession: parentSession,
 			Tags:          []string{},
-			Metadata:      map[string]any{},
+			Metadata:      metadata,
 		}
 	} else {
 		session, err = s.store.GetSession(ctx, sessionID)
@@ -210,6 +243,9 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 			"prompt_source": req.PromptSource,
 			"detached":      req.Detached,
 		},
+	}
+	if req.HandoffID != "" {
+		job.Summary["handoff_id"] = req.HandoffID
 	}
 	if req.SessionID == "" {
 		if err := s.store.CreateSessionAndJob(ctx, session, job); err != nil {
@@ -406,6 +442,145 @@ func (s *Service) Session(ctx context.Context, sessionID string) (*SessionResult
 		RecentJobs:     recentJobs,
 		Actions:        actions,
 	}, nil
+}
+
+func (s *Service) ExportHandoff(ctx context.Context, req HandoffExportRequest) (*HandoffExportResult, error) {
+	if (req.JobID == "" && req.SessionID == "") || (req.JobID != "" && req.SessionID != "") {
+		return nil, fmt.Errorf("%w: specify exactly one of job_id or session_id", ErrInvalidInput)
+	}
+
+	var (
+		job     core.JobRecord
+		session core.SessionRecord
+		err     error
+	)
+	switch {
+	case req.JobID != "":
+		job, err = s.store.GetJob(ctx, req.JobID)
+		if err != nil {
+			return nil, normalizeStoreError("job", req.JobID, err)
+		}
+		session, err = s.store.GetSession(ctx, job.SessionID)
+		if err != nil {
+			return nil, normalizeStoreError("session", job.SessionID, err)
+		}
+	default:
+		session, err = s.store.GetSession(ctx, req.SessionID)
+		if err != nil {
+			return nil, normalizeStoreError("session", req.SessionID, err)
+		}
+		if session.LatestJobID == "" {
+			return nil, fmt.Errorf("%w: session %s has no jobs to export", ErrNotFound, session.SessionID)
+		}
+		job, err = s.store.GetJob(ctx, session.LatestJobID)
+		if err != nil {
+			return nil, normalizeStoreError("job", session.LatestJobID, err)
+		}
+	}
+
+	turns, err := s.store.ListTurnsBySession(ctx, session.SessionID, 5)
+	if err != nil {
+		return nil, err
+	}
+	events, err := s.store.ListEventsBySession(ctx, session.SessionID, 20)
+	if err != nil {
+		return nil, err
+	}
+	artifacts, err := s.store.ListArtifactsBySession(ctx, session.SessionID, 10)
+	if err != nil {
+		return nil, err
+	}
+
+	packet := s.buildHandoffPacket(job, session, turns, events, artifacts)
+	record := core.HandoffRecord{
+		HandoffID: packet.HandoffID,
+		JobID:     job.JobID,
+		SessionID: session.SessionID,
+		CreatedAt: packet.ExportedAt,
+		Packet:    packet,
+	}
+	if err := s.store.CreateHandoff(ctx, record); err != nil {
+		return nil, err
+	}
+
+	path, err := s.writeHandoffFile(packet, req.OutputPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.InsertArtifact(ctx, core.ArtifactRecord{
+		ArtifactID: core.GenerateID("art"),
+		JobID:      job.JobID,
+		SessionID:  session.SessionID,
+		Kind:       "handoff",
+		Path:       path,
+		CreatedAt:  packet.ExportedAt,
+		Metadata: map[string]any{
+			"handoff_id": packet.HandoffID,
+		},
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := s.emitEvent(ctx, job, "handoff.exported", "handoff", map[string]any{
+		"handoff_id": packet.HandoffID,
+		"path":       path,
+	}, "", nil); err != nil {
+		return nil, err
+	}
+
+	return &HandoffExportResult{
+		Handoff: record,
+		Path:    path,
+	}, nil
+}
+
+func (s *Service) RunHandoff(ctx context.Context, req HandoffRunRequest) (*RunResult, error) {
+	if req.HandoffRef == "" {
+		return nil, fmt.Errorf("%w: handoff must not be empty", ErrInvalidInput)
+	}
+	if req.Adapter == "" {
+		return nil, fmt.Errorf("%w: adapter must not be empty", ErrInvalidInput)
+	}
+	if _, _, err := s.resolveAdapter(ctx, req.Adapter); err != nil {
+		return nil, err
+	}
+
+	record, err := s.loadHandoff(ctx, req.HandoffRef)
+	if err != nil {
+		return nil, err
+	}
+
+	cwd := req.CWD
+	if cwd == "" {
+		if session, sessionErr := s.store.GetSession(ctx, record.Packet.Source.SessionID); sessionErr == nil {
+			cwd = session.CWD
+		}
+	}
+	if cwd == "" {
+		return nil, fmt.Errorf("%w: cwd is required when the source session is not available locally", ErrInvalidInput)
+	}
+
+	prompt := handoffpkg.RenderPrompt(req.Adapter, record.Packet)
+	result, runErr := s.Run(ctx, RunRequest{
+		Adapter:         req.Adapter,
+		CWD:             cwd,
+		Prompt:          prompt,
+		PromptSource:    "handoff",
+		Label:           req.Label,
+		Model:           req.Model,
+		Profile:         req.Profile,
+		ParentSessionID: record.Packet.Source.SessionID,
+		HandoffID:       record.Packet.HandoffID,
+	})
+	if result != nil {
+		if _, err := s.emitEvent(ctx, result.Job, "handoff.started", "handoff", map[string]any{
+			"handoff_id":     record.Packet.HandoffID,
+			"source_adapter": record.Packet.Source.Adapter,
+		}, "", nil); err != nil {
+			return result, err
+		}
+	}
+
+	return result, runErr
 }
 
 func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, error) {
@@ -948,6 +1123,309 @@ func (s *Service) readLastMessage(path string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(data)), nil
+}
+
+func (s *Service) buildHandoffPacket(
+	job core.JobRecord,
+	session core.SessionRecord,
+	turns []core.TurnRecord,
+	events []core.EventRecord,
+	artifacts []core.ArtifactRecord,
+) core.HandoffPacket {
+	packet := core.HandoffPacket{
+		HandoffID:  core.GenerateID("hof"),
+		ExportedAt: time.Now().UTC(),
+		Source: core.HandoffSource{
+			Adapter:         job.Adapter,
+			JobID:           job.JobID,
+			SessionID:       session.SessionID,
+			NativeSessionID: job.NativeSessionID,
+			CWD:             session.CWD,
+		},
+		Objective:            latestObjective(turns),
+		Summary:              summarizeTurns(turns),
+		Unresolved:           collectUnresolved(job, events),
+		ImportantFiles:       collectImportantFiles(session.CWD, events, artifacts),
+		RecentTurns:          turns,
+		RecentEvents:         condenseEvents(events, 12),
+		Artifacts:            toHandoffArtifacts(s.Paths.StateDir, artifacts),
+		Constraints:          []string{"Keep CLI flags and JSON output backward compatible.", fmt.Sprintf("Work within %s.", session.CWD)},
+		RecommendedNextSteps: recommendNextSteps(job, turns),
+	}
+	if packet.Objective == "" {
+		packet.Objective = "Continue the latest session objective."
+	}
+	if packet.Summary == "" {
+		packet.Summary = "No prior turn summary was captured."
+	}
+	if len(packet.Unresolved) == 0 && job.State != core.JobStateCompleted {
+		packet.Unresolved = []string{fmt.Sprintf("Latest job ended in state %s.", job.State)}
+	}
+	if packet.Unresolved == nil {
+		packet.Unresolved = []string{}
+	}
+	if packet.ImportantFiles == nil {
+		packet.ImportantFiles = []string{}
+	}
+	if packet.RecentTurns == nil {
+		packet.RecentTurns = []core.TurnRecord{}
+	}
+	if packet.RecentEvents == nil {
+		packet.RecentEvents = []core.EventRecord{}
+	}
+	if packet.Artifacts == nil {
+		packet.Artifacts = []core.HandoffArtifact{}
+	}
+	return packet
+}
+
+func (s *Service) writeHandoffFile(packet core.HandoffPacket, outputPath string) (string, error) {
+	path := outputPath
+	if path == "" {
+		path = filepath.Join(s.Paths.HandoffsDir, packet.HandoffID+".json")
+	} else {
+		expanded, err := core.ExpandPath(outputPath)
+		if err != nil {
+			return "", fmt.Errorf("%w: expand handoff output path: %v", ErrInvalidInput, err)
+		}
+		path = expanded
+	}
+	if !filepath.IsAbs(path) {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("%w: resolve handoff output path: %v", ErrInvalidInput, err)
+		}
+		path = absolute
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("create handoff directory: %w", err)
+	}
+
+	encoded, err := json.MarshalIndent(packet, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal handoff packet: %w", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		return "", fmt.Errorf("write handoff packet: %w", err)
+	}
+
+	return path, nil
+}
+
+func (s *Service) loadHandoff(ctx context.Context, ref string) (core.HandoffRecord, error) {
+	if stat, err := os.Stat(ref); err == nil && !stat.IsDir() {
+		data, err := os.ReadFile(ref)
+		if err != nil {
+			return core.HandoffRecord{}, fmt.Errorf("read handoff file: %w", err)
+		}
+		var packet core.HandoffPacket
+		if err := json.Unmarshal(data, &packet); err != nil {
+			return core.HandoffRecord{}, fmt.Errorf("%w: decode handoff file: %v", ErrInvalidInput, err)
+		}
+		return core.HandoffRecord{
+			HandoffID: packet.HandoffID,
+			JobID:     packet.Source.JobID,
+			SessionID: packet.Source.SessionID,
+			CreatedAt: packet.ExportedAt,
+			Packet:    packet,
+		}, nil
+	}
+
+	record, err := s.store.GetHandoff(ctx, ref)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return core.HandoffRecord{}, fmt.Errorf("%w: handoff %s", ErrNotFound, ref)
+		}
+		return core.HandoffRecord{}, err
+	}
+	return record, nil
+}
+
+func latestObjective(turns []core.TurnRecord) string {
+	for _, turn := range turns {
+		if strings.TrimSpace(turn.InputText) != "" {
+			return strings.TrimSpace(turn.InputText)
+		}
+	}
+	return ""
+}
+
+func summarizeTurns(turns []core.TurnRecord) string {
+	var parts []string
+	for _, turn := range turns {
+		if text := strings.TrimSpace(turn.ResultSummary); text != "" {
+			parts = append(parts, text)
+		}
+		if len(parts) == 3 {
+			break
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func collectUnresolved(job core.JobRecord, events []core.EventRecord) []string {
+	var unresolved []string
+	if job.State != core.JobStateCompleted {
+		unresolved = append(unresolved, fmt.Sprintf("Latest job state is %s.", job.State))
+	}
+	for _, event := range events {
+		if event.Kind != "diagnostic" && event.Kind != "job.failed" && event.Kind != "job.cancelled" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if message, ok := payload["message"].(string); ok && strings.TrimSpace(message) != "" {
+			unresolved = append(unresolved, strings.TrimSpace(message))
+		}
+	}
+	return dedupeStrings(unresolved, 6)
+}
+
+func collectImportantFiles(cwd string, events []core.EventRecord, artifacts []core.ArtifactRecord) []string {
+	var files []string
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || !filepath.IsAbs(path) {
+			return
+		}
+		stat, err := os.Stat(path)
+		if err != nil || stat.IsDir() {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		files = append(files, path)
+	}
+
+	for _, artifact := range artifacts {
+		add(artifact.Path)
+	}
+	for _, event := range events {
+		var decoded any
+		if err := json.Unmarshal(event.Payload, &decoded); err != nil {
+			continue
+		}
+		walkStrings(decoded, func(value string) {
+			add(value)
+			if cwd != "" && !filepath.IsAbs(value) {
+				add(filepath.Join(cwd, value))
+			}
+		})
+	}
+
+	if len(files) > 12 {
+		files = files[:12]
+	}
+	return files
+}
+
+func condenseEvents(events []core.EventRecord, limit int) []core.EventRecord {
+	if limit > 0 && len(events) > limit {
+		events = events[:limit]
+	}
+
+	condensed := make([]core.EventRecord, 0, len(events))
+	for _, event := range events {
+		var payload any
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			payload = truncateNestedStrings(payload, 400)
+			if encoded, err := json.Marshal(payload); err == nil {
+				event.Payload = encoded
+			}
+		}
+		condensed = append(condensed, event)
+	}
+	return condensed
+}
+
+func truncateNestedStrings(value any, max int) any {
+	switch typed := value.(type) {
+	case string:
+		if max > 0 && len(typed) > max {
+			return typed[:max] + "...(truncated)"
+		}
+		return typed
+	case []any:
+		for i := range typed {
+			typed[i] = truncateNestedStrings(typed[i], max)
+		}
+		return typed
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = truncateNestedStrings(item, max)
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+func toHandoffArtifacts(stateDir string, artifacts []core.ArtifactRecord) []core.HandoffArtifact {
+	result := make([]core.HandoffArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		path := artifact.Path
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(stateDir, path)
+		}
+		result = append(result, core.HandoffArtifact{
+			Kind:     artifact.Kind,
+			Path:     path,
+			Metadata: artifact.Metadata,
+		})
+	}
+	return result
+}
+
+func recommendNextSteps(job core.JobRecord, turns []core.TurnRecord) []string {
+	steps := []string{"Review the most recent summary and unresolved items.", "Inspect the important files before making changes.", "Run verification before finishing."}
+	if job.State != core.JobStateCompleted {
+		steps[0] = fmt.Sprintf("Investigate why the latest job ended in state %s.", job.State)
+	}
+	if len(turns) > 0 && turns[0].ResultSummary != "" {
+		steps = append([]string{"Use the last turn summary as the starting context."}, steps...)
+	}
+	return dedupeStrings(steps, 5)
+}
+
+func walkStrings(value any, visit func(string)) {
+	switch typed := value.(type) {
+	case string:
+		visit(typed)
+	case []any:
+		for _, item := range typed {
+			walkStrings(item, visit)
+		}
+	case map[string]any:
+		for _, item := range typed {
+			walkStrings(item, visit)
+		}
+	}
+}
+
+func dedupeStrings(values []string, limit int) []string {
+	seen := map[string]struct{}{}
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+		if limit > 0 && len(result) == limit {
+			break
+		}
+	}
+	return result
 }
 
 func normalizeStoreError(kind, id string, err error) error {

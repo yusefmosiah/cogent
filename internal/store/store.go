@@ -423,6 +423,79 @@ func (s *Store) ListEvents(ctx context.Context, jobID string, limit int) ([]core
 	return events, nil
 }
 
+func (s *Store) ListEventsBySession(ctx context.Context, sessionID string, limit int) ([]core.EventRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT event_id, seq, ts, job_id, session_id, adapter, kind, phase,
+		        native_session_id, correlation_id, payload_json, raw_ref
+		   FROM events
+		  WHERE session_id = ?
+		  ORDER BY ts DESC, seq DESC
+		  LIMIT ?`,
+		sessionID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query events by session: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var events []core.EventRecord
+	for rows.Next() {
+		rec, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate events by session: %w", err)
+	}
+
+	return events, nil
+}
+
+func (s *Store) ListArtifactsByJob(ctx context.Context, jobID string, limit int) ([]core.ArtifactRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
+		   FROM artifacts
+		  WHERE job_id = ?
+		  ORDER BY created_at DESC
+		  LIMIT ?`,
+		jobID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query artifacts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var artifacts []core.ArtifactRecord
+	for rows.Next() {
+		rec, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate artifacts: %w", err)
+	}
+
+	return artifacts, nil
+}
+
 func (s *Store) InsertArtifact(ctx context.Context, rec core.ArtifactRecord) error {
 	metadata, err := marshalJSON(rec.Metadata)
 	if err != nil {
@@ -447,6 +520,42 @@ func (s *Store) InsertArtifact(ctx context.Context, rec core.ArtifactRecord) err
 	}
 
 	return nil
+}
+
+func (s *Store) ListArtifactsBySession(ctx context.Context, sessionID string, limit int) ([]core.ArtifactRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
+		   FROM artifacts
+		  WHERE session_id = ?
+		  ORDER BY created_at DESC
+		  LIMIT ?`,
+		sessionID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query artifacts by session: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var artifacts []core.ArtifactRecord
+	for rows.Next() {
+		rec, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate artifacts by session: %w", err)
+	}
+
+	return artifacts, nil
 }
 
 func (s *Store) UpsertNativeSession(ctx context.Context, rec core.NativeSessionRecord) error {
@@ -674,6 +783,41 @@ func (s *Store) ReleaseLock(ctx context.Context, lockKey, jobID string) error {
 		return fmt.Errorf("delete lock: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) CreateHandoff(ctx context.Context, rec core.HandoffRecord) error {
+	packet, err := marshalJSON(rec.Packet)
+	if err != nil {
+		return fmt.Errorf("marshal handoff packet: %w", err)
+	}
+
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO handoffs (handoff_id, job_id, session_id, created_at, packet_json)
+		 VALUES (?, ?, ?, ?, ?)`,
+		rec.HandoffID,
+		rec.JobID,
+		rec.SessionID,
+		rec.CreatedAt.UTC().Format(time.RFC3339Nano),
+		string(packet),
+	)
+	if err != nil {
+		return fmt.Errorf("insert handoff: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) GetHandoff(ctx context.Context, handoffID string) (core.HandoffRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT handoff_id, job_id, session_id, created_at, packet_json
+		   FROM handoffs
+		  WHERE handoff_id = ?`,
+		handoffID,
+	)
+
+	return scanHandoff(row)
 }
 
 func (s *Store) UpdateSessionLatestJob(ctx context.Context, sessionID, latestJobID string, updatedAt time.Time) error {
@@ -968,6 +1112,65 @@ func scanEvent(scanner interface{ Scan(...any) error }) (core.EventRecord, error
 	rec.CorrelationID = correlationID.String
 	rec.RawRef = rawRef.String
 	rec.Payload = json.RawMessage(payloadJSON)
+
+	return rec, nil
+}
+
+func scanArtifact(scanner interface{ Scan(...any) error }) (core.ArtifactRecord, error) {
+	var rec core.ArtifactRecord
+	var createdAt string
+	var metadataJSON string
+
+	if err := scanner.Scan(
+		&rec.ArtifactID,
+		&rec.JobID,
+		&rec.SessionID,
+		&rec.Kind,
+		&rec.Path,
+		&createdAt,
+		&metadataJSON,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.ArtifactRecord{}, ErrNotFound
+		}
+		return core.ArtifactRecord{}, fmt.Errorf("scan artifact: %w", err)
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return core.ArtifactRecord{}, fmt.Errorf("parse artifact created_at: %w", err)
+	}
+	rec.CreatedAt = parsed
+	if err := json.Unmarshal([]byte(metadataJSON), &rec.Metadata); err != nil {
+		return core.ArtifactRecord{}, fmt.Errorf("decode artifact metadata: %w", err)
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]any{}
+	}
+
+	return rec, nil
+}
+
+func scanHandoff(scanner interface{ Scan(...any) error }) (core.HandoffRecord, error) {
+	var rec core.HandoffRecord
+	var createdAt string
+	var packetJSON string
+
+	if err := scanner.Scan(&rec.HandoffID, &rec.JobID, &rec.SessionID, &createdAt, &packetJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.HandoffRecord{}, ErrNotFound
+		}
+		return core.HandoffRecord{}, fmt.Errorf("scan handoff: %w", err)
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return core.HandoffRecord{}, fmt.Errorf("parse handoff created_at: %w", err)
+	}
+	rec.CreatedAt = parsed
+	if err := json.Unmarshal([]byte(packetJSON), &rec.Packet); err != nil {
+		return core.HandoffRecord{}, fmt.Errorf("decode handoff packet: %w", err)
+	}
 
 	return rec, nil
 }

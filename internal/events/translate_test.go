@@ -36,6 +36,18 @@ func TestTranslateFixtures(t *testing.T) {
 			golden:  filepath.Join("..", "..", "testdata", "golden", "factory", "success.events.json"),
 		},
 		{
+			name:    "gemini",
+			adapter: "gemini",
+			fixture: filepath.Join("..", "..", "testdata", "fixtures", "gemini", "success.jsonl"),
+			golden:  filepath.Join("..", "..", "testdata", "golden", "gemini", "success.events.json"),
+		},
+		{
+			name:    "opencode",
+			adapter: "opencode",
+			fixture: filepath.Join("..", "..", "testdata", "fixtures", "opencode", "success.jsonl"),
+			golden:  filepath.Join("..", "..", "testdata", "golden", "opencode", "success.events.json"),
+		},
+		{
 			name:    "pi",
 			adapter: "pi",
 			fixture: filepath.Join("..", "..", "testdata", "fixtures", "pi", "success.jsonl"),

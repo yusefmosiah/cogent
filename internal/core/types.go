@@ -110,6 +110,43 @@ type ArtifactRecord struct {
 	Metadata   map[string]any `json:"metadata"`
 }
 
+type HandoffSource struct {
+	Adapter         string `json:"adapter"`
+	JobID           string `json:"job_id"`
+	SessionID       string `json:"session_id"`
+	NativeSessionID string `json:"native_session_id,omitempty"`
+	CWD             string `json:"cwd,omitempty"`
+}
+
+type HandoffArtifact struct {
+	Kind     string         `json:"kind"`
+	Path     string         `json:"path"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type HandoffPacket struct {
+	HandoffID            string            `json:"handoff_id"`
+	ExportedAt           time.Time         `json:"exported_at"`
+	Source               HandoffSource     `json:"source"`
+	Objective            string            `json:"objective"`
+	Summary              string            `json:"summary"`
+	Unresolved           []string          `json:"unresolved"`
+	ImportantFiles       []string          `json:"important_files"`
+	RecentTurns          []TurnRecord      `json:"recent_turns,omitempty"`
+	RecentEvents         []EventRecord     `json:"recent_events"`
+	Artifacts            []HandoffArtifact `json:"artifacts"`
+	Constraints          []string          `json:"constraints"`
+	RecommendedNextSteps []string          `json:"recommended_next_steps"`
+}
+
+type HandoffRecord struct {
+	HandoffID string        `json:"handoff_id"`
+	JobID     string        `json:"job_id"`
+	SessionID string        `json:"session_id"`
+	CreatedAt time.Time     `json:"created_at"`
+	Packet    HandoffPacket `json:"packet"`
+}
+
 type LockRecord struct {
 	LockKey         string     `json:"lock_key"`
 	Adapter         string     `json:"adapter"`

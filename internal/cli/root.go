@@ -49,6 +49,21 @@ type sendOptions struct {
 	profile    string
 }
 
+type handoffExportOptions struct {
+	jobID     string
+	sessionID string
+	output    string
+}
+
+type handoffRunOptions struct {
+	handoff string
+	adapter string
+	cwd     string
+	model   string
+	profile string
+	label   string
+}
+
 func Execute() error {
 	return NewRootCommand().Execute()
 }
@@ -74,7 +89,7 @@ func NewRootCommand() *cobra.Command {
 		newCancelCommand(opts),
 		newListCommand(opts),
 		newSessionCommand(opts),
-		newHandoffCommand(),
+		newHandoffCommand(opts),
 		newAdaptersCommand(opts),
 		newPlaceholderCommand("doctor", "Check adapter binaries, auth, and writable dirs"),
 		newPlaceholderCommand("gc", "Collect old artifacts and compact the store"),
@@ -385,16 +400,86 @@ func newAdaptersCommand(root *rootOptions) *cobra.Command {
 	}
 }
 
-func newHandoffCommand() *cobra.Command {
+func newHandoffCommand(root *rootOptions) *cobra.Command {
+	exportOpts := &handoffExportOptions{}
+	runOpts := &handoffRunOptions{}
+
 	cmd := &cobra.Command{
 		Use:   "handoff",
 		Short: "Export and launch cross-vendor handoffs",
 	}
 
 	cmd.AddCommand(
-		newPlaceholderCommand("export", "Export a structured handoff packet"),
-		newPlaceholderCommand("run", "Run a job from a handoff packet"),
+		&cobra.Command{
+			Use:   "export",
+			Short: "Export a structured handoff packet",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				result, err := svc.ExportHandoff(context.Background(), service.HandoffExportRequest{
+					JobID:      exportOpts.jobID,
+					SessionID:  exportOpts.sessionID,
+					OutputPath: exportOpts.output,
+				})
+				if err != nil {
+					return mapServiceError(err)
+				}
+
+				if root.jsonOutput {
+					return writeJSON(cmd.OutOrStdout(), result)
+				}
+				return writef(cmd.OutOrStdout(), "%s\t%s\n", result.Handoff.HandoffID, result.Path)
+			},
+		},
+		&cobra.Command{
+			Use:   "run",
+			Short: "Run a job from a handoff packet",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				result, runErr := svc.RunHandoff(context.Background(), service.HandoffRunRequest{
+					HandoffRef: runOpts.handoff,
+					Adapter:    runOpts.adapter,
+					CWD:        runOpts.cwd,
+					Model:      runOpts.model,
+					Profile:    runOpts.profile,
+					Label:      runOpts.label,
+				})
+				if result != nil {
+					if err := renderRunResult(cmd, root.jsonOutput, result); err != nil {
+						return err
+					}
+				}
+				if runErr != nil {
+					return mapServiceError(runErr)
+				}
+				return nil
+			},
+		},
 	)
+
+	exportCmd := cmd.Commands()[0]
+	exportCmd.Flags().StringVar(&exportOpts.jobID, "job", "", "source job to export")
+	exportCmd.Flags().StringVar(&exportOpts.sessionID, "session", "", "source session to export from its latest job")
+	exportCmd.Flags().StringVar(&exportOpts.output, "output", "", "write the packet to a specific file")
+
+	runCmd := cmd.Commands()[1]
+	runCmd.Flags().StringVar(&runOpts.handoff, "handoff", "", "handoff id or path to a handoff JSON file")
+	runCmd.Flags().StringVar(&runOpts.adapter, "adapter", "", "target adapter")
+	runCmd.Flags().StringVar(&runOpts.cwd, "cwd", "", "override working directory for the target run")
+	runCmd.Flags().StringVar(&runOpts.model, "model", "", "requested model override")
+	runCmd.Flags().StringVar(&runOpts.profile, "profile", "", "requested adapter profile")
+	runCmd.Flags().StringVar(&runOpts.label, "label", "", "optional label for the new session")
+	_ = runCmd.MarkFlagRequired("handoff")
+	_ = runCmd.MarkFlagRequired("adapter")
 
 	return cmd
 }

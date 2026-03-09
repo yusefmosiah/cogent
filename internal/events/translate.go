@@ -74,6 +74,13 @@ func extractNativeSessionID(payload map[string]any) string {
 		return nativeID
 	}
 
+	if nativeID := firstString(payload, "sessionID"); nativeID != "" {
+		eventType := strings.ToLower(firstString(payload, "type", "event"))
+		if eventType == "step_start" || eventType == "step-start" || eventType == "init" {
+			return nativeID
+		}
+	}
+
 	if strings.ToLower(firstString(payload, "type")) == "session" {
 		return firstString(payload, "id")
 	}
@@ -211,6 +218,14 @@ func extractAssistantMessage(payload map[string]any) string {
 
 	if value := firstString(payload, "final_text", "finalText"); value != "" {
 		return value
+	}
+
+	if strings.ToLower(firstString(payload, "type")) == "text" {
+		if part, ok := payload["part"].(map[string]any); ok {
+			if value := firstString(part, "text"); value != "" {
+				return value
+			}
+		}
 	}
 
 	return ""

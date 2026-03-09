@@ -2,13 +2,14 @@ package adapters
 
 import (
 	"context"
-	"os/exec"
 	"sort"
 
 	"github.com/yusefmosiah/cagent/internal/adapterapi"
 	"github.com/yusefmosiah/cagent/internal/adapters/claude"
 	"github.com/yusefmosiah/cagent/internal/adapters/codex"
 	"github.com/yusefmosiah/cagent/internal/adapters/factory"
+	"github.com/yusefmosiah/cagent/internal/adapters/gemini"
+	"github.com/yusefmosiah/cagent/internal/adapters/opencode"
 	"github.com/yusefmosiah/cagent/internal/adapters/pi"
 	"github.com/yusefmosiah/cagent/internal/core"
 )
@@ -20,8 +21,8 @@ func CatalogFromConfig(cfg core.Config) []Diagnosis {
 	entries := []Diagnosis{
 		describeAdapter(context.Background(), claude.New(cfg.Adapters.Claude.Binary, cfg.Adapters.Claude.Enabled)),
 		describeAdapter(context.Background(), factory.New(cfg.Adapters.Factory.Binary, cfg.Adapters.Factory.Enabled)),
-		describeStatic("gemini", cfg.Adapters.Gemini),
-		describeStatic("opencode", cfg.Adapters.OpenCode),
+		describeAdapter(context.Background(), gemini.New(cfg.Adapters.Gemini.Binary, cfg.Adapters.Gemini.Enabled)),
+		describeAdapter(context.Background(), opencode.New(cfg.Adapters.OpenCode.Binary, cfg.Adapters.OpenCode.Enabled)),
 		describeAdapter(context.Background(), pi.New(cfg.Adapters.Pi.Binary, cfg.Adapters.Pi.Enabled)),
 		describeAdapter(context.Background(), codex.New(cfg.Adapters.Codex.Binary, cfg.Adapters.Codex.Enabled)),
 	}
@@ -43,6 +44,10 @@ func Resolve(ctx context.Context, cfg core.Config, name string) (adapterapi.Adap
 		adapter = codex.New(cfg.Adapters.Codex.Binary, cfg.Adapters.Codex.Enabled)
 	case "factory":
 		adapter = factory.New(cfg.Adapters.Factory.Binary, cfg.Adapters.Factory.Enabled)
+	case "gemini":
+		adapter = gemini.New(cfg.Adapters.Gemini.Binary, cfg.Adapters.Gemini.Enabled)
+	case "opencode":
+		adapter = opencode.New(cfg.Adapters.OpenCode.Binary, cfg.Adapters.OpenCode.Enabled)
 	case "pi":
 		adapter = pi.New(cfg.Adapters.Pi.Binary, cfg.Adapters.Pi.Enabled)
 	default:
@@ -57,16 +62,4 @@ func Resolve(ctx context.Context, cfg core.Config, name string) (adapterapi.Adap
 func describeAdapter(ctx context.Context, adapter adapterapi.Adapter) Diagnosis {
 	diag, _ := adapter.Detect(ctx)
 	return diag
-}
-
-func describeStatic(name string, cfg core.AdapterConfig) Diagnosis {
-	_, err := exec.LookPath(cfg.Binary)
-	return Diagnosis{
-		Adapter:      name,
-		Binary:       cfg.Binary,
-		Available:    err == nil,
-		Enabled:      cfg.Enabled,
-		Implemented:  false,
-		Capabilities: adapterapi.Capabilities{},
-	}
 }

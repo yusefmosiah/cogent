@@ -52,7 +52,7 @@ func DefaultConfig(paths Paths) Config {
 			Factory:  AdapterConfig{Binary: "droid", Enabled: true},
 			Pi:       AdapterConfig{Binary: "pi", Enabled: true},
 			Gemini:   AdapterConfig{Binary: "gemini", Enabled: true},
-			OpenCode: AdapterConfig{Binary: "opencode", Enabled: false},
+			OpenCode: AdapterConfig{Binary: "opencode", Enabled: true},
 		},
 	}
 }

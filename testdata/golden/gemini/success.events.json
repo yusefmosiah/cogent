@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "session.discovered",
+    "phase": "translation",
+    "native_session_id": "gemini-session-789",
+    "payload": {
+      "adapter": "gemini",
+      "native_session_id": "gemini-session-789",
+      "stream": "stdout"
+    }
+  },
+  {
+    "kind": "assistant.message",
+    "phase": "translation",
+    "payload": {
+      "stream": "stdout",
+      "text": "Gemini completed the task"
+    }
+  }
+]

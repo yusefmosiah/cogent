@@ -325,3 +325,269 @@ func TestRunAndSessionWithFakePiAdapter(t *testing.T) {
 		t.Fatalf("expected available send action, got %+v", session.Actions)
 	}
 }
+
+func TestRunCompletesWithFakeGeminiAdapter(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+
+	fakeBinary, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "gemini"))
+	if err != nil {
+		t.Fatalf("resolve fake gemini path: %v", err)
+	}
+	if err := os.Chmod(fakeBinary, 0o755); err != nil {
+		t.Fatalf("chmod fake gemini: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[adapters.gemini]\nbinary = \"" + fakeBinary + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	result, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "gemini",
+		CWD:          t.TempDir(),
+		Prompt:       "build milestone 4",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Job.State != core.JobStateCompleted {
+		t.Fatalf("expected completed gemini job state, got %s", result.Job.State)
+	}
+	if result.Job.NativeSessionID != "gemini-session-789" {
+		t.Fatalf("expected discovered gemini native session, got %q", result.Job.NativeSessionID)
+	}
+}
+
+func TestSendContinuesFakeOpenCodeSession(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+
+	fakeBinary, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	if err := os.Chmod(fakeBinary, 0o755); err != nil {
+		t.Fatalf("chmod fake opencode: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[adapters.opencode]\nbinary = \"" + fakeBinary + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	first, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "opencode",
+		CWD:          t.TempDir(),
+		Prompt:       "initial prompt",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	second, err := svc.Send(context.Background(), SendRequest{
+		SessionID:    first.Session.SessionID,
+		Prompt:       "follow up",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+	if second.Job.NativeSessionID != first.Job.NativeSessionID {
+		t.Fatalf("expected same opencode native session id, got %q want %q", second.Job.NativeSessionID, first.Job.NativeSessionID)
+	}
+	if !strings.Contains(second.Message, "continued") {
+		t.Fatalf("expected continuation message, got %q", second.Message)
+	}
+}
+
+func TestHandoffExportAndRun(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+
+	fakeCodex, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "codex"))
+	if err != nil {
+		t.Fatalf("resolve fake codex path: %v", err)
+	}
+	fakeGemini, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "gemini"))
+	if err != nil {
+		t.Fatalf("resolve fake gemini path: %v", err)
+	}
+	for _, binary := range []string{fakeCodex, fakeGemini} {
+		if err := os.Chmod(binary, 0o755); err != nil {
+			t.Fatalf("chmod fake binary: %v", err)
+		}
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[adapters.codex]\nbinary = \"" + fakeCodex + "\"\nenabled = true\n\n[adapters.gemini]\nbinary = \"" + fakeGemini + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	run, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "codex",
+		CWD:          t.TempDir(),
+		Prompt:       "solve the problem and summarize it",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	exported, err := svc.ExportHandoff(context.Background(), HandoffExportRequest{JobID: run.Job.JobID})
+	if err != nil {
+		t.Fatalf("ExportHandoff returned error: %v", err)
+	}
+	if exported.Handoff.Packet.Source.JobID != run.Job.JobID {
+		t.Fatalf("expected handoff source job %s, got %s", run.Job.JobID, exported.Handoff.Packet.Source.JobID)
+	}
+	if exported.Handoff.Packet.Source.CWD == "" {
+		t.Fatal("expected handoff source cwd")
+	}
+	if len(exported.Handoff.Packet.RecentTurns) == 0 {
+		t.Fatal("expected handoff recent turns")
+	}
+	if exported.Path == "" {
+		t.Fatal("expected handoff path")
+	}
+
+	continued, err := svc.RunHandoff(context.Background(), HandoffRunRequest{
+		HandoffRef: exported.Handoff.HandoffID,
+		Adapter:    "gemini",
+		CWD:        t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("RunHandoff returned error: %v", err)
+	}
+	if continued.Job.Adapter != "gemini" {
+		t.Fatalf("expected gemini target adapter, got %s", continued.Job.Adapter)
+	}
+	if continued.Job.Summary["handoff_id"] != exported.Handoff.HandoffID {
+		t.Fatalf("expected handoff id in job summary, got %+v", continued.Job.Summary)
+	}
+}
+
+func TestExportAndRunHandoff(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+
+	fakeCodex, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "codex"))
+	if err != nil {
+		t.Fatalf("resolve fake codex path: %v", err)
+	}
+	if err := os.Chmod(fakeCodex, 0o755); err != nil {
+		t.Fatalf("chmod fake codex: %v", err)
+	}
+	fakeDroid, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "droid"))
+	if err != nil {
+		t.Fatalf("resolve fake droid path: %v", err)
+	}
+	if err := os.Chmod(fakeDroid, 0o755); err != nil {
+		t.Fatalf("chmod fake droid: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte(
+		"[adapters.codex]\n" +
+			"binary = \"" + fakeCodex + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.factory]\n" +
+			"binary = \"" + fakeDroid + "\"\n" +
+			"enabled = true\n",
+	)
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	source, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "codex",
+		CWD:          t.TempDir(),
+		Prompt:       "build a handoff source run",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	exported, err := svc.ExportHandoff(context.Background(), HandoffExportRequest{
+		JobID: source.Job.JobID,
+	})
+	if err != nil {
+		t.Fatalf("ExportHandoff returned error: %v", err)
+	}
+	if exported.Handoff.Packet.Source.JobID != source.Job.JobID {
+		t.Fatalf("expected exported source job %q, got %q", source.Job.JobID, exported.Handoff.Packet.Source.JobID)
+	}
+	if _, err := os.Stat(exported.Path); err != nil {
+		t.Fatalf("expected exported handoff file at %q: %v", exported.Path, err)
+	}
+
+	target, err := svc.RunHandoff(context.Background(), HandoffRunRequest{
+		HandoffRef: exported.Handoff.HandoffID,
+		Adapter:    "factory",
+	})
+	if err != nil {
+		t.Fatalf("RunHandoff returned error: %v", err)
+	}
+	if target.Job.State != core.JobStateCompleted {
+		t.Fatalf("expected completed handoff run state, got %s", target.Job.State)
+	}
+	if target.Job.Adapter != "factory" {
+		t.Fatalf("expected factory adapter, got %q", target.Job.Adapter)
+	}
+	if got, _ := target.Job.Summary["handoff_id"].(string); got != exported.Handoff.HandoffID {
+		t.Fatalf("expected handoff id %q in summary, got %q", exported.Handoff.HandoffID, got)
+	}
+	if target.Session.ParentSession == nil || *target.Session.ParentSession != source.Session.SessionID {
+		t.Fatalf("expected parent session %q, got %+v", source.Session.SessionID, target.Session.ParentSession)
+	}
+}
