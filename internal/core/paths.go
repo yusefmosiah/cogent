@@ -59,6 +59,19 @@ func ResolvePathsFromEnv(home string, getenv func(string) string) (Paths, error)
 	}, nil
 }
 
+func (p Paths) WithStateDir(stateDir string) Paths {
+	p.StateDir = stateDir
+	p.DBPath = filepath.Join(stateDir, "cagent.db")
+	p.JobsDir = filepath.Join(stateDir, "jobs")
+	p.RawDir = filepath.Join(stateDir, "raw")
+	p.HandoffsDir = filepath.Join(stateDir, "handoffs")
+	return p
+}
+
+func ExpandPath(path string) (string, error) {
+	return expandUser(path)
+}
+
 func EnsurePaths(paths Paths) error {
 	dirs := []string{
 		paths.ConfigDir,
