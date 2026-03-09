@@ -1,4 +1,4 @@
-package claude
+package factory
 
 import (
 	"context"
@@ -21,7 +21,7 @@ func New(binary string, enabled bool) *Adapter {
 }
 
 func (a *Adapter) Name() string {
-	return "claude"
+	return "factory"
 }
 
 func (a *Adapter) Binary() string {
@@ -36,9 +36,9 @@ func (a *Adapter) Capabilities() adapterapi.Capabilities {
 	return adapterapi.Capabilities{
 		HeadlessRun:      true,
 		StreamJSON:       true,
-		NativeResume:     true,
 		StructuredOutput: true,
 		InteractiveMode:  true,
+		RPCMode:          true,
 	}
 }
 
@@ -57,31 +57,26 @@ func (a *Adapter) Detect(ctx context.Context) (adapterapi.Diagnosis, error) {
 }
 
 func (a *Adapter) StartRun(ctx context.Context, req adapterapi.StartRunRequest) (*adapterapi.RunHandle, error) {
-	args := []string{
-		"--print",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--permission-mode", "auto",
-	}
+	args := []string{"exec"}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
-	args = append(args, req.Prompt)
+	args = append(args, "-o", "stream-json", req.Prompt)
 
 	cmd := exec.CommandContext(ctx, a.binary, args...)
 	cmd.Dir = req.CWD
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open claude stdout: %w", err)
+		return nil, fmt.Errorf("open factory stdout: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open claude stderr: %w", err)
+		return nil, fmt.Errorf("open factory stderr: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start claude print: %w", err)
+		return nil, fmt.Errorf("start droid exec: %w", err)
 	}
 
 	return &adapterapi.RunHandle{
@@ -95,40 +90,5 @@ func (a *Adapter) StartRun(ctx context.Context, req adapterapi.StartRunRequest) 
 }
 
 func (a *Adapter) ContinueRun(ctx context.Context, req adapterapi.ContinueRunRequest) (*adapterapi.RunHandle, error) {
-	args := []string{
-		"--resume", req.NativeSessionID,
-		"--print",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--permission-mode", "auto",
-	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	args = append(args, req.Prompt)
-
-	cmd := exec.CommandContext(ctx, a.binary, args...)
-	cmd.Dir = req.CWD
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open claude resume stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open claude resume stderr: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start claude resume: %w", err)
-	}
-
-	return &adapterapi.RunHandle{
-		Cmd:    cmd,
-		Stdout: stdout,
-		Stderr: stderr,
-		Cleanup: func() error {
-			return nil
-		},
-	}, nil
+	return nil, fmt.Errorf("factory CLI continuation is not verified yet")
 }

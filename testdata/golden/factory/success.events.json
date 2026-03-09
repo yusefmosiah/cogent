@@ -1,0 +1,39 @@
+[
+  {
+    "kind": "session.discovered",
+    "phase": "translation",
+    "native_session_id": "factory-session-123",
+    "payload": {
+      "adapter": "factory",
+      "native_session_id": "factory-session-123",
+      "stream": "stdout"
+    }
+  },
+  {
+    "kind": "tool.call",
+    "phase": "execution",
+    "payload": {
+      "command": "pwd",
+      "tool": "bash",
+      "type": "tool_call"
+    }
+  },
+  {
+    "kind": "tool.result",
+    "phase": "execution",
+    "payload": {
+      "exit_code": 0,
+      "stdout": "/tmp/work",
+      "tool": "bash",
+      "type": "tool_result"
+    }
+  },
+  {
+    "kind": "assistant.message",
+    "phase": "translation",
+    "payload": {
+      "stream": "stdout",
+      "text": "Factory completed the task"
+    }
+  }
+]

@@ -3,12 +3,19 @@ set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 last_message=""
+mode="run"
+session_id="codex-session-123"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version|-V)
       printf '%s\n' 'fake-codex 0.0.1'
       exit 0
+      ;;
+    resume)
+      mode="resume"
+      shift
+      session_id="${1:-codex-session-123}"
       ;;
     -o)
       shift
@@ -18,7 +25,16 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-cat "$script_dir/../fixtures/codex/success.jsonl"
+if [ "$mode" = "resume" ]; then
+  printf '%s\n' "{\"type\":\"thread.started\",\"thread_id\":\"$session_id\"}"
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Codex continued the task"}}'
+else
+  cat "$script_dir/../fixtures/codex/success.jsonl"
+fi
 if [ -n "$last_message" ]; then
-  printf '%s\n' 'Codex completed the task' > "$last_message"
+  if [ "$mode" = "resume" ]; then
+    printf '%s\n' 'Codex continued the task' > "$last_message"
+  else
+    printf '%s\n' 'Codex completed the task' > "$last_message"
+  fi
 fi

@@ -39,6 +39,16 @@ type runOptions struct {
 	sessionID   string
 }
 
+type sendOptions struct {
+	sessionID  string
+	adapter    string
+	prompt     string
+	promptFile string
+	stdin      bool
+	model      string
+	profile    string
+}
+
 func Execute() error {
 	return NewRootCommand().Execute()
 }
@@ -60,10 +70,10 @@ func NewRootCommand() *cobra.Command {
 		newRunCommand(opts),
 		newStatusCommand(opts),
 		newLogsCommand(opts),
-		newPlaceholderCommand("send", "Continue a resumable native session"),
+		newSendCommand(opts),
 		newCancelCommand(opts),
 		newListCommand(opts),
-		newPlaceholderCommand("session", "Inspect canonical session state"),
+		newSessionCommand(opts),
 		newHandoffCommand(),
 		newAdaptersCommand(opts),
 		newPlaceholderCommand("doctor", "Check adapter binaries, auth, and writable dirs"),
@@ -199,6 +209,56 @@ func newLogsCommand(root *rootOptions) *cobra.Command {
 	return cmd
 }
 
+func newSendCommand(root *rootOptions) *cobra.Command {
+	opts := &sendOptions{}
+
+	cmd := &cobra.Command{
+		Use:   "send",
+		Short: "Continue a resumable native session",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			prompt, source, err := resolveSendPrompt(cmd, opts)
+			if err != nil {
+				return exitf(2, "%v", err)
+			}
+
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			result, sendErr := svc.Send(context.Background(), service.SendRequest{
+				SessionID:    opts.sessionID,
+				Adapter:      opts.adapter,
+				Prompt:       prompt,
+				PromptSource: source,
+				Model:        opts.model,
+				Profile:      opts.profile,
+			})
+			if result != nil {
+				if err := renderRunResult(cmd, root.jsonOutput, result); err != nil {
+					return err
+				}
+			}
+			if sendErr != nil {
+				return mapServiceError(sendErr)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.sessionID, "session", "", "canonical session to continue")
+	cmd.Flags().StringVar(&opts.adapter, "adapter", "", "optional adapter override when a session has multiple resumable links")
+	cmd.Flags().StringVar(&opts.prompt, "prompt", "", "prompt text")
+	cmd.Flags().StringVar(&opts.promptFile, "prompt-file", "", "path to prompt file")
+	cmd.Flags().BoolVar(&opts.stdin, "stdin", false, "read prompt from stdin")
+	cmd.Flags().StringVar(&opts.model, "model", "", "requested model override")
+	cmd.Flags().StringVar(&opts.profile, "profile", "", "requested adapter profile")
+	_ = cmd.MarkFlagRequired("session")
+
+	return cmd
+}
+
 func newCancelCommand(root *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "cancel <job-id>",
@@ -221,6 +281,28 @@ func newCancelCommand(root *rootOptions) *cobra.Command {
 			}
 
 			return writef(cmd.OutOrStdout(), "%s: %s\n", job.JobID, job.State)
+		},
+	}
+}
+
+func newSessionCommand(root *rootOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session <session-id>",
+		Short: "Inspect canonical session state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			result, err := svc.Session(context.Background(), args[0])
+			if err != nil {
+				return mapServiceError(err)
+			}
+
+			return renderSession(cmd, root.jsonOutput, result)
 		},
 	}
 }
@@ -371,6 +453,15 @@ func resolvePrompt(cmd *cobra.Command, opts *runOptions) (string, string, error)
 	}
 }
 
+func resolveSendPrompt(cmd *cobra.Command, opts *sendOptions) (string, string, error) {
+	runOpts := &runOptions{
+		prompt:     opts.prompt,
+		promptFile: opts.promptFile,
+		stdin:      opts.stdin,
+	}
+	return resolvePrompt(cmd, runOpts)
+}
+
 func renderRunResult(cmd *cobra.Command, jsonOutput bool, result *service.RunResult) error {
 	if jsonOutput {
 		return writeJSON(cmd.OutOrStdout(), result)
@@ -429,7 +520,53 @@ func renderStatus(cmd *cobra.Command, jsonOutput bool, status *service.StatusRes
 			return err
 		}
 	}
+	if len(status.NativeSessions) > 0 {
+		if err := writef(cmd.OutOrStdout(), "native_sessions: %d\n", len(status.NativeSessions)); err != nil {
+			return err
+		}
+	}
 	return writef(cmd.OutOrStdout(), "events: %d\n", len(status.Events))
+}
+
+func renderSession(cmd *cobra.Command, jsonOutput bool, result *service.SessionResult) error {
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), result)
+	}
+
+	if err := writef(cmd.OutOrStdout(), "session: %s\n", result.Session.SessionID); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "status: %s\n", result.Session.Status); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "cwd: %s\n", result.Session.CWD); err != nil {
+		return err
+	}
+	if result.Session.LatestJobID != "" {
+		if err := writef(cmd.OutOrStdout(), "latest_job: %s\n", result.Session.LatestJobID); err != nil {
+			return err
+		}
+	}
+	for _, native := range result.NativeSessions {
+		lockState := ""
+		if native.LockedByJobID != "" {
+			lockState = "\tlocked_by=" + native.LockedByJobID
+		}
+		if err := writef(cmd.OutOrStdout(), "native: %s\t%s\tresumable=%t%s\n", native.Adapter, native.NativeSessionID, native.Resumable, lockState); err != nil {
+			return err
+		}
+	}
+	for _, turn := range result.Turns {
+		if err := writef(cmd.OutOrStdout(), "turn: %s\t%s\t%s\t%s\n", turn.TurnID, turn.Adapter, turn.Status, turn.ResultSummary); err != nil {
+			return err
+		}
+	}
+	for _, action := range result.Actions {
+		if err := writef(cmd.OutOrStdout(), "action: %s\tadapter=%s\tavailable=%t\t%s\n", action.Action, action.Adapter, action.Available, action.Reason); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderEvents(cmd *cobra.Command, jsonOutput, follow bool, events []core.EventRecord) error {
@@ -516,6 +653,12 @@ func mapServiceError(err error) error {
 	}
 	if errors.Is(err, service.ErrInvalidInput) {
 		return exitf(2, "%v", err)
+	}
+	if errors.Is(err, service.ErrBusy) {
+		return exitf(7, "%v", err)
+	}
+	if errors.Is(err, service.ErrSessionLocked) {
+		return exitf(7, "%v", err)
 	}
 	if errors.Is(err, service.ErrVendorProcess) {
 		return exitf(8, "%v", err)

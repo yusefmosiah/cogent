@@ -117,3 +117,59 @@ func (a *Adapter) StartRun(ctx context.Context, req adapterapi.StartRunRequest) 
 		},
 	}, nil
 }
+
+func (a *Adapter) ContinueRun(ctx context.Context, req adapterapi.ContinueRunRequest) (*adapterapi.RunHandle, error) {
+	lastMessageFile, err := os.CreateTemp("", "cagent-codex-last-*.txt")
+	if err != nil {
+		return nil, fmt.Errorf("create last-message temp file: %w", err)
+	}
+	_ = lastMessageFile.Close()
+
+	args := []string{
+		"exec",
+		"resume",
+		req.NativeSessionID,
+		"--json",
+		"--skip-git-repo-check",
+		"-o", lastMessageFile.Name(),
+		"-",
+	}
+	if req.Model != "" {
+		args = append(args[:3], append([]string{"-m", req.Model}, args[3:]...)...)
+	}
+
+	cmd := exec.CommandContext(ctx, a.binary, args...)
+	cmd.Dir = req.CWD
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("open codex resume stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("open codex resume stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("open codex resume stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start codex exec resume: %w", err)
+	}
+
+	go func() {
+		_, _ = stdin.Write([]byte(req.Prompt))
+		_ = stdin.Close()
+	}()
+
+	return &adapterapi.RunHandle{
+		Cmd:             cmd,
+		Stdout:          stdout,
+		Stderr:          stderr,
+		LastMessagePath: lastMessageFile.Name(),
+		Cleanup: func() error {
+			return os.Remove(lastMessageFile.Name())
+		},
+	}, nil
+}

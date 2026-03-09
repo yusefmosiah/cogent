@@ -25,6 +25,8 @@ var (
 	ErrUnsupported        = errors.New("unsupported operation")
 	ErrAdapterUnavailable = errors.New("adapter not available")
 	ErrInvalidInput       = errors.New("invalid input")
+	ErrBusy               = errors.New("resource busy")
+	ErrSessionLocked      = errors.New("session locked")
 	ErrVendorProcess      = errors.New("vendor process failed")
 )
 
@@ -48,6 +50,15 @@ type RunRequest struct {
 	SessionID    string
 }
 
+type SendRequest struct {
+	SessionID    string
+	Adapter      string
+	Prompt       string
+	PromptSource string
+	Model        string
+	Profile      string
+}
+
 type RunResult struct {
 	Job     core.JobRecord     `json:"job"`
 	Session core.SessionRecord `json:"session"`
@@ -55,9 +66,26 @@ type RunResult struct {
 }
 
 type StatusResult struct {
-	Job     core.JobRecord     `json:"job"`
-	Session core.SessionRecord `json:"session"`
-	Events  []core.EventRecord `json:"events"`
+	Job            core.JobRecord             `json:"job"`
+	Session        core.SessionRecord         `json:"session"`
+	NativeSessions []core.NativeSessionRecord `json:"native_sessions"`
+	Events         []core.EventRecord         `json:"events"`
+}
+
+type SessionAction struct {
+	Action          string `json:"action"`
+	Adapter         string `json:"adapter"`
+	NativeSessionID string `json:"native_session_id"`
+	Available       bool   `json:"available"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type SessionResult struct {
+	Session        core.SessionRecord         `json:"session"`
+	NativeSessions []core.NativeSessionRecord `json:"native_sessions"`
+	Turns          []core.TurnRecord          `json:"turns"`
+	RecentJobs     []core.JobRecord           `json:"recent_jobs"`
+	Actions        []SessionAction            `json:"actions"`
 }
 
 type RawLogEntry struct {
@@ -69,6 +97,16 @@ type RawLogEntry struct {
 type lineItem struct {
 	stream string
 	line   string
+}
+
+type startExecutionOptions struct {
+	Prompt            string
+	PromptSource      string
+	Model             string
+	Profile           string
+	Continue          bool
+	NativeSessionID   string
+	NativeSessionMeta map[string]any
 }
 
 func Open(ctx context.Context, configPath string) (*Service, error) {
@@ -122,21 +160,9 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		return nil, fmt.Errorf("%w: prompt must not be empty", ErrInvalidInput)
 	}
 
-	adapter, descriptor, ok := adapters.Resolve(ctx, s.Config, req.Adapter)
-	if !ok {
-		for _, entry := range adapters.CatalogFromConfig(s.Config) {
-			if entry.Adapter == req.Adapter {
-				descriptor = entry
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return nil, fmt.Errorf("%w: unknown adapter %q", ErrInvalidInput, req.Adapter)
-		}
-	}
-	if !descriptor.Enabled {
-		return nil, fmt.Errorf("%w: adapter %q is disabled in config", ErrUnsupported, req.Adapter)
+	adapter, descriptor, err := s.resolveAdapter(ctx, req.Adapter)
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -195,84 +221,191 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		}
 	}
 
-	if _, err := s.emitEvent(ctx, job, "job.created", "lifecycle", map[string]any{
-		"cwd":           cwd,
-		"label":         req.Label,
-		"prompt_source": req.PromptSource,
-	}, "", nil); err != nil {
-		return nil, err
-	}
-
-	rawPrompt, _ := json.Marshal(map[string]any{
-		"prompt": req.Prompt,
-		"source": req.PromptSource,
-	})
-	if _, err := s.emitEvent(ctx, job, "user.message", "input", map[string]any{
-		"text":   req.Prompt,
-		"source": req.PromptSource,
-	}, "native", rawPrompt); err != nil {
-		return nil, err
-	}
-
-	if err := s.transitionJob(ctx, &job, core.JobStateStarting, map[string]any{"message": "job starting"}); err != nil {
-		return nil, err
-	}
-
 	result := &RunResult{
 		Job:     job,
 		Session: session,
 	}
 
-	var runErr error
-	switch {
-	case !descriptor.Available:
-		message := fmt.Sprintf("adapter %q binary %q is not available on PATH", req.Adapter, descriptor.Binary)
-		result.Message = message
-		runErr = fmt.Errorf("%w: %s", ErrAdapterUnavailable, message)
-	case !descriptor.Implemented:
-		message := fmt.Sprintf("adapter %q is detected but not implemented in this build yet", req.Adapter)
-		result.Message = message
-		runErr = fmt.Errorf("%w: %s", ErrUnsupported, message)
-	default:
-		result.Message, runErr = s.executeAdapterRun(ctx, adapter, &job, req)
+	turn := core.TurnRecord{
+		TurnID:      core.GenerateID("turn"),
+		SessionID:   session.SessionID,
+		JobID:       job.JobID,
+		Adapter:     job.Adapter,
+		StartedAt:   now,
+		InputText:   req.Prompt,
+		InputSource: req.PromptSource,
+		Status:      string(core.JobStateCreated),
+		Stats:       map[string]any{},
 	}
 
-	if runErr != nil {
-		if _, err := s.emitEvent(ctx, job, "diagnostic", "translation", map[string]any{
-			"message": result.Message,
-		}, "", nil); err != nil {
-			return result, err
-		}
-		if _, err := s.emitEvent(ctx, job, "process.stderr", "execution", map[string]any{
-			"message": result.Message,
-		}, "stderr", []byte(result.Message+"\n")); err != nil {
-			return result, err
-		}
-	}
-
-	job.Summary["message"] = result.Message
-	if runErr != nil {
-		if err := s.finishJob(ctx, &job, core.JobStateFailed); err != nil {
-			return result, err
-		}
-		if _, err := s.emitEvent(ctx, job, "job.failed", "lifecycle", map[string]any{
-			"message": result.Message,
-		}, "", nil); err != nil {
-			return result, err
-		}
-	} else {
-		if err := s.finishJob(ctx, &job, core.JobStateCompleted); err != nil {
-			return result, err
-		}
-		if _, err := s.emitEvent(ctx, job, "job.completed", "lifecycle", map[string]any{
-			"message": result.Message,
-		}, "", nil); err != nil {
-			return result, err
-		}
-	}
-
+	result.Message, err = s.executeJobLifecycle(ctx, adapter, descriptor, &job, &turn, startExecutionOptions{
+		Prompt:       req.Prompt,
+		PromptSource: req.PromptSource,
+		Model:        req.Model,
+		Profile:      req.Profile,
+	})
 	result.Job = job
-	return result, runErr
+	return result, err
+}
+
+func (s *Service) Send(ctx context.Context, req SendRequest) (*RunResult, error) {
+	if req.SessionID == "" {
+		return nil, fmt.Errorf("%w: session must not be empty", ErrInvalidInput)
+	}
+	if req.Prompt == "" {
+		return nil, fmt.Errorf("%w: prompt must not be empty", ErrInvalidInput)
+	}
+
+	session, err := s.store.GetSession(ctx, req.SessionID)
+	if err != nil {
+		return nil, normalizeStoreError("session", req.SessionID, err)
+	}
+
+	active, err := s.store.FindActiveJobBySession(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if active != nil {
+		return nil, fmt.Errorf("%w: session %s already has active job %s", ErrSessionLocked, req.SessionID, active.JobID)
+	}
+
+	target, err := s.resolveContinuationTarget(ctx, session, req.Adapter)
+	if err != nil {
+		return nil, err
+	}
+
+	adapter, descriptor, err := s.resolveAdapter(ctx, target.Adapter)
+	if err != nil {
+		return nil, err
+	}
+	if !descriptor.Capabilities.NativeResume {
+		return nil, fmt.Errorf("%w: adapter %q does not support continuation", ErrUnsupported, target.Adapter)
+	}
+
+	now := time.Now().UTC()
+	job := core.JobRecord{
+		JobID:           core.GenerateID("job"),
+		SessionID:       session.SessionID,
+		Adapter:         target.Adapter,
+		State:           core.JobStateCreated,
+		CWD:             session.CWD,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		NativeSessionID: target.NativeSessionID,
+		Summary: map[string]any{
+			"prompt_source": req.PromptSource,
+			"continued":     true,
+		},
+	}
+	if err := s.store.CreateJobAndUpdateSession(ctx, session.SessionID, now, job); err != nil {
+		return nil, err
+	}
+	session.LatestJobID = job.JobID
+	session.UpdatedAt = now
+
+	lock := core.LockRecord{
+		LockKey:         lockKey(target.Adapter, target.NativeSessionID),
+		Adapter:         target.Adapter,
+		NativeSessionID: target.NativeSessionID,
+		JobID:           job.JobID,
+		AcquiredAt:      now,
+	}
+	if err := s.store.AcquireLock(ctx, lock); err != nil {
+		message := fmt.Sprintf("native session %s is already in use", target.NativeSessionID)
+		job.Summary["message"] = message
+		_ = s.finishJob(ctx, &job, core.JobStateBlocked)
+		return &RunResult{
+			Job:     job,
+			Session: session,
+			Message: message,
+		}, fmt.Errorf("%w: %s", ErrSessionLocked, message)
+	}
+	defer func() {
+		_ = s.store.ReleaseLock(context.Background(), lock.LockKey, lock.JobID)
+	}()
+
+	turn := core.TurnRecord{
+		TurnID:          core.GenerateID("turn"),
+		SessionID:       session.SessionID,
+		JobID:           job.JobID,
+		Adapter:         job.Adapter,
+		StartedAt:       now,
+		InputText:       req.Prompt,
+		InputSource:     req.PromptSource,
+		Status:          string(core.JobStateCreated),
+		NativeSessionID: target.NativeSessionID,
+		Stats:           map[string]any{},
+	}
+
+	message, runErr := s.executeJobLifecycle(ctx, adapter, descriptor, &job, &turn, startExecutionOptions{
+		Prompt:            req.Prompt,
+		PromptSource:      req.PromptSource,
+		Model:             req.Model,
+		Profile:           req.Profile,
+		Continue:          true,
+		NativeSessionID:   target.NativeSessionID,
+		NativeSessionMeta: target.Metadata,
+	})
+
+	return &RunResult{
+		Job:     job,
+		Session: session,
+		Message: message,
+	}, runErr
+}
+
+func (s *Service) Session(ctx context.Context, sessionID string) (*SessionResult, error) {
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, normalizeStoreError("session", sessionID, err)
+	}
+
+	nativeSessions, err := s.store.ListNativeSessions(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	turns, err := s.store.ListTurnsBySession(ctx, sessionID, 20)
+	if err != nil {
+		return nil, err
+	}
+
+	recentJobs, err := s.store.ListJobsBySession(ctx, sessionID, 10)
+	if err != nil {
+		return nil, err
+	}
+
+	active, err := s.store.FindActiveJobBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	actions := make([]SessionAction, 0, len(nativeSessions))
+	for _, native := range nativeSessions {
+		action := SessionAction{
+			Action:          "send",
+			Adapter:         native.Adapter,
+			NativeSessionID: native.NativeSessionID,
+			Available:       native.Resumable && active == nil && native.LockedByJobID == "",
+		}
+		switch {
+		case !native.Resumable:
+			action.Reason = "adapter does not declare native continuation"
+		case active != nil:
+			action.Reason = fmt.Sprintf("active job %s is still running", active.JobID)
+		case native.LockedByJobID != "":
+			action.Reason = fmt.Sprintf("native session lock held by job %s", native.LockedByJobID)
+		}
+		actions = append(actions, action)
+	}
+
+	return &SessionResult{
+		Session:        session,
+		NativeSessions: nativeSessions,
+		Turns:          turns,
+		RecentJobs:     recentJobs,
+		Actions:        actions,
+	}, nil
 }
 
 func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, error) {
@@ -286,15 +419,21 @@ func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, erro
 		return nil, normalizeStoreError("session", job.SessionID, err)
 	}
 
+	nativeSessions, err := s.store.ListNativeSessions(ctx, job.SessionID)
+	if err != nil {
+		return nil, err
+	}
+
 	events, err := s.store.ListEvents(ctx, jobID, 50)
 	if err != nil {
 		return nil, err
 	}
 
 	return &StatusResult{
-		Job:     job,
-		Session: session,
-		Events:  events,
+		Job:            job,
+		Session:        session,
+		NativeSessions: nativeSessions,
+		Events:         events,
 	}, nil
 }
 
@@ -360,20 +499,138 @@ func (s *Service) Cancel(ctx context.Context, jobID string) (*core.JobRecord, er
 	return &job, nil
 }
 
-func (s *Service) executeAdapterRun(
+func (s *Service) executeJobLifecycle(
+	ctx context.Context,
+	adapter adapterapi.Adapter,
+	descriptor adapters.Diagnosis,
+	job *core.JobRecord,
+	turn *core.TurnRecord,
+	opts startExecutionOptions,
+) (string, error) {
+	if err := s.store.CreateTurn(ctx, *turn); err != nil {
+		return "", err
+	}
+
+	if _, err := s.emitEvent(ctx, *job, "job.created", "lifecycle", map[string]any{
+		"cwd":           job.CWD,
+		"label":         job.Label,
+		"prompt_source": opts.PromptSource,
+		"continued":     opts.Continue,
+	}, "", nil); err != nil {
+		return "", err
+	}
+
+	rawPrompt, _ := json.Marshal(map[string]any{
+		"prompt":    opts.Prompt,
+		"source":    opts.PromptSource,
+		"continued": opts.Continue,
+	})
+	if _, err := s.emitEvent(ctx, *job, "user.message", "input", map[string]any{
+		"text":   opts.Prompt,
+		"source": opts.PromptSource,
+	}, "native", rawPrompt); err != nil {
+		return "", err
+	}
+
+	if err := s.transitionJob(ctx, job, core.JobStateStarting, map[string]any{"message": "job starting"}); err != nil {
+		return "", err
+	}
+	turn.Status = string(job.State)
+	if err := s.store.UpdateTurn(ctx, *turn); err != nil {
+		return "", err
+	}
+
+	var (
+		message string
+		runErr  error
+	)
+	switch {
+	case !descriptor.Available:
+		message = fmt.Sprintf("adapter %q binary %q is not available on PATH", job.Adapter, descriptor.Binary)
+		runErr = fmt.Errorf("%w: %s", ErrAdapterUnavailable, message)
+	case !descriptor.Implemented:
+		message = fmt.Sprintf("adapter %q is detected but not implemented in this build yet", job.Adapter)
+		runErr = fmt.Errorf("%w: %s", ErrUnsupported, message)
+	default:
+		message, runErr = s.executeAdapter(ctx, adapter, job, opts)
+	}
+	if runErr != nil {
+		if _, err := s.emitEvent(ctx, *job, "diagnostic", "translation", map[string]any{
+			"message": message,
+		}, "", nil); err != nil {
+			return message, err
+		}
+		if _, err := s.emitEvent(ctx, *job, "process.stderr", "execution", map[string]any{
+			"message": message,
+		}, "stderr", []byte(message+"\n")); err != nil {
+			return message, err
+		}
+	}
+
+	job.Summary["message"] = message
+	if err := s.store.UpdateJob(ctx, *job); err != nil {
+		return message, err
+	}
+
+	terminalState := core.JobStateCompleted
+	terminalEvent := "job.completed"
+	if runErr != nil {
+		terminalState = core.JobStateFailed
+		terminalEvent = "job.failed"
+	}
+	if err := s.finishJob(ctx, job, terminalState); err != nil {
+		return message, err
+	}
+	if _, err := s.emitEvent(ctx, *job, terminalEvent, "lifecycle", map[string]any{
+		"message": message,
+	}, "", nil); err != nil {
+		return message, err
+	}
+
+	turn.CompletedAt = job.FinishedAt
+	turn.ResultSummary = message
+	turn.Status = string(job.State)
+	turn.NativeSessionID = job.NativeSessionID
+	if err := s.store.UpdateTurn(ctx, *turn); err != nil {
+		return message, err
+	}
+
+	return message, runErr
+}
+
+func (s *Service) executeAdapter(
 	ctx context.Context,
 	adapter adapterapi.Adapter,
 	job *core.JobRecord,
-	req RunRequest,
+	opts startExecutionOptions,
 ) (string, error) {
-	handle, err := adapter.StartRun(ctx, adapterapi.StartRunRequest{
-		CWD:     job.CWD,
-		Prompt:  req.Prompt,
-		Model:   req.Model,
-		Profile: req.Profile,
-	})
+	var (
+		handle *adapterapi.RunHandle
+		err    error
+	)
+
+	switch {
+	case opts.Continue:
+		handle, err = adapter.ContinueRun(ctx, adapterapi.ContinueRunRequest{
+			CanonicalSessionID: job.SessionID,
+			CWD:                job.CWD,
+			Prompt:             opts.Prompt,
+			Model:              opts.Model,
+			Profile:            opts.Profile,
+			NativeSessionID:    opts.NativeSessionID,
+			NativeSessionMeta:  opts.NativeSessionMeta,
+		})
+	default:
+		handle, err = adapter.StartRun(ctx, adapterapi.StartRunRequest{
+			CanonicalSessionID: job.SessionID,
+			CWD:                job.CWD,
+			Prompt:             opts.Prompt,
+			Model:              opts.Model,
+			Profile:            opts.Profile,
+		})
+	}
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrAdapterUnavailable, err)
+		return err.Error(), err
 	}
 	defer func() {
 		if handle.Cleanup != nil {
@@ -425,7 +682,13 @@ func (s *Service) executeAdapterRun(
 					if err := s.store.UpdateJob(ctx, *job); err != nil {
 						return lastAssistant, err
 					}
-					if err := s.store.UpsertNativeSession(ctx, job.SessionID, job.Adapter, hint.NativeSessionID, adapter.Capabilities().NativeResume); err != nil {
+					if err := s.store.UpsertNativeSession(ctx, core.NativeSessionRecord{
+						SessionID:       job.SessionID,
+						Adapter:         job.Adapter,
+						NativeSessionID: hint.NativeSessionID,
+						Resumable:       adapter.Capabilities().NativeResume,
+						Metadata:        cloneMap(handle.NativeSessionMeta),
+					}); err != nil {
 						return lastAssistant, err
 					}
 				} else if hint.Kind == "session.discovered" && job.NativeSessionID == hint.NativeSessionID {
@@ -433,11 +696,18 @@ func (s *Service) executeAdapterRun(
 				}
 			}
 			if text, ok := hint.Payload["text"].(string); ok && text != "" && hint.Kind == "assistant.message" {
+				if text == lastAssistant {
+					emitHint = false
+				}
 				lastAssistant = text
 			}
 			if emitHint {
-				if _, err := s.emitEvent(ctx, *job, hint.Kind, hint.Phase, hint.Payload, "", nil); err != nil {
+				event, err := s.emitEvent(ctx, *job, hint.Kind, hint.Phase, hint.Payload, "", nil)
+				if err != nil {
 					return lastAssistant, err
+				}
+				if hint.NativeSessionID != "" {
+					event.NativeSessionID = hint.NativeSessionID
 				}
 			}
 		}
@@ -476,6 +746,81 @@ func (s *Service) executeAdapterRun(
 	return lastAssistant, nil
 }
 
+func (s *Service) resolveAdapter(ctx context.Context, name string) (adapterapi.Adapter, adapters.Diagnosis, error) {
+	adapter, descriptor, ok := adapters.Resolve(ctx, s.Config, name)
+	if !ok {
+		for _, entry := range adapters.CatalogFromConfig(s.Config) {
+			if entry.Adapter == name {
+				if !entry.Enabled {
+					return nil, entry, fmt.Errorf("%w: adapter %q is disabled in config", ErrUnsupported, name)
+				}
+				return nil, entry, nil
+			}
+		}
+		return nil, adapters.Diagnosis{}, fmt.Errorf("%w: unknown adapter %q", ErrInvalidInput, name)
+	}
+	if !descriptor.Enabled {
+		return nil, descriptor, fmt.Errorf("%w: adapter %q is disabled in config", ErrUnsupported, name)
+	}
+	return adapter, descriptor, nil
+}
+
+func (s *Service) resolveContinuationTarget(ctx context.Context, session core.SessionRecord, adapterName string) (core.NativeSessionRecord, error) {
+	nativeSessions, err := s.store.ListNativeSessions(ctx, session.SessionID)
+	if err != nil {
+		return core.NativeSessionRecord{}, err
+	}
+
+	var candidates []core.NativeSessionRecord
+	for _, native := range nativeSessions {
+		if !native.Resumable {
+			continue
+		}
+		if adapterName != "" && native.Adapter != adapterName {
+			continue
+		}
+		candidates = append(candidates, native)
+	}
+	if len(candidates) == 0 {
+		if adapterName != "" {
+			return core.NativeSessionRecord{}, fmt.Errorf("%w: no resumable native session linked for adapter %q", ErrUnsupported, adapterName)
+		}
+		return core.NativeSessionRecord{}, fmt.Errorf("%w: session %s has no resumable native sessions", ErrUnsupported, session.SessionID)
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+
+	if session.LatestJobID != "" {
+		job, err := s.store.GetJob(ctx, session.LatestJobID)
+		if err == nil {
+			for _, candidate := range candidates {
+				if candidate.Adapter == job.Adapter && candidate.NativeSessionID == job.NativeSessionID {
+					return candidate, nil
+				}
+			}
+		}
+	}
+
+	return core.NativeSessionRecord{}, fmt.Errorf("%w: session %s has multiple resumable native sessions; specify --adapter", ErrInvalidInput, session.SessionID)
+}
+
+func lockKey(adapter, nativeSessionID string) string {
+	return "native:" + adapter + ":" + nativeSessionID
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
 func (s *Service) transitionJob(ctx context.Context, job *core.JobRecord, state core.JobState, payload map[string]any) error {
 	job.State = state
 	job.UpdatedAt = time.Now().UTC()
@@ -512,14 +857,15 @@ func (s *Service) emitEvent(
 	}
 
 	event := &core.EventRecord{
-		EventID:   core.GenerateID("evt"),
-		TS:        time.Now().UTC(),
-		JobID:     job.JobID,
-		SessionID: job.SessionID,
-		Adapter:   job.Adapter,
-		Kind:      kind,
-		Phase:     phase,
-		Payload:   encoded,
+		EventID:         core.GenerateID("evt"),
+		TS:              time.Now().UTC(),
+		JobID:           job.JobID,
+		SessionID:       job.SessionID,
+		Adapter:         job.Adapter,
+		Kind:            kind,
+		Phase:           phase,
+		NativeSessionID: job.NativeSessionID,
+		Payload:         encoded,
 	}
 
 	if err := s.store.AppendEvent(ctx, event); err != nil {

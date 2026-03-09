@@ -44,6 +44,17 @@ type SessionRecord struct {
 	Metadata       map[string]any `json:"metadata"`
 }
 
+type NativeSessionRecord struct {
+	SessionID       string         `json:"session_id"`
+	Adapter         string         `json:"adapter"`
+	NativeSessionID string         `json:"native_session_id"`
+	Resumable       bool           `json:"resumable"`
+	Metadata        map[string]any `json:"metadata"`
+	LockedByJobID   string         `json:"locked_by_job_id,omitempty"`
+	LockedAt        *time.Time     `json:"locked_at,omitempty"`
+	LockExpiresAt   *time.Time     `json:"lock_expires_at,omitempty"`
+}
+
 type JobRecord struct {
 	JobID           string         `json:"job_id"`
 	SessionID       string         `json:"session_id"`
@@ -57,6 +68,21 @@ type JobRecord struct {
 	FinishedAt      *time.Time     `json:"finished_at,omitempty"`
 	Summary         map[string]any `json:"summary"`
 	LastRawArtifact string         `json:"last_raw_artifact,omitempty"`
+}
+
+type TurnRecord struct {
+	TurnID          string         `json:"turn_id"`
+	SessionID       string         `json:"session_id"`
+	JobID           string         `json:"job_id"`
+	Adapter         string         `json:"adapter"`
+	StartedAt       time.Time      `json:"started_at"`
+	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
+	InputText       string         `json:"input_text"`
+	InputSource     string         `json:"input_source"`
+	ResultSummary   string         `json:"result_summary,omitempty"`
+	Status          string         `json:"status"`
+	NativeSessionID string         `json:"native_session_id,omitempty"`
+	Stats           map[string]any `json:"stats"`
 }
 
 type EventRecord struct {
@@ -82,4 +108,13 @@ type ArtifactRecord struct {
 	Path       string         `json:"path"`
 	CreatedAt  time.Time      `json:"created_at"`
 	Metadata   map[string]any `json:"metadata"`
+}
+
+type LockRecord struct {
+	LockKey         string     `json:"lock_key"`
+	Adapter         string     `json:"adapter"`
+	NativeSessionID string     `json:"native_session_id"`
+	JobID           string     `json:"job_id"`
+	AcquiredAt      time.Time  `json:"acquired_at"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 }

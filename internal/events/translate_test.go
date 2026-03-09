@@ -29,6 +29,18 @@ func TestTranslateFixtures(t *testing.T) {
 			fixture: filepath.Join("..", "..", "testdata", "fixtures", "claude", "success.jsonl"),
 			golden:  filepath.Join("..", "..", "testdata", "golden", "claude", "success.events.json"),
 		},
+		{
+			name:    "factory",
+			adapter: "factory",
+			fixture: filepath.Join("..", "..", "testdata", "fixtures", "factory", "success.jsonl"),
+			golden:  filepath.Join("..", "..", "testdata", "golden", "factory", "success.events.json"),
+		},
+		{
+			name:    "pi",
+			adapter: "pi",
+			fixture: filepath.Join("..", "..", "testdata", "fixtures", "pi", "success.jsonl"),
+			golden:  filepath.Join("..", "..", "testdata", "golden", "pi", "success.events.json"),
+		},
 	}
 
 	for _, tc := range cases {

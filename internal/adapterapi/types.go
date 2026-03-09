@@ -33,18 +33,30 @@ type Diagnosis struct {
 }
 
 type StartRunRequest struct {
-	CWD     string
-	Prompt  string
-	Model   string
-	Profile string
+	CanonicalSessionID string
+	CWD                string
+	Prompt             string
+	Model              string
+	Profile            string
+}
+
+type ContinueRunRequest struct {
+	CanonicalSessionID string
+	CWD                string
+	Prompt             string
+	Model              string
+	Profile            string
+	NativeSessionID    string
+	NativeSessionMeta  map[string]any
 }
 
 type RunHandle struct {
-	Cmd             *exec.Cmd
-	Stdout          io.ReadCloser
-	Stderr          io.ReadCloser
-	LastMessagePath string
-	Cleanup         func() error
+	Cmd               *exec.Cmd
+	Stdout            io.ReadCloser
+	Stderr            io.ReadCloser
+	LastMessagePath   string
+	NativeSessionMeta map[string]any
+	Cleanup           func() error
 }
 
 type Adapter interface {
@@ -54,6 +66,7 @@ type Adapter interface {
 	Binary() string
 	Detect(ctx context.Context) (Diagnosis, error)
 	StartRun(ctx context.Context, req StartRunRequest) (*RunHandle, error)
+	ContinueRun(ctx context.Context, req ContinueRunRequest) (*RunHandle, error)
 }
 
 func DetectVersion(ctx context.Context, binary string, args ...string) (*string, error) {

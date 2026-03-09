@@ -1,0 +1,4 @@
+{"type":"session.started","session_id":"factory-session-123"}
+{"type":"tool_call","tool":"bash","command":"pwd"}
+{"type":"tool_result","tool":"bash","exit_code":0,"stdout":"/tmp/work"}
+{"type":"completion","completion":{"finalText":"Factory completed the task"}}

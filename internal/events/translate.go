@@ -20,7 +20,7 @@ func TranslateLine(adapter, stream, line string) []Hint {
 
 	var hints []Hint
 
-	if nativeID := firstString(payload, "session_id", "conversation_id", "thread_id"); nativeID != "" {
+	if nativeID := extractNativeSessionID(payload); nativeID != "" {
 		hints = append(hints, Hint{
 			Kind:            "session.discovered",
 			Phase:           "translation",
@@ -55,26 +55,80 @@ func TranslateLine(adapter, stream, line string) []Hint {
 		})
 	}
 
+	hints = append(hints, extractToolHints(payload)...)
+
 	eventType := strings.ToLower(firstString(payload, "type", "event"))
-	switch {
-	case strings.Contains(eventType, "tool_call"), strings.Contains(eventType, "tool_use"):
-		hints = append(hints, Hint{
-			Kind:    "tool.call",
-			Phase:   "execution",
-			Payload: payload,
-		})
-	case strings.Contains(eventType, "tool_result"), strings.Contains(eventType, "tool_response"):
-		hints = append(hints, Hint{
-			Kind:    "tool.result",
-			Phase:   "execution",
-			Payload: payload,
-		})
-	case strings.Contains(eventType, "error"):
+	if strings.Contains(eventType, "error") {
 		hints = append(hints, Hint{
 			Kind:    "diagnostic",
 			Phase:   "translation",
 			Payload: payload,
 		})
+	}
+
+	return hints
+}
+
+func extractNativeSessionID(payload map[string]any) string {
+	if nativeID := firstString(payload, "session_id", "conversation_id", "thread_id"); nativeID != "" {
+		return nativeID
+	}
+
+	if strings.ToLower(firstString(payload, "type")) == "session" {
+		return firstString(payload, "id")
+	}
+
+	return ""
+}
+
+func extractToolHints(payload map[string]any) []Hint {
+	var hints []Hint
+
+	eventType := strings.ToLower(firstString(payload, "type", "event"))
+	switch {
+	case strings.Contains(eventType, "tool_call"), strings.Contains(eventType, "tool_use"):
+		hints = append(hints, Hint{Kind: "tool.call", Phase: "execution", Payload: payload})
+	case strings.Contains(eventType, "tool_result"), strings.Contains(eventType, "tool_response"):
+		hints = append(hints, Hint{Kind: "tool.result", Phase: "execution", Payload: payload})
+	}
+
+	if item, ok := payload["item"].(map[string]any); ok {
+		itemType := strings.ToLower(firstString(item, "type"))
+		switch itemType {
+		case "command_execution", "web_search", "collab_tool_call", "tool_call", "tool_use":
+			hints = append(hints, Hint{Kind: "tool.call", Phase: "execution", Payload: item})
+		case "command_execution_result", "web_search_result", "collab_tool_result", "tool_result", "tool_response":
+			hints = append(hints, Hint{Kind: "tool.result", Phase: "execution", Payload: item})
+		}
+	}
+
+	if message, ok := payload["message"].(map[string]any); ok {
+		hints = append(hints, extractToolHintsFromContent(message["content"])...)
+	}
+	hints = append(hints, extractToolHintsFromContent(payload["content"])...)
+
+	return hints
+}
+
+func extractToolHintsFromContent(value any) []Hint {
+	blocks, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+
+	var hints []Hint
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType := strings.ToLower(firstString(block, "type"))
+		switch {
+		case strings.Contains(blockType, "tool_use"):
+			hints = append(hints, Hint{Kind: "tool.call", Phase: "execution", Payload: block})
+		case strings.Contains(blockType, "tool_result"):
+			hints = append(hints, Hint{Kind: "tool.result", Phase: "execution", Payload: block})
+		}
 	}
 
 	return hints
@@ -92,6 +146,12 @@ func firstString(payload map[string]any, keys ...string) string {
 func extractDelta(payload map[string]any) string {
 	if value := firstString(payload, "delta", "text_delta", "content_delta"); value != "" {
 		return value
+	}
+
+	if event, ok := payload["assistantMessageEvent"].(map[string]any); ok {
+		if value := firstString(event, "delta", "content"); value != "" {
+			return value
+		}
 	}
 
 	if delta, ok := payload["delta"].(map[string]any); ok {
@@ -141,6 +201,16 @@ func extractAssistantMessage(payload map[string]any) string {
 		if value := firstString(payload, "result"); value != "" {
 			return value
 		}
+	}
+
+	if completion, ok := payload["completion"].(map[string]any); ok {
+		if value := firstString(completion, "finalText", "final_text", "text"); value != "" {
+			return value
+		}
+	}
+
+	if value := firstString(payload, "final_text", "finalText"); value != "" {
+		return value
 	}
 
 	return ""

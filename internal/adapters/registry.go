@@ -8,6 +8,8 @@ import (
 	"github.com/yusefmosiah/cagent/internal/adapterapi"
 	"github.com/yusefmosiah/cagent/internal/adapters/claude"
 	"github.com/yusefmosiah/cagent/internal/adapters/codex"
+	"github.com/yusefmosiah/cagent/internal/adapters/factory"
+	"github.com/yusefmosiah/cagent/internal/adapters/pi"
 	"github.com/yusefmosiah/cagent/internal/core"
 )
 
@@ -17,10 +19,10 @@ type Diagnosis = adapterapi.Diagnosis
 func CatalogFromConfig(cfg core.Config) []Diagnosis {
 	entries := []Diagnosis{
 		describeAdapter(context.Background(), claude.New(cfg.Adapters.Claude.Binary, cfg.Adapters.Claude.Enabled)),
-		describeStatic("factory", cfg.Adapters.Factory),
+		describeAdapter(context.Background(), factory.New(cfg.Adapters.Factory.Binary, cfg.Adapters.Factory.Enabled)),
 		describeStatic("gemini", cfg.Adapters.Gemini),
 		describeStatic("opencode", cfg.Adapters.OpenCode),
-		describeStatic("pi", cfg.Adapters.Pi),
+		describeAdapter(context.Background(), pi.New(cfg.Adapters.Pi.Binary, cfg.Adapters.Pi.Enabled)),
 		describeStatic("pi_rust", cfg.Adapters.PiRust),
 		describeAdapter(context.Background(), codex.New(cfg.Adapters.Codex.Binary, cfg.Adapters.Codex.Enabled)),
 	}
@@ -40,6 +42,10 @@ func Resolve(ctx context.Context, cfg core.Config, name string) (adapterapi.Adap
 		adapter = claude.New(cfg.Adapters.Claude.Binary, cfg.Adapters.Claude.Enabled)
 	case "codex":
 		adapter = codex.New(cfg.Adapters.Codex.Binary, cfg.Adapters.Codex.Enabled)
+	case "factory":
+		adapter = factory.New(cfg.Adapters.Factory.Binary, cfg.Adapters.Factory.Enabled)
+	case "pi":
+		adapter = pi.New(cfg.Adapters.Pi.Binary, cfg.Adapters.Pi.Enabled)
 	default:
 		return nil, Diagnosis{}, false
 	}

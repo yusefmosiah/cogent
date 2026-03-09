@@ -291,6 +291,43 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]core.JobRecord, erro
 	return jobs, nil
 }
 
+func (s *Store) ListJobsBySession(ctx context.Context, sessionID string, limit int) ([]core.JobRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT job_id, session_id, adapter, state, label, native_session_id, cwd,
+		        created_at, updated_at, finished_at, summary_json, last_raw_artifact
+		   FROM jobs
+		  WHERE session_id = ?
+		  ORDER BY created_at DESC
+		  LIMIT ?`,
+		sessionID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query jobs by session: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var jobs []core.JobRecord
+	for rows.Next() {
+		rec, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs by session: %w", err)
+	}
+
+	return jobs, nil
+}
+
 func (s *Store) AppendEvent(ctx context.Context, rec *core.EventRecord) error {
 	if len(rec.Payload) == 0 {
 		rec.Payload = json.RawMessage(`{}`)
@@ -412,22 +449,230 @@ func (s *Store) InsertArtifact(ctx context.Context, rec core.ArtifactRecord) err
 	return nil
 }
 
-func (s *Store) UpsertNativeSession(ctx context.Context, sessionID, adapter, nativeSessionID string, resumable bool) error {
-	_, err := s.db.ExecContext(
+func (s *Store) UpsertNativeSession(ctx context.Context, rec core.NativeSessionRecord) error {
+	metadata, err := marshalJSON(rec.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal native session metadata: %w", err)
+	}
+
+	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO native_sessions (session_id, adapter, native_session_id, resumable)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO native_sessions (session_id, adapter, native_session_id, resumable, metadata_json)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(session_id, adapter, native_session_id)
-		 DO UPDATE SET resumable = excluded.resumable`,
-		sessionID,
-		adapter,
-		nativeSessionID,
-		boolToInt(resumable),
+		 DO UPDATE SET resumable = excluded.resumable, metadata_json = excluded.metadata_json`,
+		rec.SessionID,
+		rec.Adapter,
+		rec.NativeSessionID,
+		boolToInt(rec.Resumable),
+		string(metadata),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert native session: %w", err)
 	}
 
+	return nil
+}
+
+func (s *Store) ListNativeSessions(ctx context.Context, sessionID string) ([]core.NativeSessionRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT ns.session_id, ns.adapter, ns.native_session_id, ns.resumable, ns.metadata_json,
+		        l.job_id, l.acquired_at, l.expires_at
+		   FROM native_sessions ns
+		   LEFT JOIN locks l
+		     ON l.lock_key = ('native:' || ns.adapter || ':' || ns.native_session_id)
+		  WHERE ns.session_id = ?
+		  ORDER BY ns.adapter ASC, ns.native_session_id ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query native sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sessions []core.NativeSessionRecord
+	for rows.Next() {
+		rec, err := scanNativeSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate native sessions: %w", err)
+	}
+
+	return sessions, nil
+}
+
+func (s *Store) CreateTurn(ctx context.Context, rec core.TurnRecord) error {
+	stats, err := marshalJSON(rec.Stats)
+	if err != nil {
+		return fmt.Errorf("marshal turn stats: %w", err)
+	}
+
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO turns (
+			turn_id, session_id, job_id, adapter, started_at, completed_at,
+			input_text, input_source, result_summary, status, native_session_id, stats_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.TurnID,
+		rec.SessionID,
+		rec.JobID,
+		rec.Adapter,
+		rec.StartedAt.UTC().Format(time.RFC3339Nano),
+		formatTimePtr(rec.CompletedAt),
+		rec.InputText,
+		rec.InputSource,
+		nullIfEmpty(rec.ResultSummary),
+		rec.Status,
+		nullIfEmpty(rec.NativeSessionID),
+		string(stats),
+	)
+	if err != nil {
+		return fmt.Errorf("insert turn: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) UpdateTurn(ctx context.Context, rec core.TurnRecord) error {
+	stats, err := marshalJSON(rec.Stats)
+	if err != nil {
+		return fmt.Errorf("marshal turn stats: %w", err)
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE turns
+		    SET completed_at = ?,
+		        result_summary = ?,
+		        status = ?,
+		        native_session_id = ?,
+		        stats_json = ?
+		  WHERE turn_id = ?`,
+		formatTimePtr(rec.CompletedAt),
+		nullIfEmpty(rec.ResultSummary),
+		rec.Status,
+		nullIfEmpty(rec.NativeSessionID),
+		string(stats),
+		rec.TurnID,
+	)
+	if err != nil {
+		return fmt.Errorf("update turn: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check updated turn rows: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: turn %s", ErrNotFound, rec.TurnID)
+	}
+
+	return nil
+}
+
+func (s *Store) ListTurnsBySession(ctx context.Context, sessionID string, limit int) ([]core.TurnRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT turn_id, session_id, job_id, adapter, started_at, completed_at,
+		        input_text, input_source, result_summary, status, native_session_id, stats_json
+		   FROM turns
+		  WHERE session_id = ?
+		  ORDER BY started_at DESC
+		  LIMIT ?`,
+		sessionID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query turns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var turns []core.TurnRecord
+	for rows.Next() {
+		rec, err := scanTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		turns = append(turns, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate turns: %w", err)
+	}
+
+	return turns, nil
+}
+
+func (s *Store) FindActiveJobBySession(ctx context.Context, sessionID string) (*core.JobRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT job_id, session_id, adapter, state, label, native_session_id, cwd,
+		        created_at, updated_at, finished_at, summary_json, last_raw_artifact
+		   FROM jobs
+		  WHERE session_id = ?
+		    AND state NOT IN ('completed', 'failed', 'cancelled', 'blocked')
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		sessionID,
+	)
+
+	rec, err := scanJob(row)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &rec, nil
+}
+
+func (s *Store) AcquireLock(ctx context.Context, rec core.LockRecord) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO locks (lock_key, adapter, native_session_id, job_id, acquired_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		rec.LockKey,
+		rec.Adapter,
+		rec.NativeSessionID,
+		rec.JobID,
+		rec.AcquiredAt.UTC().Format(time.RFC3339Nano),
+		formatTimePtr(rec.ExpiresAt),
+	)
+	if err != nil {
+		return fmt.Errorf("insert lock: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) GetLock(ctx context.Context, lockKey string) (core.LockRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT lock_key, adapter, native_session_id, job_id, acquired_at, expires_at
+		   FROM locks
+		  WHERE lock_key = ?`,
+		lockKey,
+	)
+
+	return scanLock(row)
+}
+
+func (s *Store) ReleaseLock(ctx context.Context, lockKey, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM locks WHERE lock_key = ? AND job_id = ?`, lockKey, jobID)
+	if err != nil {
+		return fmt.Errorf("delete lock: %w", err)
+	}
 	return nil
 }
 
@@ -544,6 +789,15 @@ func (s *Store) bootstrap(ctx context.Context) error {
 	for _, stmt := range statements {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("apply sqlite bootstrap statement: %w", err)
+		}
+	}
+
+	migrations := []string{
+		`ALTER TABLE native_sessions ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !ignorableSQLiteMigrationErr(err) {
+			return fmt.Errorf("apply sqlite migration: %w", err)
 		}
 	}
 
@@ -718,6 +972,145 @@ func scanEvent(scanner interface{ Scan(...any) error }) (core.EventRecord, error
 	return rec, nil
 }
 
+func scanTurn(scanner interface{ Scan(...any) error }) (core.TurnRecord, error) {
+	var rec core.TurnRecord
+	var startedAt string
+	var completedAt sql.NullString
+	var resultSummary sql.NullString
+	var nativeSessionID sql.NullString
+	var statsJSON string
+
+	if err := scanner.Scan(
+		&rec.TurnID,
+		&rec.SessionID,
+		&rec.JobID,
+		&rec.Adapter,
+		&startedAt,
+		&completedAt,
+		&rec.InputText,
+		&rec.InputSource,
+		&resultSummary,
+		&rec.Status,
+		&nativeSessionID,
+		&statsJSON,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.TurnRecord{}, ErrNotFound
+		}
+		return core.TurnRecord{}, fmt.Errorf("scan turn: %w", err)
+	}
+
+	started, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return core.TurnRecord{}, fmt.Errorf("parse turn started_at: %w", err)
+	}
+	rec.StartedAt = started
+	rec.ResultSummary = resultSummary.String
+	rec.NativeSessionID = nativeSessionID.String
+
+	if completedAt.Valid {
+		parsed, err := time.Parse(time.RFC3339Nano, completedAt.String)
+		if err != nil {
+			return core.TurnRecord{}, fmt.Errorf("parse turn completed_at: %w", err)
+		}
+		rec.CompletedAt = &parsed
+	}
+
+	if err := json.Unmarshal([]byte(statsJSON), &rec.Stats); err != nil {
+		return core.TurnRecord{}, fmt.Errorf("decode turn stats: %w", err)
+	}
+	if rec.Stats == nil {
+		rec.Stats = map[string]any{}
+	}
+
+	return rec, nil
+}
+
+func scanNativeSession(scanner interface{ Scan(...any) error }) (core.NativeSessionRecord, error) {
+	var rec core.NativeSessionRecord
+	var resumable int
+	var metadataJSON string
+	var lockedByJobID sql.NullString
+	var lockedAt sql.NullString
+	var lockExpiresAt sql.NullString
+
+	if err := scanner.Scan(
+		&rec.SessionID,
+		&rec.Adapter,
+		&rec.NativeSessionID,
+		&resumable,
+		&metadataJSON,
+		&lockedByJobID,
+		&lockedAt,
+		&lockExpiresAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.NativeSessionRecord{}, ErrNotFound
+		}
+		return core.NativeSessionRecord{}, fmt.Errorf("scan native session: %w", err)
+	}
+
+	rec.Resumable = resumable != 0
+	rec.LockedByJobID = lockedByJobID.String
+	if err := json.Unmarshal([]byte(metadataJSON), &rec.Metadata); err != nil {
+		return core.NativeSessionRecord{}, fmt.Errorf("decode native session metadata: %w", err)
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]any{}
+	}
+	if lockedAt.Valid {
+		parsed, err := time.Parse(time.RFC3339Nano, lockedAt.String)
+		if err != nil {
+			return core.NativeSessionRecord{}, fmt.Errorf("parse native session locked_at: %w", err)
+		}
+		rec.LockedAt = &parsed
+	}
+	if lockExpiresAt.Valid {
+		parsed, err := time.Parse(time.RFC3339Nano, lockExpiresAt.String)
+		if err != nil {
+			return core.NativeSessionRecord{}, fmt.Errorf("parse native session lock_expires_at: %w", err)
+		}
+		rec.LockExpiresAt = &parsed
+	}
+
+	return rec, nil
+}
+
+func scanLock(scanner interface{ Scan(...any) error }) (core.LockRecord, error) {
+	var rec core.LockRecord
+	var acquiredAt string
+	var expiresAt sql.NullString
+
+	if err := scanner.Scan(
+		&rec.LockKey,
+		&rec.Adapter,
+		&rec.NativeSessionID,
+		&rec.JobID,
+		&acquiredAt,
+		&expiresAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.LockRecord{}, ErrNotFound
+		}
+		return core.LockRecord{}, fmt.Errorf("scan lock: %w", err)
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, acquiredAt)
+	if err != nil {
+		return core.LockRecord{}, fmt.Errorf("parse lock acquired_at: %w", err)
+	}
+	rec.AcquiredAt = parsed
+	if expiresAt.Valid {
+		parsedExpiresAt, err := time.Parse(time.RFC3339Nano, expiresAt.String)
+		if err != nil {
+			return core.LockRecord{}, fmt.Errorf("parse lock expires_at: %w", err)
+		}
+		rec.ExpiresAt = &parsedExpiresAt
+	}
+
+	return rec, nil
+}
+
 func marshalJSON(value any) ([]byte, error) {
 	if value == nil {
 		return []byte("{}"), nil
@@ -768,6 +1161,15 @@ func retryableSQLiteErr(err error) bool {
 
 	text := err.Error()
 	return strings.Contains(text, "SQLITE_BUSY") || strings.Contains(text, "UNIQUE constraint failed: events.job_id, events.seq")
+}
+
+func ignorableSQLiteMigrationErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	text := err.Error()
+	return strings.Contains(text, "duplicate column name")
 }
 
 func boolToInt(value bool) int {
@@ -829,6 +1231,7 @@ CREATE TABLE IF NOT EXISTS native_sessions (
 	adapter TEXT NOT NULL,
 	native_session_id TEXT NOT NULL,
 	resumable INTEGER NOT NULL DEFAULT 0,
+	metadata_json TEXT NOT NULL DEFAULT '{}',
 	PRIMARY KEY (session_id, adapter, native_session_id)
 );
 

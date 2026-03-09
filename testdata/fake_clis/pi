@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+session_path=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version|-v)
+      printf '%s\n' 'fake-pi 0.0.1'
+      exit 0
+      ;;
+    --session)
+      shift
+      session_path="${1:-}"
+      ;;
+  esac
+  shift
+done
+
+mode="run"
+if [ -n "$session_path" ]; then
+  mkdir -p "$(dirname "$session_path")"
+  if [ -s "$session_path" ]; then
+    mode="continue"
+  fi
+  printf '%s\n' 'pi-session-123' > "$session_path"
+fi
+
+printf '%s\n' '{"type":"session","id":"pi-session-123"}'
+if [ "$mode" = "continue" ]; then
+  printf '%s\n' '{"type":"assistant","text":"Pi continued the task"}'
+else
+  printf '%s\n' '{"type":"assistant","text":"Pi completed the task"}'
+fi
