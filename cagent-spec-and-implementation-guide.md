@@ -22,7 +22,8 @@ workflow platform. It is a portable local control plane over coding-agent CLIs.
 
 The critical semantic rule is:
 - same-vendor continuation is `resume`
-- cross-vendor continuation is `handoff`
+- cross-vendor failover is `transfer`
+- model-authored self-summary is `debrief`
 
 `cagent` must preserve native vendor identities and raw artifacts, while also
 normalizing sessions, jobs, turns, and events into one canonical local model.
@@ -35,8 +36,8 @@ The implementation language should be Go.
 2. Declared the product as a standalone general-purpose CLI, not an embedded
    host-specific subsystem.
 3. Declared the CLI contract and JSON output as the primary public API.
-4. Declared same-vendor `resume` versus cross-vendor `handoff` as a hard rule.
-5. Defined canonical job, session, turn, handoff, and event schemas.
+4. Declared same-vendor `resume` versus cross-vendor `transfer` as a hard rule.
+5. Defined canonical job, session, turn, transfer, and event schemas.
 6. Defined the adapter contract and runtime model.
 7. Included implementation guidance for these adapters:
    - Codex
@@ -72,8 +73,8 @@ It must let callers do the following through one binary:
 - inspect status,
 - stream or read logs,
 - continue same-vendor sessions,
-- export cross-vendor handoffs,
-- launch new work from those handoffs,
+- export cross-vendor transfers,
+- launch new work from those transfers,
 - inspect capabilities and health,
 - preserve all raw vendor data needed for debugging.
 
@@ -89,9 +90,9 @@ It must let callers do the following through one binary:
 - Make the CLI safe and pleasant to invoke from `bash`.
 - Preserve native vendor session IDs, artifacts, and raw event streams.
 - Normalize vendor behavior into stable local schemas.
-- Support detached long-running work.
+- Support durable long-running background work.
 - Support same-vendor continuation where a vendor supports it.
-- Support cross-vendor continuation through explicit handoffs.
+- Support explicit cross-vendor transfer for failover and recovery.
 - Support human-readable output and machine-readable `--json`.
 - Be easy to package as a single installable binary.
 - Be feasible for another Codex to implement end-to-end with minimal ambiguity.
@@ -144,15 +145,22 @@ One user or caller input plus the assistant work it triggered.
 For some vendors, turns are explicit.
 For others, they must be reconstructed.
 
-### Handoff
+### Transfer
 
-A structured transfer packet for continuing work on a different adapter or in a
-fresh native session.
-Handoff is not resume.
+A structured host-authored context packet for continuing work on a different
+adapter or in a fresh native session.
+Transfer is not resume.
+Transfer must remain clearly labeled as context transfer, not native continuity.
+
+### Debrief
+
+A future model-authored "land the plane" export that asks a live source agent
+to summarize its world model for debugging or recovery.
+Debrief is optional and not required for transfer.
 
 ## Hard Rules
 
-1. Never call cross-vendor continuation `resume`.
+1. Never call cross-vendor transfer `resume`.
 2. Never drop the native session ID if one exists.
 3. Never drop raw vendor stdout/stderr or raw event payloads.
 4. Never permit concurrent sends into the same native session.
@@ -185,7 +193,7 @@ caller (human / bash / agent / CI)
 
 2. Service layer
    - job lifecycle
-   - session and handoff logic
+   - session and transfer logic
    - store access
    - locks and cancellation
 
@@ -199,7 +207,7 @@ caller (human / bash / agent / CI)
    - SQLite metadata
    - JSONL artifacts
    - raw stdout/stderr
-   - handoff exports
+   - transfer exports
 
 ## Implementation Language
 
@@ -281,11 +289,9 @@ cagent send
 cagent cancel
 cagent list
 cagent session
-cagent handoff export
-cagent handoff run
+cagent transfer export
+cagent transfer run
 cagent adapters
-cagent doctor
-cagent gc
 ```
 
 ### `cagent run`
@@ -305,7 +311,6 @@ Optional:
 - `--model`
 - `--profile`
 - `--config`
-- `--detached`
 - `--env-file`
 - `--artifact-dir`
 - `--session`
@@ -314,10 +319,10 @@ Optional:
 Behavior:
 - create canonical session if none supplied
 - create job row
-- launch vendor CLI
+- queue a background worker
 - capture raw stdout/stderr
 - translate canonical events
-- return immediately when detached
+- return immediately with job and session ids
 
 ### `cagent status`
 
@@ -361,30 +366,17 @@ Lists jobs or sessions with filters.
 Shows canonical session state, linked native sessions, recent turns, and
 available continuation actions.
 
-### `cagent handoff export`
+### `cagent transfer export`
 
-Exports a structured handoff packet.
+Exports a structured transfer packet.
 
-### `cagent handoff run`
+### `cagent transfer run`
 
-Starts a new job from a handoff packet on a target adapter.
+Starts a new job from a transfer packet on a target adapter.
 
 ### `cagent adapters`
 
 Lists installed/available adapters and their capability flags.
-
-### `cagent doctor`
-
-Checks:
-- CLI presence
-- version parsing
-- auth detection
-- expected environment variables
-- writable config/state dirs
-
-### `cagent gc`
-
-Garbage-collects old raw artifacts and optionally compacts the SQLite store.
 
 ## Exit Codes
 
@@ -515,7 +507,7 @@ Important rule:
   "started_at": "2026-03-09T12:01:00Z",
   "completed_at": "2026-03-09T12:05:00Z",
   "input_text": "Continue by fixing tests",
-  "input_source": "prompt|prompt_file|stdin|handoff",
+  "input_source": "prompt|prompt_file|stdin|transfer",
   "result_summary": "brief summary",
   "status": "completed",
   "native_session_id": "vendor-native-id-or-null",
@@ -526,31 +518,51 @@ Important rule:
 }
 ```
 
-## Handoff Packet Schema
+## Transfer Packet Schema
 
-Cross-vendor continuation must use this concept, not native resume.
+Cross-vendor failover must use this concept, not native resume.
 
 ```json
 {
-  "handoff_id": "hof_01...",
+  "transfer_id": "xfer_01...",
   "exported_at": "2026-03-09T12:40:00Z",
+  "mode": "recovery|operator_override|cost|capability|manual",
+  "reason": "anthropic outage during a long-running session",
+  "disclaimer": "This is a context transfer, not native session continuation.",
   "source": {
     "adapter": "codex",
+    "model": "gpt-5-codex",
     "job_id": "job_01...",
     "session_id": "ses_01...",
-    "native_session_id": "native-123"
+    "native_session_id": "native-123",
+    "cwd": "/abs/path/repo"
   },
   "objective": "Build the app and fix remaining tests",
-  "summary": "What has already been done",
+  "summary": "Compact host-authored working brief",
   "unresolved": [
     "Failing tests in foo/bar",
     "Need review of migration path"
   ],
+  "recent_turns_inline": [],
+  "recent_events_inline": [],
   "important_files": [
     "/abs/path/src/main.go",
     "/abs/path/pkg/store/store.go"
   ],
-  "recent_events": [],
+  "evidence_refs": [
+    {
+      "kind": "recent_turns_json",
+      "path": "/abs/path/.local/state/cagent/transfers/xfer_01/recent_turns.json"
+    },
+    {
+      "kind": "recent_events_jsonl",
+      "path": "/abs/path/.local/state/cagent/transfers/xfer_01/recent_events.jsonl"
+    },
+    {
+      "kind": "session_export",
+      "path": "/abs/path/.local/state/vendor/session.jsonl"
+    }
+  ],
   "artifacts": [],
   "constraints": [
     "Do not rewrite auth model",
@@ -883,7 +895,7 @@ Spec rule:
 
 v0 implementation choice:
 - one-shot CLI integration only if a stable non-interactive path is confirmed
-- otherwise implement as `doctor`-visible but unavailable
+- otherwise implement as unavailable
 
 Rationale:
 - `cagent` should document the adapter shape without pretending the archived
@@ -936,20 +948,30 @@ Once discovered:
 - spawn a new job attached to the same canonical session
 - call the adapter continuation path
 
-### Handoff
+### Transfer
 
-`handoff export` must:
+`transfer export` must:
 - gather recent turns
 - include important file references
 - include current unresolved goals
 - include relevant artifacts and diagnostics
-- avoid dumping massive raw transcript blobs by default
+- include explicit transfer metadata such as source adapter, source model if known, and reason
+- avoid dumping massive raw transcript blobs inline by default
+- prefer bundle files and path references when context is large
 
-`handoff run` must:
+`transfer run` must:
 - validate target adapter
 - create new canonical session or forked child session
-- store the handoff artifact
-- render the handoff into a prompt packet appropriate for the target adapter
+- store the transfer artifact
+- render the transfer into a clearly labeled prompt packet appropriate for the target adapter
+- disclose that this is context transfer, not native continuation
+
+### Debrief
+
+`debrief` is future work and must:
+- ask a still-live source agent to summarize its own world model
+- produce a structured artifact for debugging or recovery
+- remain optional and separate from transfer
 
 ## Output Contract
 
@@ -979,7 +1001,6 @@ Suggested `config.toml`:
 state_dir = "~/.local/state/cagent"
 
 [defaults]
-detached = true
 json = false
 
 [adapters.codex]
@@ -1093,8 +1114,6 @@ Each adapter must ship with:
 ### Milestone 5
 
 - OpenCode experimental adapter
-- `doctor`
-- `gc`
 - packaging and release automation
 
 ## Known Risks
