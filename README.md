@@ -86,6 +86,7 @@ Commands currently wired:
 - `cagent adapters`
 - `cagent catalog sync`
 - `cagent catalog show`
+- `cagent catalog probe`
 - `cagent runtime`
 - `cagent version`
 
@@ -170,6 +171,7 @@ Run:
 ./bin/cagent adapters --json
 ./bin/cagent catalog sync --json
 ./bin/cagent catalog show --json
+./bin/cagent catalog probe --json --adapter opencode --provider openai
 ./bin/cagent runtime --json
 ```
 
@@ -180,11 +182,13 @@ Run:
 Use:
 - `runtime` to answer "what adapter CLIs are installed and runnable?"
 - `catalog` to answer "what providers, models, and auth modes are available through them?"
+- `catalog probe` to answer "which discovered models are actually runnable for this local account/config right now?"
 
 Current first-pass behavior:
 - OpenCode, Pi, and Factory enumerate models from local CLI surfaces.
 - Claude and Codex primarily report auth mode plus selected/provider context.
 - Gemini currently reports auth mode conservatively from local environment and config signals.
+- `catalog show` reports discovered inventory, while `catalog probe` adds best-effort entitlement status like `runnable`, `unsupported_by_plan`, and `hung_or_unstable`.
 - Pricing is best-effort, provenance-carrying, and not authoritative; auth mode and billing class remain the primary routing signals.
 
 ## Usage And Cost Reporting

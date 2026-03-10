@@ -332,6 +332,7 @@ cagent list
 cagent session
 cagent catalog sync
 cagent catalog show
+cagent catalog probe
 cagent transfer export
 cagent transfer run
 cagent adapters
@@ -455,6 +456,18 @@ Rules:
 - must clearly distinguish runtime readiness from catalog availability
 - must include auth mode per entry when known
 - should include pricing metadata only when provenance is clear
+
+### `cagent catalog probe`
+
+Runs best-effort entitlement probes against discovered catalog entries and records
+whether they appear runnable for the current local account/configuration.
+
+Rules:
+- must be explicit and operator-invoked, not part of normal `catalog sync`
+- must support filtering by adapter, provider, and model
+- must persist probe timestamp and last probe outcome on the catalog entry
+- must distinguish at minimum `runnable`, `unsupported_by_plan`, `failed`, and `hung_or_unstable`
+- must not treat discovered inventory as implied entitlement
 
 ### `cagent transfer export`
 

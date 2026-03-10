@@ -16,8 +16,16 @@ EOF
 fi
 if [ "${1:-}" = "models" ]; then
   cat <<'EOF'
+opencode/big-pickle
+opencode/gpt-5-nano
+opencode/mimo-v2-flash-free
+opencode/minimax-m2.5-free
+openai/codex-mini-latest
 openai/gpt-5-nano
+openai/gpt-5.3-codex-spark
 zai/glm-5
+zai-coding-plan/glm-4.5v
+zai-coding-plan/glm-4.7-flashx
 openrouter/openai/gpt-4o-mini
 EOF
   exit 0
@@ -25,6 +33,7 @@ fi
 
 session_id="opencode-session-123"
 continued="false"
+model=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session|-s)
@@ -32,12 +41,23 @@ while [ "$#" -gt 0 ]; do
       session_id="${1:-opencode-session-123}"
       continued="true"
       ;;
+    --model|-m)
+      shift
+      model="${1:-}"
+      ;;
   esac
   shift
 done
 
 printf '%s\n' "{\"type\":\"step_start\",\"sessionID\":\"$session_id\",\"part\":{\"type\":\"step-start\"}}"
-if [ "$continued" = "true" ]; then
+if [ "$model" = "openai/gpt-5.3-codex-spark" ] || [ "$model" = "openai/codex-mini-latest" ]; then
+  printf '%s\n' "{\"type\":\"error\",\"sessionID\":\"$session_id\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"The '$model' model is not supported when using Codex with a ChatGPT account.\"}}}"
+elif [ "$model" = "zai-coding-plan/glm-4.7-flashx" ]; then
+  sleep 35
+elif [ "$model" = "zai-coding-plan/glm-4.5v" ]; then
+  printf '%s\n' "{\"type\":\"text\",\"sessionID\":\"$session_id\",\"part\":{\"type\":\"text\",\"text\":\"question: What is the primary function of Opencode?\"}}"
+  printf '%s\n' "{\"type\":\"step_finish\",\"sessionID\":\"$session_id\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":11821,\"input\":11698,\"output\":71,\"cache\":{\"read\":52,\"write\":0}},\"cost\":0}}"
+elif [ "$continued" = "true" ]; then
   printf '%s\n' "{\"type\":\"text\",\"sessionID\":\"$session_id\",\"part\":{\"type\":\"text\",\"text\":\"OpenCode continued the task\"}}"
 else
   printf '%s\n' "{\"type\":\"text\",\"sessionID\":\"$session_id\",\"part\":{\"type\":\"text\",\"text\":\"OpenCode completed the task\"}}"

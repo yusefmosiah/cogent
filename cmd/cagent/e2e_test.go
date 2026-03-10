@@ -101,6 +101,8 @@ type cliCatalogEntry struct {
 	Model        string `json:"model"`
 	AuthMethod   string `json:"auth_method"`
 	BillingClass string `json:"billing_class"`
+	ProbeStatus  string `json:"probe_status"`
+	ProbeMessage string `json:"probe_message"`
 	Pricing      *struct {
 		InputUSDPerMTok    float64 `json:"input_usd_per_mtok"`
 		OutputUSDPerMTok   float64 `json:"output_usd_per_mtok"`
@@ -389,6 +391,46 @@ func TestCatalogSyncAndShow(t *testing.T) {
 				t.Fatalf("expected pricing on catalog entry, got %+v", entry)
 			}
 		}
+	}
+}
+
+func TestCatalogProbeClassifiesEntries(t *testing.T) {
+	binary := buildCagentBinary(t)
+	configPath := writeFakeCatalogConfig(t)
+
+	probeOutput := runCagent(t, binary, configPath, "--json", "catalog", "probe", "--adapter", "opencode", "--provider", "openai", "--model", "gpt-5.3-codex-spark", "--timeout", "2s")
+	var probed cliCatalogResult
+	if err := json.Unmarshal([]byte(probeOutput), &probed); err != nil {
+		t.Fatalf("unmarshal catalog probe: %v\n%s", err, probeOutput)
+	}
+	foundUnsupported := false
+	for _, entry := range probed.Snapshot.Entries {
+		if entry.Adapter == "opencode" && entry.Provider == "openai" && entry.Model == "gpt-5.3-codex-spark" {
+			foundUnsupported = true
+			if entry.ProbeStatus != "unsupported_by_plan" {
+				t.Fatalf("expected unsupported_by_plan, got %+v", entry)
+			}
+		}
+	}
+	if !foundUnsupported {
+		t.Fatal("missing probed openai/gpt-5.3-codex-spark entry")
+	}
+
+	timeoutOutput := runCagent(t, binary, configPath, "--json", "catalog", "probe", "--adapter", "opencode", "--provider", "zai-coding-plan", "--model", "glm-4.7-flashx", "--timeout", "2s")
+	if err := json.Unmarshal([]byte(timeoutOutput), &probed); err != nil {
+		t.Fatalf("unmarshal timeout probe: %v\n%s", err, timeoutOutput)
+	}
+	foundTimeout := false
+	for _, entry := range probed.Snapshot.Entries {
+		if entry.Adapter == "opencode" && entry.Provider == "zai-coding-plan" && entry.Model == "glm-4.7-flashx" {
+			foundTimeout = true
+			if entry.ProbeStatus != "hung_or_unstable" {
+				t.Fatalf("expected hung_or_unstable, got %+v", entry)
+			}
+		}
+	}
+	if !foundTimeout {
+		t.Fatal("missing probed zai-coding-plan/glm-4.7-flashx entry")
 	}
 }
 

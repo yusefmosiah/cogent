@@ -651,47 +651,94 @@ func newRuntimeCommand(root *rootOptions, use, short string, hidden bool) *cobra
 }
 
 func newCatalogCommand(root *rootOptions) *cobra.Command {
+	probeOpts := &struct {
+		adapter     string
+		provider    string
+		model       string
+		cwd         string
+		prompt      string
+		timeout     time.Duration
+		concurrency int
+		limit       int
+	}{}
+
 	cmd := &cobra.Command{
 		Use:   "catalog",
 		Short: "Discover and show provider/model inventory",
 	}
 
-	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "sync",
-			Short: "Refresh the discovered provider/model catalog",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				svc, err := service.Open(context.Background(), root.configPath)
-				if err != nil {
-					return err
-				}
-				defer func() { _ = svc.Close() }()
+	syncCmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Refresh the discovered provider/model catalog",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
 
-				result, err := svc.SyncCatalog(context.Background())
-				if err != nil {
-					return mapServiceError(err)
-				}
-				return renderCatalog(cmd, root.jsonOutput, result)
-			},
+			result, err := svc.SyncCatalog(context.Background())
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderCatalog(cmd, root.jsonOutput, result)
 		},
-		&cobra.Command{
-			Use:   "show",
-			Short: "Show the latest discovered provider/model catalog",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				svc, err := service.Open(context.Background(), root.configPath)
-				if err != nil {
-					return err
-				}
-				defer func() { _ = svc.Close() }()
+	}
 
-				result, err := svc.Catalog(context.Background())
-				if err != nil {
-					return mapServiceError(err)
-				}
-				return renderCatalog(cmd, root.jsonOutput, result)
-			},
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show the latest discovered provider/model catalog",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			result, err := svc.Catalog(context.Background())
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderCatalog(cmd, root.jsonOutput, result)
 		},
-	)
+	}
+
+	probeCmd := &cobra.Command{
+		Use:   "probe",
+		Short: "Run short entitlement probes against catalog entries",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			result, err := svc.ProbeCatalog(context.Background(), service.ProbeCatalogRequest{
+				Adapter:     probeOpts.adapter,
+				Provider:    probeOpts.provider,
+				Model:       probeOpts.model,
+				CWD:         probeOpts.cwd,
+				Prompt:      probeOpts.prompt,
+				Timeout:     probeOpts.timeout,
+				Concurrency: probeOpts.concurrency,
+				Limit:       probeOpts.limit,
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderCatalog(cmd, root.jsonOutput, result)
+		},
+	}
+
+	cmd.AddCommand(syncCmd, showCmd, probeCmd)
+	probeCmd.Flags().StringVar(&probeOpts.adapter, "adapter", "", "limit probes to one adapter")
+	probeCmd.Flags().StringVar(&probeOpts.provider, "provider", "", "limit probes to one provider")
+	probeCmd.Flags().StringVar(&probeOpts.model, "model", "", "limit probes to one model name")
+	probeCmd.Flags().StringVar(&probeOpts.cwd, "cwd", ".", "working directory for the probe run")
+	probeCmd.Flags().StringVar(&probeOpts.prompt, "prompt", "", "probe prompt (defaults to a trivial OK probe)")
+	probeCmd.Flags().DurationVar(&probeOpts.timeout, "timeout", 30*time.Second, "maximum time to wait per probe")
+	probeCmd.Flags().IntVar(&probeOpts.concurrency, "concurrency", 4, "number of concurrent probes")
+	probeCmd.Flags().IntVar(&probeOpts.limit, "limit", 0, "maximum number of matching entries to probe")
 
 	return cmd
 }
@@ -1252,9 +1299,13 @@ func renderCatalog(cmd *cobra.Command, jsonOutput bool, result *service.CatalogR
 		if entry.Pricing != nil && (entry.Pricing.InputUSDPerMTok > 0 || entry.Pricing.OutputUSDPerMTok > 0) {
 			pricingText = fmt.Sprintf("in=$%.3f/M out=$%.3f/M", entry.Pricing.InputUSDPerMTok, entry.Pricing.OutputUSDPerMTok)
 		}
+		probeText := emptyDash(entry.ProbeStatus)
+		if entry.ProbeStatus != "" && entry.ProbeMessage != "" {
+			probeText = entry.ProbeStatus + ":" + entry.ProbeMessage
+		}
 		if err := writef(
 			cmd.OutOrStdout(),
-			"%s\t%s\t%s\tselected=%t\tauth=%s\tbilling=%s\tpricing=%s\tsource=%s\n",
+			"%s\t%s\t%s\tselected=%t\tauth=%s\tbilling=%s\tpricing=%s\tprobe=%s\tsource=%s\n",
 			entry.Adapter,
 			emptyDash(entry.Provider),
 			emptyDash(entry.Model),
@@ -1262,6 +1313,7 @@ func renderCatalog(cmd *cobra.Command, jsonOutput bool, result *service.CatalogR
 			emptyDash(entry.AuthMethod),
 			emptyDash(entry.BillingClass),
 			pricingText,
+			probeText,
 			emptyDash(entry.Source),
 		); err != nil {
 			return err

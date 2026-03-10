@@ -18,6 +18,7 @@ Use it when the host agent wants:
 cagent runtime --json
 cagent catalog sync --json
 cagent catalog show --json
+cagent catalog probe --json --adapter opencode --provider openai
 ```
 
 2. Choose an adapter based on:
@@ -75,6 +76,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter codex --cw
 - `cagent` preserves native session IDs and raw vendor output.
 - `runtime --json` is the preferred machine-facing inventory command.
 - `catalog show --json` is the preferred machine-facing provider/model inventory command.
+- `catalog probe --json` is the preferred machine-facing entitlement check when discovery alone is not enough.
 - Use `status`, `logs --follow`, `session`, and `cancel` as the control surface after launch.
 - Use `status --wait` when the host wants a blocking wait without writing its own polling loop.
 - Use `status --json` when routing or debugging based on token usage or cost.
@@ -82,3 +84,4 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter codex --cw
 - Use `debrief` when you want the current agent to summarize itself before recovery or debugging.
 - Treat `transfer` as explicit failover/recovery, not as the normal orchestration path.
 - The transfer prompt should explicitly disclose the source adapter and reason for transfer.
+- Treat `catalog show` as discoverability and `catalog probe` as best-effort runnability verification.

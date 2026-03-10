@@ -166,6 +166,10 @@ type CatalogEntry struct {
 	Source       string            `json:"source,omitempty"`
 	Provenance   CatalogProvenance `json:"provenance"`
 	Pricing      *ModelPricing     `json:"pricing,omitempty"`
+	ProbeStatus  string            `json:"probe_status,omitempty"`
+	ProbeMessage string            `json:"probe_message,omitempty"`
+	ProbeJobID   string            `json:"probe_job_id,omitempty"`
+	ProbeAt      *time.Time        `json:"probe_at,omitempty"`
 	Metadata     map[string]any    `json:"metadata,omitempty"`
 }
 

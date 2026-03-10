@@ -262,6 +262,56 @@ func TestClaudeRunStatusUsesVendorCost(t *testing.T) {
 	}
 }
 
+func TestOpenCodeStructuredErrorMarksJobFailed(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+
+	fakeBinary, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	if err := os.Chmod(fakeBinary, 0o755); err != nil {
+		t.Fatalf("chmod fake opencode: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[adapters.opencode]\nbinary = \"" + fakeBinary + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	result, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "opencode",
+		Model:        "openai/gpt-5.3-codex-spark",
+		CWD:          t.TempDir(),
+		Prompt:       "Reply with exactly OK and nothing else.",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	status := waitForTerminalStatus(t, svc, result.Job.JobID)
+	if status.Job.State != core.JobStateFailed {
+		t.Fatalf("expected failed status, got %s", status.Job.State)
+	}
+	if !strings.Contains(strings.ToLower(summaryString(status.Job.Summary, "message")), "not supported") {
+		t.Fatalf("expected unsupported-model message, got %+v", status.Job.Summary)
+	}
+}
+
 func TestWaitStatusReturnsTerminalState(t *testing.T) {
 	stateDir := t.TempDir()
 	configDir := t.TempDir()
@@ -882,6 +932,67 @@ func TestSyncAndShowCatalog(t *testing.T) {
 				t.Fatalf("expected pricing on catalog entry, got %+v", entry)
 			}
 		}
+	}
+}
+
+func TestProbeCatalogClassifiesEntries(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
+
+	fakeOpenCode, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	if err := os.Chmod(fakeOpenCode, 0o755); err != nil {
+		t.Fatalf("chmod fake opencode: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[store]\nstate_dir = \"" + stateDir + "\"\n\n[adapters.opencode]\nbinary = \"" + fakeOpenCode + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	if _, err := svc.SyncCatalog(context.Background()); err != nil {
+		t.Fatalf("SyncCatalog returned error: %v", err)
+	}
+
+	result, err := svc.ProbeCatalog(context.Background(), ProbeCatalogRequest{
+		Adapter:     "opencode",
+		Provider:    "openai",
+		Model:       "gpt-5.3-codex-spark",
+		CWD:         t.TempDir(),
+		Timeout:     2 * time.Second,
+		Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ProbeCatalog returned error: %v", err)
+	}
+
+	found := false
+	for _, entry := range result.Snapshot.Entries {
+		if entry.Adapter == "opencode" && entry.Provider == "openai" && entry.Model == "gpt-5.3-codex-spark" {
+			found = true
+			if entry.ProbeStatus != "unsupported_by_plan" {
+				t.Fatalf("expected unsupported_by_plan, got %+v", entry)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing probed catalog entry")
 	}
 }
 

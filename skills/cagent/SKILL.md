@@ -26,6 +26,7 @@ Typical cases:
 cagent runtime --json
 cagent catalog sync --json
 cagent catalog show --json
+cagent catalog probe --json --adapter opencode --provider openai
 ```
 
 2. Choose an adapter using:
@@ -81,6 +82,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 
 - Prefer `runtime --json` as the machine-facing inventory command.
 - Prefer `catalog show --json` when choosing among providers/models and auth modes.
+- Prefer `catalog probe --json` when listed models may not match actual plan entitlement.
 - Prefer `status --json` when you need normalized token usage or cost for a completed job.
 - Treat `cagent` as machine-facing first. Use `--json` unless a human-readable summary is explicitly better.
 - Treat `run`, `send`, and `transfer run` as launch operations, not blocking operations.
@@ -92,6 +94,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 - Do not expect `cagent` to perform vendor auth flows for you.
 - Persisted session history and raw artifacts are part of the intended model.
 - Prefer fresh `run` jobs for normal orchestration; use `transfer` for failover/recovery.
+- Treat `catalog show` as discovered inventory and `catalog probe` as a best-effort entitlement/runability check.
 
 ## Adapter selection heuristics
 

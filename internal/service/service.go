@@ -165,6 +165,17 @@ type CatalogResult struct {
 	Snapshot core.CatalogSnapshot `json:"snapshot"`
 }
 
+type ProbeCatalogRequest struct {
+	Adapter     string
+	Provider    string
+	Model       string
+	CWD         string
+	Prompt      string
+	Timeout     time.Duration
+	Concurrency int
+	Limit       int
+}
+
 type RawLogEntry struct {
 	Stream  string `json:"stream"`
 	Path    string `json:"path"`
@@ -604,10 +615,7 @@ func (s *Service) Runtime(ctx context.Context, adapterName string) (*RuntimeResu
 
 func (s *Service) SyncCatalog(ctx context.Context) (*CatalogResult, error) {
 	snapshot := catalogpkg.Snapshot(ctx, s.Config, nil)
-	for idx := range snapshot.Entries {
-		entry := &snapshot.Entries[idx]
-		entry.Pricing = pricing.Resolve(s.Config, entry.Provider, entry.Model)
-	}
+	s.annotateCatalogSnapshot(&snapshot)
 	if err := s.store.CreateCatalogSnapshot(ctx, snapshot); err != nil {
 		return nil, err
 	}
@@ -623,6 +631,81 @@ func (s *Service) Catalog(ctx context.Context) (*CatalogResult, error) {
 		return nil, err
 	}
 	return &CatalogResult{Snapshot: snapshot}, nil
+}
+
+func (s *Service) ProbeCatalog(ctx context.Context, req ProbeCatalogRequest) (*CatalogResult, error) {
+	snapshot, err := s.catalogSnapshotOrSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := filterCatalogEntries(snapshot.Entries, req)
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("%w: no catalog entries matched probe filters", ErrNotFound)
+	}
+	if req.Limit > 0 && len(entries) > req.Limit {
+		entries = entries[:req.Limit]
+	}
+
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	concurrency := req.Concurrency
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+
+	type result struct {
+		key   string
+		entry core.CatalogEntry
+		issue *core.CatalogIssue
+	}
+	workCh := make(chan core.CatalogEntry)
+	resultCh := make(chan result, len(entries))
+	var wg sync.WaitGroup
+	for idx := 0; idx < concurrency; idx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for entry := range workCh {
+				probed, issue := s.probeCatalogEntry(ctx, entry, req, timeout)
+				resultCh <- result{key: catalogEntryKey(entry), entry: probed, issue: issue}
+			}
+		}()
+	}
+	go func() {
+		for _, entry := range entries {
+			workCh <- entry
+		}
+		close(workCh)
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	updated := snapshot
+	updated.SnapshotID = core.GenerateID("cat")
+	updated.CreatedAt = time.Now().UTC()
+	updated.Entries = append([]core.CatalogEntry(nil), snapshot.Entries...)
+	updated.Issues = append([]core.CatalogIssue(nil), snapshot.Issues...)
+
+	index := map[string]int{}
+	for idx, entry := range updated.Entries {
+		index[catalogEntryKey(entry)] = idx
+	}
+	for item := range resultCh {
+		if idx, ok := index[item.key]; ok {
+			updated.Entries[idx] = item.entry
+		}
+		if item.issue != nil {
+			updated.Issues = append(updated.Issues, *item.issue)
+		}
+	}
+	s.annotateCatalogSnapshot(&updated)
+	if err := s.store.CreateCatalogSnapshot(ctx, updated); err != nil {
+		return nil, err
+	}
+	return &CatalogResult{Snapshot: updated}, nil
 }
 
 func (s *Service) ExportTransfer(ctx context.Context, req TransferExportRequest) (*TransferExportResult, error) {
@@ -959,7 +1042,7 @@ func (s *Service) Cancel(ctx context.Context, jobID string) (*core.JobRecord, er
 	}
 
 	signals := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
-	delays := []time.Duration{1500 * time.Millisecond, 1500 * time.Millisecond, 0}
+	delays := []time.Duration{1500 * time.Millisecond, 1500 * time.Millisecond, 1500 * time.Millisecond}
 	for idx, sig := range signals {
 		if runtimeErr == nil {
 			if runtimeRec.VendorPID != 0 {
@@ -967,10 +1050,6 @@ func (s *Service) Cancel(ctx context.Context, jobID string) (*core.JobRecord, er
 			} else if runtimeRec.SupervisorPID != 0 {
 				_ = signalProcessGroup(runtimeRec.SupervisorPID, sig)
 			}
-		}
-
-		if delays[idx] == 0 {
-			break
 		}
 		waitUntil := time.Now().Add(delays[idx])
 		for time.Now().Before(waitUntil) {
@@ -1253,6 +1332,7 @@ func (s *Service) executeAdapter(
 	}()
 
 	var lastAssistant string
+	var translatedError string
 	for item := range lineCh {
 		if _, err := s.emitEvent(ctx, *job, "process."+item.stream, "execution", map[string]any{
 			"line": item.line,
@@ -1302,6 +1382,9 @@ func (s *Service) executeAdapter(
 					return lastAssistant, err
 				}
 			}
+			if hint.Kind == "diagnostic" && translatedError == "" {
+				translatedError = diagnosticMessage(hint.Payload)
+			}
 		}
 	}
 
@@ -1329,6 +1412,9 @@ func (s *Service) executeAdapter(
 			return lastAssistant, err
 		}
 		return lastAssistant, fmt.Errorf("%w: %v", ErrVendorProcess, waitErr)
+	}
+	if translatedError != "" && lastAssistant == "" {
+		return translatedError, fmt.Errorf("%w: %s", ErrVendorProcess, translatedError)
 	}
 
 	if lastAssistant == "" {
@@ -1728,6 +1814,181 @@ func summaryString(summary map[string]any, key string) string {
 	}
 	value, _ := summary[key].(string)
 	return value
+}
+
+func diagnosticMessage(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if message := summaryString(payload, "message"); message != "" {
+		return message
+	}
+	if errValue, ok := payload["error"].(map[string]any); ok {
+		if data, ok := errValue["data"].(map[string]any); ok {
+			if message := summaryString(data, "message"); message != "" {
+				return message
+			}
+		}
+	}
+	return ""
+}
+
+func (s *Service) annotateCatalogSnapshot(snapshot *core.CatalogSnapshot) {
+	for idx := range snapshot.Entries {
+		entry := &snapshot.Entries[idx]
+		entry.Pricing = pricing.Resolve(s.Config, entry.Provider, entry.Model)
+	}
+}
+
+func (s *Service) catalogSnapshotOrSync(ctx context.Context) (core.CatalogSnapshot, error) {
+	snapshot, err := s.store.LatestCatalogSnapshot(ctx)
+	if err == nil {
+		return snapshot, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return core.CatalogSnapshot{}, err
+	}
+	result, err := s.SyncCatalog(ctx)
+	if err != nil {
+		return core.CatalogSnapshot{}, err
+	}
+	return result.Snapshot, nil
+}
+
+func filterCatalogEntries(entries []core.CatalogEntry, req ProbeCatalogRequest) []core.CatalogEntry {
+	filtered := make([]core.CatalogEntry, 0, len(entries))
+	for _, entry := range entries {
+		if req.Adapter != "" && entry.Adapter != req.Adapter {
+			continue
+		}
+		if req.Provider != "" && entry.Provider != req.Provider {
+			continue
+		}
+		if req.Model != "" && entry.Model != req.Model {
+			continue
+		}
+		if entry.Model == "" || !entry.Available {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func catalogEntryKey(entry core.CatalogEntry) string {
+	return strings.Join([]string{entry.Adapter, entry.Provider, entry.Model}, "|")
+}
+
+func (s *Service) probeCatalogEntry(ctx context.Context, entry core.CatalogEntry, req ProbeCatalogRequest, timeout time.Duration) (core.CatalogEntry, *core.CatalogIssue) {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		prompt = "Reply with exactly OK and nothing else."
+	}
+	cwd := req.CWD
+	if cwd == "" {
+		cwd = "."
+	}
+	model := probeModelArg(entry)
+	startedAt := time.Now().UTC()
+	entry.ProbeAt = &startedAt
+	entry.ProbeStatus = "launching"
+	entry.ProbeMessage = ""
+	entry.ProbeJobID = ""
+
+	runResult, runErr := s.Run(probeCtx, RunRequest{
+		Adapter:      entry.Adapter,
+		Model:        model,
+		CWD:          cwd,
+		Prompt:       prompt,
+		PromptSource: "catalog_probe",
+		Label:        "catalog probe",
+	})
+	if runErr != nil {
+		entry.ProbeStatus = "launch_error"
+		entry.ProbeMessage = runErr.Error()
+		return entry, &core.CatalogIssue{
+			Adapter:  entry.Adapter,
+			Severity: "warning",
+			Message:  fmt.Sprintf("catalog probe launch failed for %s/%s: %v", entry.Provider, entry.Model, runErr),
+		}
+	}
+
+	entry.ProbeJobID = runResult.Job.JobID
+	status, waitErr := s.WaitStatus(probeCtx, runResult.Job.JobID, 250*time.Millisecond, timeout)
+	if waitErr != nil {
+		entry.ProbeStatus = "hung_or_unstable"
+		entry.ProbeMessage = waitErr.Error()
+		return entry, nil
+	}
+
+	classification, message := classifyProbeOutcome(status)
+	entry.ProbeStatus = classification
+	entry.ProbeMessage = message
+	return entry, nil
+}
+
+func probeModelArg(entry core.CatalogEntry) string {
+	if entry.Model == "" {
+		return ""
+	}
+	switch entry.Adapter {
+	case "opencode":
+		if entry.Provider != "" {
+			return entry.Provider + "/" + entry.Model
+		}
+	}
+	return entry.Model
+}
+
+func classifyProbeOutcome(status *StatusResult) (string, string) {
+	if status == nil {
+		return "provider_error", ""
+	}
+	message := summaryString(status.Job.Summary, "message")
+	eventsText := strings.ToLower(message)
+	for _, event := range status.Events {
+		eventsText += " " + strings.ToLower(string(event.Payload))
+	}
+
+	switch {
+	case strings.Contains(eventsText, "not supported when using codex with a chatgpt account"),
+		strings.Contains(eventsText, "not supported"),
+		strings.Contains(eventsText, "unsupported"),
+		strings.Contains(eventsText, "plan"):
+		if message == "" {
+			message = "unsupported by current account or plan"
+		}
+		return "unsupported_by_plan", message
+	case status.Job.State == core.JobStateFailed:
+		if message == "" {
+			message = "provider-side failure"
+		}
+		return "provider_error", message
+	}
+
+	trimmed := strings.TrimSpace(message)
+	if status.Job.State == core.JobStateCompleted && trimmed == "OK" {
+		return "runnable", message
+	}
+	if status.Job.State == core.JobStateCompleted {
+		if message == "" {
+			message = "completed without the expected probe response"
+		}
+		return "hung_or_unstable", message
+	}
+	if status.Job.State == core.JobStateCancelled {
+		if message == "" {
+			message = "probe cancelled"
+		}
+		return "hung_or_unstable", message
+	}
+	if message == "" {
+		message = string(status.Job.State)
+	}
+	return "provider_error", message
 }
 
 func (s *Service) applyUsageHint(ctx context.Context, job *core.JobRecord, payload map[string]any) error {
