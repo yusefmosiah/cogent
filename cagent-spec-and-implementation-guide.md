@@ -25,6 +25,11 @@ The critical semantic rule is:
 - cross-vendor failover is `transfer`
 - model-authored self-summary is `debrief`
 
+The critical inventory rule is:
+- `runtime` reports local executable and adapter readiness
+- `catalog` reports discovered providers, models, and auth/billing mode
+- subscription-backed CLIs and usage-priced API credentials must not be conflated
+
 `cagent` must preserve native vendor identities and raw artifacts, while also
 normalizing sessions, jobs, turns, and events into one canonical local model.
 
@@ -47,6 +52,7 @@ The implementation language should be Go.
    - Gemini CLI
    - OpenCode
 8. Added implementation order, testing strategy, and packaging guidance.
+9. Added a staged low-cost test matrix and a future provider/model catalog.
 
 ## What To Do Next
 
@@ -76,6 +82,7 @@ It must let callers do the following through one binary:
 - export cross-vendor transfers,
 - launch new work from those transfers,
 - inspect capabilities and health,
+- inspect discovered providers, models, and auth mode,
 - preserve all raw vendor data needed for debugging.
 
 `cagent` must not:
@@ -93,6 +100,8 @@ It must let callers do the following through one binary:
 - Support durable long-running background work.
 - Support same-vendor continuation where a vendor supports it.
 - Support explicit cross-vendor transfer for failover and recovery.
+- Expose discovered provider/model inventory for host-agent routing.
+- Distinguish subscription-backed CLI access from usage-priced API access.
 - Support human-readable output and machine-readable `--json`.
 - Be easy to package as a single installable binary.
 - Be feasible for another Codex to implement end-to-end with minimal ambiguity.
@@ -158,6 +167,29 @@ A future model-authored "land the plane" export that asks a live source agent
 to summarize its world model for debugging or recovery.
 Debrief is optional and not required for transfer.
 
+### Runtime
+
+Local execution readiness and installed adapter inventory.
+Examples:
+- binary availability
+- detected adapter version
+- capability flags
+- configured traits
+
+### Catalog
+
+A discovered inventory of providers, models, and auth/billing mode that a host
+agent can use for routing.
+
+Catalog is not the same as runtime.
+Runtime answers "what CLIs are locally usable right now?"
+Catalog answers "what models and access modes are available through those CLIs?"
+
+At minimum, catalog entries must distinguish:
+- subscription-backed access
+- usage-priced API credentials
+- unknown or mixed mode
+
 ## Hard Rules
 
 1. Never call cross-vendor transfer `resume`.
@@ -170,6 +202,7 @@ Debrief is optional and not required for transfer.
 8. Every adapter must declare capabilities explicitly.
 9. If native `resume` semantics are not verified, mark them unsupported.
 10. The first stable API is the CLI contract, not the internal Go packages.
+11. Never collapse subscription access and API-key access into one generic "price".
 
 ## High-Level Architecture
 
@@ -292,6 +325,8 @@ cagent artifacts show
 cagent cancel
 cagent list
 cagent session
+cagent catalog sync
+cagent catalog show
 cagent transfer export
 cagent transfer run
 cagent adapters
@@ -396,6 +431,25 @@ Rules:
 ### `cagent artifacts show`
 
 Returns artifact metadata and content for one persisted artifact.
+
+### `cagent catalog sync`
+
+Discovers provider, model, and auth-mode information from installed adapters.
+
+Rules:
+- may use adapter-specific CLI inspection, config inspection, or environment inspection
+- must record provenance and refresh timestamp
+- must not require live web scraping in v0
+- may leave pricing unknown
+
+### `cagent catalog show`
+
+Returns the current discovered provider/model catalog.
+
+Rules:
+- must clearly distinguish runtime readiness from catalog availability
+- must include auth mode per entry when known
+- should include pricing metadata only when provenance is clear
 
 ### `cagent transfer export`
 
@@ -683,6 +737,7 @@ SQLite tables:
 - `transfers`
 - `artifacts`
 - `locks`
+- `catalog_snapshots`
 
 Raw artifact directories:
 - `raw/stdout/<job_id>/`
@@ -702,6 +757,48 @@ Lock key:
 Failure mode:
 - return exit code `7`
 - emit `diagnostic` event explaining lock conflict
+
+## Catalog Discovery Model
+
+Catalog entries should look roughly like:
+
+```json
+{
+  "adapter": "opencode",
+  "provider": "openrouter",
+  "model": "glm-5",
+  "access_mode": "subscription|api_key|unknown|mixed",
+  "source": "cli|config|env|manual",
+  "available": true,
+  "selected": true,
+  "pricing": {
+    "kind": "token|subscription|unknown",
+    "input_per_million": null,
+    "output_per_million": null,
+    "currency": "USD",
+    "provenance": "manual",
+    "observed_at": "2026-03-09T12:00:00Z"
+  }
+}
+```
+
+Rules:
+- `access_mode=subscription` means the operator is consuming an included-plan workflow through a vendor CLI.
+- `access_mode=api_key` means usage is tied to metered API credentials.
+- `pricing.kind=unknown` is acceptable and preferable to guessed prices.
+- token-based pricing only needs to be precise when the access mode is `api_key`.
+- host agents should be able to route without pricing when only model identity and access mode are known.
+
+v0 discovery sources:
+- adapter CLI help and inspection commands
+- adapter-specific config files
+- environment variables
+- optional operator-supplied overrides in `config.toml`
+
+v0 non-goals:
+- guaranteed complete provider/model enumeration for every CLI
+- scraping vendor web pages at runtime
+- auto-computing spend for subscription-backed plans
 
 ## Adapter Support Tiers
 
@@ -1099,6 +1196,51 @@ Goals:
 - verify auth presence
 - verify a no-op or trivial prompt roundtrip
 
+### Low-Cost Live Matrix
+
+The default live test lane should use the cheapest practical model available on
+each adapter.
+
+Goals:
+- maximize coverage without large spend
+- validate model selection as a routing feature
+- discover where weaker models are already sufficient
+- reserve stronger models for sparse comparison runs
+
+Suggested dimensions:
+- adapter
+- model tier
+- task shape
+- workflow shape
+- failure mode
+
+### Recursive `cagent` Tests
+
+`cagent` must be tested as a subagent runtime that can be orchestrated by a
+coding agent which itself has the `cagent` skill loaded.
+
+Important scenario:
+1. planner `cagent` writes or refines a spec
+2. implementation `cagent` runs one phase of work
+3. verifier `cagent` compiles, tests, and retries until green or blocked
+4. review `cagent` performs code review
+5. red-team `cagent` performs adversarial and security testing
+6. report `cagent` emits a release or security summary
+
+This should first be exercised on low-cost models, then selectively compared
+against stronger models.
+
+### Learning-Oriented Test Lanes
+
+The goal is not only regression prevention, but rapid discovery of latent
+capabilities.
+
+Examples:
+- whether low-cost models can produce useful debriefs
+- whether transfer bundles let a weaker target model recover stronger-source work
+- whether recursive `cagent` orchestration stabilizes into a useful workflow
+- which adapters are best for planning, coding, verification, review, or red-team tasks
+
 ### Compatibility Gates
 
 Each adapter must ship with:
@@ -1147,6 +1289,13 @@ Each adapter must ship with:
 - OpenCode experimental adapter
 - packaging and release automation
 
+### Milestone 6
+
+- provider/model catalog
+- auth-mode detection
+- low-cost live matrix
+- recursive `cagent` orchestration tests
+
 ## Known Risks
 
 - vendor CLIs change output formats
@@ -1154,6 +1303,8 @@ Each adapter must ship with:
 - archived or unstable upstreams may break adapter assumptions
 - auth and subscription modes vary widely across vendors
 - TUI-first CLIs may not have clean headless continuation paths
+- model catalogs may be incomplete or only partially discoverable
+- pricing may be missing or ambiguous for subscription-backed access
 
 Mitigation:
 - capability flags
@@ -1211,6 +1362,7 @@ Do this in order:
 7. implement `send`
 8. implement transfers
 9. add the remaining adapters in the declared order
+10. implement catalog discovery and low-cost live orchestration tests
 
 Do not:
 - build daemon mode first

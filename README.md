@@ -23,6 +23,7 @@ Practical summary:
 - Core runtime, SQLite persistence, canonical schemas, session inspection, transfers, and event translation are in place.
 - Codex, Claude, Factory, Pi, Gemini, and OpenCode adapters all exist.
 - A host-agent-facing `runtime` inventory command is available.
+- A richer provider/model catalog is now part of the planned release scope.
 - Background execution, real process cancellation, live log follow, and filtered job/session listing are in place.
 - `transfer` is the explicit failover/recovery path when native continuation is not possible.
 - `debrief` is available for model-authored "land the plane" exports on still-live sessions.
@@ -116,6 +117,7 @@ Testing currently in repo:
 
 Important gaps versus the spec:
 - the adapter contract does not yet include explicit `Cancel` or `ExportNativeSession` methods from the spec
+- provider/model/auth-mode catalog discovery is not implemented yet
 - `tool.result`, approval, checkpoint, and richer structured event coverage are still incomplete for some vendors
 - transfer bundle ergonomics can still improve, especially richer evidence references into native session state when available
 
@@ -211,7 +213,7 @@ Use cases:
 ## Next Recommended Work
 
 The highest-value remaining steps are:
-1. Export richer transfer bundles with stronger evidence references into native session state when available.
-2. Improve event translation depth.
-3. Add richer artifact queries such as latest-by-kind and session-scoped convenience lookups.
-4. Add more live adapter coverage and release validation.
+1. Implement provider/model/auth-mode catalog discovery.
+2. Build the low-cost live test matrix, including recursive `cagent` orchestration.
+3. Export richer transfer bundles with stronger evidence references into native session state when available.
+4. Improve event translation depth.
