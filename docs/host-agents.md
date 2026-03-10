@@ -77,6 +77,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter codex --cw
 - `runtime --json` is the preferred machine-facing inventory command.
 - `catalog show --json` is the preferred machine-facing provider/model inventory command.
 - `catalog probe --json` is the preferred machine-facing entitlement check when discovery alone is not enough.
+- `catalog show --json` now includes recent local usage history per entry, so routing can prefer models that succeeded recently on this machine.
 - Use `status`, `logs --follow`, `session`, and `cancel` as the control surface after launch.
 - Use `status --wait` when the host wants a blocking wait without writing its own polling loop.
 - Use `status --json` when routing or debugging based on token usage or cost.

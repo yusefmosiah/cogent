@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -615,7 +616,9 @@ func (s *Service) Runtime(ctx context.Context, adapterName string) (*RuntimeResu
 
 func (s *Service) SyncCatalog(ctx context.Context) (*CatalogResult, error) {
 	snapshot := catalogpkg.Snapshot(ctx, s.Config, nil)
-	s.annotateCatalogSnapshot(&snapshot)
+	if err := s.annotateCatalogSnapshot(ctx, &snapshot); err != nil {
+		return nil, err
+	}
 	if err := s.store.CreateCatalogSnapshot(ctx, snapshot); err != nil {
 		return nil, err
 	}
@@ -628,6 +631,9 @@ func (s *Service) Catalog(ctx context.Context) (*CatalogResult, error) {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("%w: catalog snapshot", ErrNotFound)
 		}
+		return nil, err
+	}
+	if err := s.annotateCatalogSnapshot(ctx, &snapshot); err != nil {
 		return nil, err
 	}
 	return &CatalogResult{Snapshot: snapshot}, nil
@@ -701,7 +707,9 @@ func (s *Service) ProbeCatalog(ctx context.Context, req ProbeCatalogRequest) (*C
 			updated.Issues = append(updated.Issues, *item.issue)
 		}
 	}
-	s.annotateCatalogSnapshot(&updated)
+	if err := s.annotateCatalogSnapshot(ctx, &updated); err != nil {
+		return nil, err
+	}
 	if err := s.store.CreateCatalogSnapshot(ctx, updated); err != nil {
 		return nil, err
 	}
@@ -1833,11 +1841,24 @@ func diagnosticMessage(payload map[string]any) string {
 	return ""
 }
 
-func (s *Service) annotateCatalogSnapshot(snapshot *core.CatalogSnapshot) {
+func (s *Service) annotateCatalogSnapshot(ctx context.Context, snapshot *core.CatalogSnapshot) error {
+	history, err := s.catalogHistory(ctx, 500)
+	if err != nil {
+		return err
+	}
 	for idx := range snapshot.Entries {
 		entry := &snapshot.Entries[idx]
 		entry.Pricing = pricing.Resolve(s.Config, entry.Provider, entry.Model)
+		entry.History = nil
+		if hist, ok := history[catalogEntryKey(*entry)]; ok {
+			historyCopy := hist
+			entry.History = &historyCopy
+		}
 	}
+	sort.SliceStable(snapshot.Entries, func(i, j int) bool {
+		return catalogEntryLess(snapshot.Entries[i], snapshot.Entries[j])
+	})
+	return nil
 }
 
 func (s *Service) catalogSnapshotOrSync(ctx context.Context) (core.CatalogSnapshot, error) {
@@ -1876,7 +1897,143 @@ func filterCatalogEntries(entries []core.CatalogEntry, req ProbeCatalogRequest) 
 }
 
 func catalogEntryKey(entry core.CatalogEntry) string {
-	return strings.Join([]string{entry.Adapter, entry.Provider, entry.Model}, "|")
+	return catalogHistoryKey(entry.Adapter, entry.Provider, entry.Model)
+}
+
+func catalogHistoryKey(adapter, provider, model string) string {
+	return strings.ToLower(strings.Join([]string{adapter, provider, model}, "|"))
+}
+
+func (s *Service) catalogHistory(ctx context.Context, limit int) (map[string]core.CatalogHistory, error) {
+	jobs, err := s.store.ListJobs(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	history := make(map[string]core.CatalogHistory)
+	for _, job := range jobs {
+		usage := usageFromSummary(job.Summary)
+		provider, model := pricingLookupContext(job, usage)
+		keys := []string{catalogHistoryKey(job.Adapter, provider, model)}
+		if model != "" {
+			keys = append(keys, catalogHistoryKey(job.Adapter, provider, ""))
+		}
+
+		for _, key := range keys {
+			hist := history[key]
+			if hist.RecentJobs == 0 {
+				hist.LastJobID = job.JobID
+				hist.LastSessionID = job.SessionID
+				lastUsedAt := job.UpdatedAt
+				hist.LastUsedAt = &lastUsedAt
+			}
+			hist.RecentJobs++
+			switch job.State {
+			case core.JobStateCompleted:
+				hist.RecentSuccesses++
+				if hist.LastSucceededAt == nil {
+					lastSucceededAt := job.UpdatedAt
+					hist.LastSucceededAt = &lastSucceededAt
+				}
+			case core.JobStateFailed, core.JobStateBlocked:
+				hist.RecentFailures++
+				if hist.LastFailedAt == nil {
+					lastFailedAt := job.UpdatedAt
+					hist.LastFailedAt = &lastFailedAt
+				}
+			case core.JobStateCancelled:
+				hist.RecentCancelled++
+			}
+			if usage != nil {
+				hist.TotalInputTokens += usage.InputTokens + usage.CachedInputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+				hist.TotalOutputTokens += usage.OutputTokens
+			}
+			history[key] = hist
+		}
+	}
+
+	return history, nil
+}
+
+func catalogEntryLess(a, b core.CatalogEntry) bool {
+	if probeRank(a.ProbeStatus) != probeRank(b.ProbeStatus) {
+		return probeRank(a.ProbeStatus) < probeRank(b.ProbeStatus)
+	}
+	if historySuccesses(a.History) != historySuccesses(b.History) {
+		return historySuccesses(a.History) > historySuccesses(b.History)
+	}
+	if cmp := compareTimes(historySucceededAt(a.History), historySucceededAt(b.History)); cmp != 0 {
+		return cmp > 0
+	}
+	if cmp := compareTimes(historyUsedAt(a.History), historyUsedAt(b.History)); cmp != 0 {
+		return cmp > 0
+	}
+	if a.Selected != b.Selected {
+		return a.Selected
+	}
+	if a.Available != b.Available {
+		return a.Available
+	}
+	if a.Adapter != b.Adapter {
+		return a.Adapter < b.Adapter
+	}
+	if a.Provider != b.Provider {
+		return a.Provider < b.Provider
+	}
+	return a.Model < b.Model
+}
+
+func probeRank(status string) int {
+	switch status {
+	case "runnable":
+		return 0
+	case "":
+		return 1
+	case "unsupported_by_plan":
+		return 2
+	case "hung_or_unstable":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func historySuccesses(history *core.CatalogHistory) int {
+	if history == nil {
+		return 0
+	}
+	return history.RecentSuccesses
+}
+
+func historySucceededAt(history *core.CatalogHistory) *time.Time {
+	if history == nil {
+		return nil
+	}
+	return history.LastSucceededAt
+}
+
+func historyUsedAt(history *core.CatalogHistory) *time.Time {
+	if history == nil {
+		return nil
+	}
+	return history.LastUsedAt
+}
+
+func compareTimes(a, b *time.Time) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	case a.After(*b):
+		return 1
+	case a.Before(*b):
+		return -1
+	default:
+		return 0
+	}
 }
 
 func (s *Service) probeCatalogEntry(ctx context.Context, entry core.CatalogEntry, req ProbeCatalogRequest, timeout time.Duration) (core.CatalogEntry, *core.CatalogIssue) {

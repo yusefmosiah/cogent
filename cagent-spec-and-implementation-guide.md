@@ -455,6 +455,7 @@ Returns the current discovered provider/model catalog.
 Rules:
 - must clearly distinguish runtime readiness from catalog availability
 - must include auth mode per entry when known
+- should include recent canonical job history so host agents can prefer recently successful models
 - should include pricing metadata only when provenance is clear
 
 ### `cagent catalog probe`

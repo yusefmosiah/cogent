@@ -1303,9 +1303,22 @@ func renderCatalog(cmd *cobra.Command, jsonOutput bool, result *service.CatalogR
 		if entry.ProbeStatus != "" && entry.ProbeMessage != "" {
 			probeText = entry.ProbeStatus + ":" + entry.ProbeMessage
 		}
+		historyText := "-"
+		if entry.History != nil {
+			historyText = fmt.Sprintf(
+				"jobs=%d ok=%d fail=%d cancel=%d",
+				entry.History.RecentJobs,
+				entry.History.RecentSuccesses,
+				entry.History.RecentFailures,
+				entry.History.RecentCancelled,
+			)
+			if entry.History.LastUsedAt != nil {
+				historyText += " last=" + entry.History.LastUsedAt.Format("2006-01-02")
+			}
+		}
 		if err := writef(
 			cmd.OutOrStdout(),
-			"%s\t%s\t%s\tselected=%t\tauth=%s\tbilling=%s\tpricing=%s\tprobe=%s\tsource=%s\n",
+			"%s\t%s\t%s\tselected=%t\tauth=%s\tbilling=%s\tpricing=%s\tprobe=%s\thistory=%s\tsource=%s\n",
 			entry.Adapter,
 			emptyDash(entry.Provider),
 			emptyDash(entry.Model),
@@ -1314,6 +1327,7 @@ func renderCatalog(cmd *cobra.Command, jsonOutput bool, result *service.CatalogR
 			emptyDash(entry.BillingClass),
 			pricingText,
 			probeText,
+			historyText,
 			emptyDash(entry.Source),
 		); err != nil {
 			return err

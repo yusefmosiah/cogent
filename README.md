@@ -177,7 +177,7 @@ Run:
 
 ## Catalog
 
-`catalog` is the host-agent-facing discovery layer for provider/model inventory.
+`catalog` is the host-agent-facing discovery layer for provider/model inventory and recent local usage history.
 
 Use:
 - `runtime` to answer "what adapter CLIs are installed and runnable?"
@@ -189,6 +189,7 @@ Current first-pass behavior:
 - Claude and Codex primarily report auth mode plus selected/provider context.
 - Gemini currently reports auth mode conservatively from local environment and config signals.
 - `catalog show` reports discovered inventory, while `catalog probe` adds best-effort entitlement status like `runnable`, `unsupported_by_plan`, and `hung_or_unstable`.
+- `catalog show` also annotates entries with recent local canonical job history so routing can prefer models that actually worked recently.
 - Pricing is best-effort, provenance-carrying, and not authoritative; auth mode and billing class remain the primary routing signals.
 
 ## Usage And Cost Reporting

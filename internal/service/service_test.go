@@ -996,6 +996,101 @@ func TestProbeCatalogClassifiesEntries(t *testing.T) {
 	}
 }
 
+func TestCatalogReflectsRecentModelHistory(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+
+	fakeOpenCode, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	if err := os.Chmod(fakeOpenCode, 0o755); err != nil {
+		t.Fatalf("chmod fake opencode: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[store]\nstate_dir = \"" + stateDir + "\"\n\n[adapters.opencode]\nbinary = \"" + fakeOpenCode + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	if _, err := svc.SyncCatalog(context.Background()); err != nil {
+		t.Fatalf("SyncCatalog returned error: %v", err)
+	}
+
+	success, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "opencode",
+		CWD:          t.TempDir(),
+		Prompt:       "Reply with exactly OK and nothing else.",
+		PromptSource: "prompt",
+		Model:        "openai/gpt-5-nano",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	waitForTerminalStatus(t, svc, success.Job.JobID)
+
+	failed, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "opencode",
+		CWD:          t.TempDir(),
+		Prompt:       "Reply with exactly OK and nothing else.",
+		PromptSource: "prompt",
+		Model:        "openai/gpt-5.3-codex-spark",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	waitForTerminalStatus(t, svc, failed.Job.JobID)
+
+	shown, err := svc.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog returned error: %v", err)
+	}
+
+	var (
+		successEntry *core.CatalogEntry
+		failedEntry  *core.CatalogEntry
+		successIdx   = -1
+		failedIdx    = -1
+	)
+	for idx := range shown.Snapshot.Entries {
+		entry := &shown.Snapshot.Entries[idx]
+		if entry.Adapter == "opencode" && entry.Provider == "openai" && entry.Model == "gpt-5-nano" {
+			successEntry = entry
+			successIdx = idx
+		}
+		if entry.Adapter == "opencode" && entry.Provider == "openai" && entry.Model == "gpt-5.3-codex-spark" {
+			failedEntry = entry
+			failedIdx = idx
+		}
+	}
+
+	if successEntry == nil || failedEntry == nil {
+		t.Fatalf("expected both catalog entries, got success=%v failed=%v", successEntry != nil, failedEntry != nil)
+	}
+	if successEntry.History == nil || successEntry.History.RecentSuccesses == 0 {
+		t.Fatalf("expected success history on runnable model, got %+v", successEntry.History)
+	}
+	if failedEntry.History == nil || failedEntry.History.RecentFailures == 0 {
+		t.Fatalf("expected failure history on unsupported model, got %+v", failedEntry.History)
+	}
+	if successIdx == -1 || failedIdx == -1 || successIdx > failedIdx {
+		t.Fatalf("expected successful recent model to sort ahead of failing one, got successIdx=%d failedIdx=%d", successIdx, failedIdx)
+	}
+}
+
 func TestTransferExportAndRun(t *testing.T) {
 	stateDir := t.TempDir()
 	configDir := t.TempDir()

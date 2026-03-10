@@ -83,6 +83,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 - Prefer `runtime --json` as the machine-facing inventory command.
 - Prefer `catalog show --json` when choosing among providers/models and auth modes.
 - Prefer `catalog probe --json` when listed models may not match actual plan entitlement.
+- Prefer models with recent successful `catalog show` history over merely listed-but-unused ones.
 - Prefer `status --json` when you need normalized token usage or cost for a completed job.
 - Treat `cagent` as machine-facing first. Use `--json` unless a human-readable summary is explicitly better.
 - Treat `run`, `send`, and `transfer run` as launch operations, not blocking operations.

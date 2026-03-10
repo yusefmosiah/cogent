@@ -170,7 +170,22 @@ type CatalogEntry struct {
 	ProbeMessage string            `json:"probe_message,omitempty"`
 	ProbeJobID   string            `json:"probe_job_id,omitempty"`
 	ProbeAt      *time.Time        `json:"probe_at,omitempty"`
+	History      *CatalogHistory   `json:"history,omitempty"`
 	Metadata     map[string]any    `json:"metadata,omitempty"`
+}
+
+type CatalogHistory struct {
+	RecentJobs        int        `json:"recent_jobs,omitempty"`
+	RecentSuccesses   int        `json:"recent_successes,omitempty"`
+	RecentFailures    int        `json:"recent_failures,omitempty"`
+	RecentCancelled   int        `json:"recent_cancelled,omitempty"`
+	LastJobID         string     `json:"last_job_id,omitempty"`
+	LastSessionID     string     `json:"last_session_id,omitempty"`
+	LastUsedAt        *time.Time `json:"last_used_at,omitempty"`
+	LastSucceededAt   *time.Time `json:"last_succeeded_at,omitempty"`
+	LastFailedAt      *time.Time `json:"last_failed_at,omitempty"`
+	TotalInputTokens  int64      `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens int64      `json:"total_output_tokens,omitempty"`
 }
 
 type CatalogIssue struct {
