@@ -156,6 +156,55 @@ func TestRunCompletesWithFakeCodexAdapter(t *testing.T) {
 	}
 }
 
+func TestWaitStatusReturnsTerminalState(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+
+	fakeBinary, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "codex"))
+	if err != nil {
+		t.Fatalf("resolve fake codex path: %v", err)
+	}
+	if err := os.Chmod(fakeBinary, 0o755); err != nil {
+		t.Fatalf("chmod fake codex: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[adapters.codex]\nbinary = \"" + fakeBinary + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	result, err := svc.Run(context.Background(), RunRequest{
+		Adapter:      "codex",
+		CWD:          t.TempDir(),
+		Prompt:       "slow wait test",
+		PromptSource: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	status, err := svc.WaitStatus(context.Background(), result.Job.JobID, 100*time.Millisecond, 10*time.Second)
+	if err != nil {
+		t.Fatalf("WaitStatus returned error: %v", err)
+	}
+	if status.Job.State != core.JobStateCompleted {
+		t.Fatalf("expected completed status, got %s", status.Job.State)
+	}
+}
+
 func TestSendContinuesFakeCodexSession(t *testing.T) {
 	stateDir := t.TempDir()
 	configDir := t.TempDir()
@@ -541,6 +590,26 @@ func TestDebriefContinuesSessionAndWritesArtifact(t *testing.T) {
 	}
 	if !foundEvent {
 		t.Fatal("expected debrief.exported event")
+	}
+
+	listed, err := svc.ListArtifacts(context.Background(), ArtifactsRequest{
+		JobID: result.Job.JobID,
+		Kind:  "debrief",
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListArtifacts returned error: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected one listed debrief artifact, got %+v", listed)
+	}
+
+	artifactResult, err := svc.ReadArtifact(context.Background(), listed[0].ArtifactID)
+	if err != nil {
+		t.Fatalf("ReadArtifact returned error: %v", err)
+	}
+	if !strings.Contains(artifactResult.Content, "# Recommended Next Step") {
+		t.Fatalf("expected debrief content, got:\n%s", artifactResult.Content)
 	}
 }
 

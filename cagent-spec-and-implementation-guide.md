@@ -287,6 +287,8 @@ cagent status
 cagent logs
 cagent send
 cagent debrief
+cagent artifacts list
+cagent artifacts show
 cagent cancel
 cagent list
 cagent session
@@ -328,6 +330,11 @@ Behavior:
 ### `cagent status`
 
 Returns the latest job state and summary.
+
+Flags:
+- `--wait`
+- `--interval`
+- `--timeout`
 
 ### `cagent logs`
 
@@ -377,6 +384,18 @@ Lists jobs or sessions with filters.
 
 Shows canonical session state, linked native sessions, recent turns, and
 available continuation actions.
+
+### `cagent artifacts list`
+
+Lists persisted artifacts for a job or session.
+
+Rules:
+- must support filtering by artifact kind
+- must support machine-readable output
+
+### `cagent artifacts show`
+
+Returns artifact metadata and content for one persisted artifact.
 
 ### `cagent transfer export`
 

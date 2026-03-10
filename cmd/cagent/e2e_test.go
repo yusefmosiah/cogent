@@ -59,6 +59,19 @@ type cliDebriefResult struct {
 	Path string `json:"path"`
 }
 
+type cliArtifactRecord struct {
+	ArtifactID string `json:"artifact_id"`
+	JobID      string `json:"job_id"`
+	SessionID  string `json:"session_id"`
+	Kind       string `json:"kind"`
+	Path       string `json:"path"`
+}
+
+type cliArtifactResult struct {
+	Artifact cliArtifactRecord `json:"artifact"`
+	Content  string            `json:"content"`
+}
+
 func TestDetachedRunCanBeCancelled(t *testing.T) {
 	binary := buildCagentBinary(t)
 	configPath := writeFakeCodexConfig(t)
@@ -120,6 +133,26 @@ func TestFollowLogsAndListFilters(t *testing.T) {
 	}
 	if len(sessions) == 0 {
 		t.Fatalf("expected active codex session in filtered session list")
+	}
+}
+
+func TestStatusWaitReturnsTerminalJob(t *testing.T) {
+	binary := buildCagentBinary(t)
+	configPath := writeFakeCodexConfig(t)
+
+	runOutput := runCagent(t, binary, configPath, "--json", "run", "--adapter", "codex", "--cwd", t.TempDir(), "--prompt", "slow wait test")
+	var runResult cliRunResult
+	if err := json.Unmarshal([]byte(runOutput), &runResult); err != nil {
+		t.Fatalf("unmarshal detached run: %v\n%s", err, runOutput)
+	}
+
+	statusOutput := runCagent(t, binary, configPath, "--json", "status", "--wait", "--timeout", "10s", runResult.Job.JobID)
+	var status cliStatusResult
+	if err := json.Unmarshal([]byte(statusOutput), &status); err != nil {
+		t.Fatalf("unmarshal waited status: %v\n%s", err, statusOutput)
+	}
+	if status.Job.State != "completed" {
+		t.Fatalf("expected completed waited status, got %q", status.Job.State)
 	}
 }
 
@@ -192,6 +225,24 @@ func TestDebriefQueuesAndWritesArtifact(t *testing.T) {
 	logOutput := runCagent(t, binary, configPath, "logs", debriefResult.Job.JobID)
 	if !strings.Contains(logOutput, "debrief.exported") {
 		t.Fatalf("expected debrief.exported event in logs:\n%s", logOutput)
+	}
+
+	artifactsOutput := runCagent(t, binary, configPath, "--json", "artifacts", "list", "--job", debriefResult.Job.JobID, "--kind", "debrief")
+	var artifacts []cliArtifactRecord
+	if err := json.Unmarshal([]byte(artifactsOutput), &artifacts); err != nil {
+		t.Fatalf("unmarshal artifacts list: %v\n%s", err, artifactsOutput)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected one debrief artifact, got %+v", artifacts)
+	}
+
+	artifactOutput := runCagent(t, binary, configPath, "--json", "artifacts", "show", artifacts[0].ArtifactID)
+	var artifact cliArtifactResult
+	if err := json.Unmarshal([]byte(artifactOutput), &artifact); err != nil {
+		t.Fatalf("unmarshal artifact show: %v\n%s", err, artifactOutput)
+	}
+	if !strings.Contains(artifact.Content, "# Objective") {
+		t.Fatalf("expected debrief content from artifact show, got:\n%s", artifact.Content)
 	}
 }
 

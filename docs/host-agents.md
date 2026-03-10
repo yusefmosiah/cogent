@@ -34,9 +34,10 @@ cagent run --json --adapter codex --cwd /repo --prompt "Fix the failing tests."
 4. Poll or inspect:
 
 ```bash
-cagent status --json <job-id>
+cagent status --json --wait <job-id>
 cagent logs --json <job-id>
 cagent session --json <session-id>
+cagent artifacts list --json --job <job-id>
 ```
 
 5. Continue same-vendor work:
@@ -70,6 +71,8 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter codex --cw
 - `cagent` preserves native session IDs and raw vendor output.
 - `runtime --json` is the preferred machine-facing inventory command.
 - Use `status`, `logs --follow`, `session`, and `cancel` as the control surface after launch.
+- Use `status --wait` when the host wants a blocking wait without writing its own polling loop.
+- Use `artifacts list/show` to inspect transfer and debrief outputs directly.
 - Use `debrief` when you want the current agent to summarize itself before recovery or debugging.
 - Treat `transfer` as explicit failover/recovery, not as the normal orchestration path.
 - The transfer prompt should explicitly disclose the source adapter and reason for transfer.

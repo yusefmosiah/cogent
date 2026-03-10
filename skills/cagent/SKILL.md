@@ -42,9 +42,10 @@ cagent run --json --adapter codex --cwd /path/to/repo --prompt "Fix the failing 
 4. Use returned IDs for follow-up operations:
 
 ```bash
-cagent status --json <job-id>
+cagent status --json --wait <job-id>
 cagent logs --json <job-id>
 cagent session --json <session-id>
+cagent artifacts list --json --job <job-id>
 ```
 
 5. Continue same-vendor work:
@@ -78,6 +79,8 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 - Treat `cagent` as machine-facing first. Use `--json` unless a human-readable summary is explicitly better.
 - Treat `run`, `send`, and `transfer run` as launch operations, not blocking operations.
 - Treat `debrief` as a debugging/recovery workflow, not a normal orchestration step.
+- Use `status --wait` when you want `cagent` to own the polling loop.
+- Use `artifacts show` to read a debrief or transfer artifact by id.
 - Do not assume every adapter supports `send`; inspect capability flags first.
 - Same-vendor continuation is `send`. Cross-vendor failover is `transfer`.
 - Do not expect `cagent` to perform vendor auth flows for you.

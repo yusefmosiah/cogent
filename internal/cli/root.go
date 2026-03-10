@@ -79,6 +79,19 @@ type runtimeOptions struct {
 	adapter string
 }
 
+type statusOptions struct {
+	wait     bool
+	interval time.Duration
+	timeout  time.Duration
+}
+
+type artifactsListOptions struct {
+	jobID     string
+	sessionID string
+	kind      string
+	limit     int
+}
+
 type internalRunJobOptions struct {
 	jobID  string
 	turnID string
@@ -109,6 +122,7 @@ func NewRootCommand() *cobra.Command {
 		newDebriefCommand(opts),
 		newCancelCommand(opts),
 		newListCommand(opts),
+		newArtifactsCommand(opts),
 		newSessionCommand(opts),
 		newTransferCommand(opts, "transfer", "Export and launch explicit cross-vendor transfers", false),
 		newTransferCommand(opts, "handoff", "Deprecated alias for transfer", true),
@@ -184,7 +198,9 @@ func newRunCommand(root *rootOptions) *cobra.Command {
 }
 
 func newStatusCommand(root *rootOptions) *cobra.Command {
-	return &cobra.Command{
+	opts := &statusOptions{}
+
+	cmd := &cobra.Command{
 		Use:   "status <job-id>",
 		Short: "Show the latest job state and summary",
 		Args:  cobra.ExactArgs(1),
@@ -195,7 +211,12 @@ func newStatusCommand(root *rootOptions) *cobra.Command {
 			}
 			defer func() { _ = svc.Close() }()
 
-			status, err := svc.Status(context.Background(), args[0])
+			var status *service.StatusResult
+			if opts.wait {
+				status, err = svc.WaitStatus(context.Background(), args[0], opts.interval, opts.timeout)
+			} else {
+				status, err = svc.Status(context.Background(), args[0])
+			}
 			if err != nil {
 				return mapServiceError(err)
 			}
@@ -203,6 +224,10 @@ func newStatusCommand(root *rootOptions) *cobra.Command {
 			return renderStatus(cmd, root.jsonOutput, status)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.wait, "wait", false, "wait for the job to reach a terminal state")
+	cmd.Flags().DurationVar(&opts.interval, "interval", 250*time.Millisecond, "poll interval when waiting")
+	cmd.Flags().DurationVar(&opts.timeout, "timeout", 0, "maximum time to wait before exiting with a timeout")
+	return cmd
 }
 
 func newLogsCommand(root *rootOptions) *cobra.Command {
@@ -475,6 +500,66 @@ func newListCommand(root *rootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&adapter, "adapter", "", "filter by adapter")
 	cmd.Flags().StringVar(&state, "state", "", "filter by job state or session status")
 	cmd.Flags().StringVar(&sessionID, "session", "", "filter jobs by canonical session id")
+	return cmd
+}
+
+func newArtifactsCommand(root *rootOptions) *cobra.Command {
+	listOpts := &artifactsListOptions{}
+
+	cmd := &cobra.Command{
+		Use:   "artifacts",
+		Short: "Inspect persisted artifacts",
+	}
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List artifacts for a job or session",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				artifacts, err := svc.ListArtifacts(context.Background(), service.ArtifactsRequest{
+					JobID:     listOpts.jobID,
+					SessionID: listOpts.sessionID,
+					Kind:      listOpts.kind,
+					Limit:     listOpts.limit,
+				})
+				if err != nil {
+					return mapServiceError(err)
+				}
+				return renderArtifacts(cmd, root.jsonOutput, artifacts)
+			},
+		},
+		&cobra.Command{
+			Use:   "show <artifact-id>",
+			Short: "Show one artifact and its content",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				result, err := svc.ReadArtifact(context.Background(), args[0])
+				if err != nil {
+					return mapServiceError(err)
+				}
+				return renderArtifact(cmd, root.jsonOutput, result)
+			},
+		},
+	)
+
+	listCmd := cmd.Commands()[0]
+	listCmd.Flags().StringVar(&listOpts.jobID, "job", "", "list artifacts for a job")
+	listCmd.Flags().StringVar(&listOpts.sessionID, "session", "", "list artifacts for a session")
+	listCmd.Flags().StringVar(&listOpts.kind, "kind", "", "filter by artifact kind")
+	listCmd.Flags().IntVar(&listOpts.limit, "limit", 20, "maximum number of artifacts to list")
+
 	return cmd
 }
 
@@ -843,6 +928,66 @@ func renderSession(cmd *cobra.Command, jsonOutput bool, result *service.SessionR
 	return nil
 }
 
+func renderArtifacts(cmd *cobra.Command, jsonOutput bool, artifacts []core.ArtifactRecord) error {
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), artifacts)
+	}
+
+	for _, artifact := range artifacts {
+		if err := writef(
+			cmd.OutOrStdout(),
+			"%s\t%s\t%s\t%s\t%s\n",
+			artifact.ArtifactID,
+			artifact.JobID,
+			artifact.Kind,
+			artifact.CreatedAt.Format("2006-01-02 15:04:05"),
+			artifact.Path,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderArtifact(cmd *cobra.Command, jsonOutput bool, result *service.ArtifactResult) error {
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), result)
+	}
+
+	if err := writef(cmd.OutOrStdout(), "artifact: %s\n", result.Artifact.ArtifactID); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "job: %s\n", result.Artifact.JobID); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "session: %s\n", result.Artifact.SessionID); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "kind: %s\n", result.Artifact.Kind); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "path: %s\n", result.Artifact.Path); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "created: %s\n", result.Artifact.CreatedAt.Format("2006-01-02T15:04:05Z07:00")); err != nil {
+		return err
+	}
+	if len(result.Artifact.Metadata) > 0 {
+		if err := writef(cmd.OutOrStdout(), "metadata: %s\n", compactJSON(mustJSON(result.Artifact.Metadata))); err != nil {
+			return err
+		}
+	}
+	if result.Content != "" {
+		if err := writef(cmd.OutOrStdout(), "\n%s", result.Content); err != nil {
+			return err
+		}
+		if !strings.HasSuffix(result.Content, "\n") {
+			return writef(cmd.OutOrStdout(), "\n")
+		}
+	}
+	return nil
+}
+
 func followEvents(cmd *cobra.Command, svc *service.Service, jobID string, jsonOutput bool, limit int) error {
 	var lastSeq int64
 	for {
@@ -1059,6 +1204,9 @@ func mapServiceError(err error) error {
 	if errors.Is(err, service.ErrVendorProcess) {
 		return exitf(8, "%v", err)
 	}
+	if errors.Is(err, service.ErrTimeout) {
+		return exitf(9, "%v", err)
+	}
 
 	var exitErr *ExitError
 	if errors.As(err, &exitErr) {
@@ -1066,6 +1214,11 @@ func mapServiceError(err error) error {
 	}
 
 	return err
+}
+
+func mustJSON(v any) []byte {
+	encoded, _ := json.Marshal(v)
+	return encoded
 }
 
 const timeLayout = "2006-01-02T15:04:05Z07:00"

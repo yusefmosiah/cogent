@@ -74,6 +74,8 @@ Commands currently wired:
 - `cagent logs`
 - `cagent send`
 - `cagent debrief`
+- `cagent artifacts list`
+- `cagent artifacts show`
 - `cagent cancel`
 - `cagent list`
 - `cagent session`
@@ -114,10 +116,8 @@ Testing currently in repo:
 
 Important gaps versus the spec:
 - the adapter contract does not yet include explicit `Cancel` or `ExportNativeSession` methods from the spec
-- richer host-agent wait ergonomics such as `status --wait` are not implemented yet
 - `tool.result`, approval, checkpoint, and richer structured event coverage are still incomplete for some vendors
 - transfer bundle ergonomics can still improve, especially richer evidence references into native session state when available
-- dedicated artifact inspection/listing commands do not exist yet
 
 ## Repository Layout
 
@@ -158,8 +158,9 @@ Run:
 
 ```bash
 ./bin/cagent run --adapter codex --cwd . --prompt "Reply with exactly OK."
-./bin/cagent status <job-id>
+./bin/cagent status --wait <job-id>
 ./bin/cagent logs --follow <job-id>
+./bin/cagent artifacts list --job <job-id>
 ./bin/cagent adapters --json
 ./bin/cagent runtime --json
 ```
@@ -211,6 +212,6 @@ Use cases:
 
 The highest-value remaining steps are:
 1. Export richer transfer bundles with stronger evidence references into native session state when available.
-2. Add small orchestration ergonomics like `status --wait`.
-3. Add a dedicated artifact inspection command for transfer/debrief debugging.
-4. Improve event translation depth.
+2. Improve event translation depth.
+3. Add richer artifact queries such as latest-by-kind and session-scoped convenience lookups.
+4. Add more live adapter coverage and release validation.

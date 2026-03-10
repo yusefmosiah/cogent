@@ -543,20 +543,58 @@ func (s *Store) ListEventsBySession(ctx context.Context, sessionID string, limit
 }
 
 func (s *Store) ListArtifactsByJob(ctx context.Context, jobID string, limit int) ([]core.ArtifactRecord, error) {
+	return s.listArtifactsWhere(ctx, "job_id = ?", []any{jobID}, limit, "")
+}
+
+func (s *Store) GetArtifact(ctx context.Context, artifactID string) (core.ArtifactRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
+		   FROM artifacts
+		  WHERE artifact_id = ?`,
+		artifactID,
+	)
+	return scanArtifact(row)
+}
+
+func (s *Store) ListArtifactsFiltered(ctx context.Context, jobID, sessionID, kind string, limit int) ([]core.ArtifactRecord, error) {
+	var (
+		clauses []string
+		args    []any
+	)
+	if jobID != "" {
+		clauses = append(clauses, "job_id = ?")
+		args = append(args, jobID)
+	}
+	if sessionID != "" {
+		clauses = append(clauses, "session_id = ?")
+		args = append(args, sessionID)
+	}
+	return s.listArtifactsWhere(ctx, strings.Join(clauses, " AND "), args, limit, kind)
+}
+
+func (s *Store) listArtifactsWhere(ctx context.Context, where string, args []any, limit int, kind string) ([]core.ArtifactRecord, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
-	rows, err := s.db.QueryContext(
-		ctx,
-		`SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
-		   FROM artifacts
-		  WHERE job_id = ?
-		  ORDER BY created_at DESC
-		  LIMIT ?`,
-		jobID,
-		limit,
-	)
+	query := `SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
+		   FROM artifacts`
+	if where != "" || kind != "" {
+		var clauses []string
+		if where != "" {
+			clauses = append(clauses, where)
+		}
+		if kind != "" {
+			clauses = append(clauses, "kind = ?")
+			args = append(args, kind)
+		}
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query artifacts: %w", err)
 	}
@@ -605,39 +643,7 @@ func (s *Store) InsertArtifact(ctx context.Context, rec core.ArtifactRecord) err
 }
 
 func (s *Store) ListArtifactsBySession(ctx context.Context, sessionID string, limit int) ([]core.ArtifactRecord, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-
-	rows, err := s.db.QueryContext(
-		ctx,
-		`SELECT artifact_id, job_id, session_id, kind, path, created_at, metadata_json
-		   FROM artifacts
-		  WHERE session_id = ?
-		  ORDER BY created_at DESC
-		  LIMIT ?`,
-		sessionID,
-		limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query artifacts by session: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var artifacts []core.ArtifactRecord
-	for rows.Next() {
-		rec, err := scanArtifact(rows)
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, rec)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate artifacts by session: %w", err)
-	}
-
-	return artifacts, nil
+	return s.listArtifactsWhere(ctx, "session_id = ?", []any{sessionID}, limit, "")
 }
 
 func (s *Store) UpsertNativeSession(ctx context.Context, rec core.NativeSessionRecord) error {

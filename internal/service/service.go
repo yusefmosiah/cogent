@@ -33,6 +33,7 @@ var (
 	ErrBusy               = errors.New("resource busy")
 	ErrSessionLocked      = errors.New("session locked")
 	ErrVendorProcess      = errors.New("vendor process failed")
+	ErrTimeout            = errors.New("timeout")
 )
 
 type Service struct {
@@ -160,6 +161,18 @@ type RawLogEntry struct {
 	Stream  string `json:"stream"`
 	Path    string `json:"path"`
 	Content string `json:"content"`
+}
+
+type ArtifactsRequest struct {
+	JobID     string
+	SessionID string
+	Kind      string
+	Limit     int
+}
+
+type ArtifactResult struct {
+	Artifact core.ArtifactRecord `json:"artifact"`
+	Content  string              `json:"content,omitempty"`
 }
 
 type ListJobsRequest struct {
@@ -753,6 +766,40 @@ func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, erro
 	}, nil
 }
 
+func (s *Service) WaitStatus(ctx context.Context, jobID string, interval, timeout time.Duration) (*StatusResult, error) {
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	var (
+		timer  <-chan time.Time
+		status *StatusResult
+		err    error
+	)
+	if timeout > 0 {
+		timeoutTimer := time.NewTimer(timeout)
+		defer timeoutTimer.Stop()
+		timer = timeoutTimer.C
+	}
+
+	for {
+		status, err = s.Status(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if status.Job.State.Terminal() {
+			return status, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer:
+			return status, fmt.Errorf("%w: job %s did not reach a terminal state within %s", ErrTimeout, jobID, timeout)
+		case <-time.After(interval):
+		}
+	}
+}
+
 func (s *Service) ListJobs(ctx context.Context, req ListJobsRequest) ([]core.JobRecord, error) {
 	return s.store.ListJobsFiltered(ctx, req.Limit, req.Adapter, req.State, req.SessionID)
 }
@@ -781,6 +828,47 @@ func (s *Service) RawLogs(ctx context.Context, jobID string, limit int) ([]RawLo
 		return nil, err
 	}
 	return s.rawLogsFromEvents(events)
+}
+
+func (s *Service) ListArtifacts(ctx context.Context, req ArtifactsRequest) ([]core.ArtifactRecord, error) {
+	if (req.JobID == "" && req.SessionID == "") || (req.JobID != "" && req.SessionID != "") {
+		return nil, fmt.Errorf("%w: specify exactly one of job_id or session_id", ErrInvalidInput)
+	}
+	if req.JobID != "" {
+		if _, err := s.store.GetJob(ctx, req.JobID); err != nil {
+			return nil, normalizeStoreError("job", req.JobID, err)
+		}
+	}
+	if req.SessionID != "" {
+		if _, err := s.store.GetSession(ctx, req.SessionID); err != nil {
+			return nil, normalizeStoreError("session", req.SessionID, err)
+		}
+	}
+	return s.store.ListArtifactsFiltered(ctx, req.JobID, req.SessionID, req.Kind, req.Limit)
+}
+
+func (s *Service) ReadArtifact(ctx context.Context, artifactID string) (*ArtifactResult, error) {
+	artifact, err := s.store.GetArtifact(ctx, artifactID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("%w: artifact %s", ErrNotFound, artifactID)
+		}
+		return nil, err
+	}
+
+	path := artifact.Path
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(s.Paths.StateDir, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read artifact %q: %w", path, err)
+	}
+	artifact.Path = path
+	return &ArtifactResult{
+		Artifact: artifact,
+		Content:  string(data),
+	}, nil
 }
 
 func (s *Service) RawLogsAfter(ctx context.Context, jobID string, afterSeq int64, limit int) ([]RawLogEntry, []core.EventRecord, error) {
