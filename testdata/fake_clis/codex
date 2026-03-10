@@ -13,6 +13,13 @@ while [ "$#" -gt 0 ]; do
       printf '%s\n' 'fake-codex 0.0.1'
       exit 0
       ;;
+    login)
+      shift
+      if [ "${1:-}" = "status" ]; then
+        printf '%s\n' 'Logged in using ChatGPT'
+        exit 0
+      fi
+      ;;
     resume)
       mode="resume"
       shift

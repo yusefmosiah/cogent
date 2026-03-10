@@ -961,6 +961,42 @@ func (s *Store) GetTransfer(ctx context.Context, transferID string) (core.Transf
 	return scanTransfer(row)
 }
 
+func (s *Store) CreateCatalogSnapshot(ctx context.Context, rec core.CatalogSnapshot) error {
+	entriesJSON, err := marshalJSON(rec.Entries)
+	if err != nil {
+		return fmt.Errorf("marshal catalog entries: %w", err)
+	}
+	issuesJSON, err := marshalJSON(rec.Issues)
+	if err != nil {
+		return fmt.Errorf("marshal catalog issues: %w", err)
+	}
+
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO catalog_snapshots (snapshot_id, created_at, entries_json, issues_json)
+		 VALUES (?, ?, ?, ?)`,
+		rec.SnapshotID,
+		rec.CreatedAt.UTC().Format(time.RFC3339Nano),
+		string(entriesJSON),
+		string(issuesJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("insert catalog snapshot: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LatestCatalogSnapshot(ctx context.Context) (core.CatalogSnapshot, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT snapshot_id, created_at, entries_json, issues_json
+		   FROM catalog_snapshots
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+	)
+	return scanCatalogSnapshot(row)
+}
+
 func (s *Store) UpdateSessionLatestJob(ctx context.Context, sessionID, latestJobID string, updatedAt time.Time) error {
 	return s.updateSessionLatestJob(ctx, s.db, sessionID, latestJobID, updatedAt)
 }
@@ -1311,6 +1347,40 @@ func scanTransfer(scanner interface{ Scan(...any) error }) (core.TransferRecord,
 	rec.CreatedAt = parsed
 	if err := json.Unmarshal([]byte(packetJSON), &rec.Packet); err != nil {
 		return core.TransferRecord{}, fmt.Errorf("decode transfer packet: %w", err)
+	}
+
+	return rec, nil
+}
+
+func scanCatalogSnapshot(scanner interface{ Scan(...any) error }) (core.CatalogSnapshot, error) {
+	var rec core.CatalogSnapshot
+	var createdAt string
+	var entriesJSON string
+	var issuesJSON string
+
+	if err := scanner.Scan(&rec.SnapshotID, &createdAt, &entriesJSON, &issuesJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.CatalogSnapshot{}, ErrNotFound
+		}
+		return core.CatalogSnapshot{}, fmt.Errorf("scan catalog snapshot: %w", err)
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return core.CatalogSnapshot{}, fmt.Errorf("parse catalog created_at: %w", err)
+	}
+	rec.CreatedAt = parsed
+	if err := json.Unmarshal([]byte(entriesJSON), &rec.Entries); err != nil {
+		return core.CatalogSnapshot{}, fmt.Errorf("decode catalog entries: %w", err)
+	}
+	if err := json.Unmarshal([]byte(issuesJSON), &rec.Issues); err != nil {
+		return core.CatalogSnapshot{}, fmt.Errorf("decode catalog issues: %w", err)
+	}
+	if rec.Entries == nil {
+		rec.Entries = []core.CatalogEntry{}
+	}
+	if rec.Issues == nil {
+		rec.Issues = []core.CatalogIssue{}
 	}
 
 	return rec, nil
@@ -1699,9 +1769,17 @@ CREATE TABLE IF NOT EXISTS job_runtime (
 	completed_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS catalog_snapshots (
+	snapshot_id TEXT PRIMARY KEY,
+	created_at TEXT NOT NULL,
+	entries_json TEXT NOT NULL DEFAULT '[]',
+	issues_json TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_session_id ON jobs(session_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_job_seq_unique ON events(job_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_job_id_seq ON events(job_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_session_id_ts ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_artifacts_job_id ON artifacts(job_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_snapshots_created_at ON catalog_snapshots(created_at);
 `

@@ -18,6 +18,7 @@ import (
 
 	"github.com/yusefmosiah/cagent/internal/adapterapi"
 	"github.com/yusefmosiah/cagent/internal/adapters"
+	catalogpkg "github.com/yusefmosiah/cagent/internal/catalog"
 	"github.com/yusefmosiah/cagent/internal/core"
 	debriefpkg "github.com/yusefmosiah/cagent/internal/debrief"
 	"github.com/yusefmosiah/cagent/internal/events"
@@ -155,6 +156,10 @@ type RuntimeResult struct {
 	Paths         core.Paths          `json:"paths"`
 	Defaults      core.DefaultsConfig `json:"defaults"`
 	Adapters      []RuntimeAdapter    `json:"adapters"`
+}
+
+type CatalogResult struct {
+	Snapshot core.CatalogSnapshot `json:"snapshot"`
 }
 
 type RawLogEntry struct {
@@ -592,6 +597,25 @@ func (s *Service) Runtime(ctx context.Context, adapterName string) (*RuntimeResu
 		Defaults:      s.Config.Defaults,
 		Adapters:      entries,
 	}, nil
+}
+
+func (s *Service) SyncCatalog(ctx context.Context) (*CatalogResult, error) {
+	snapshot := catalogpkg.Snapshot(ctx, s.Config, nil)
+	if err := s.store.CreateCatalogSnapshot(ctx, snapshot); err != nil {
+		return nil, err
+	}
+	return &CatalogResult{Snapshot: snapshot}, nil
+}
+
+func (s *Service) Catalog(ctx context.Context) (*CatalogResult, error) {
+	snapshot, err := s.store.LatestCatalogSnapshot(ctx)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("%w: catalog snapshot", ErrNotFound)
+		}
+		return nil, err
+	}
+	return &CatalogResult{Snapshot: snapshot}, nil
 }
 
 func (s *Service) ExportTransfer(ctx context.Context, req TransferExportRequest) (*TransferExportResult, error) {

@@ -83,6 +83,8 @@ Commands currently wired:
 - `cagent transfer export`
 - `cagent transfer run`
 - `cagent adapters`
+- `cagent catalog sync`
+- `cagent catalog show`
 - `cagent runtime`
 - `cagent version`
 
@@ -117,7 +119,6 @@ Testing currently in repo:
 
 Important gaps versus the spec:
 - the adapter contract does not yet include explicit `Cancel` or `ExportNativeSession` methods from the spec
-- provider/model/auth-mode catalog discovery is not implemented yet
 - `tool.result`, approval, checkpoint, and richer structured event coverage are still incomplete for some vendors
 - transfer bundle ergonomics can still improve, especially richer evidence references into native session state when available
 
@@ -164,8 +165,24 @@ Run:
 ./bin/cagent logs --follow <job-id>
 ./bin/cagent artifacts list --job <job-id>
 ./bin/cagent adapters --json
+./bin/cagent catalog sync --json
+./bin/cagent catalog show --json
 ./bin/cagent runtime --json
 ```
+
+## Catalog
+
+`catalog` is the host-agent-facing discovery layer for provider/model inventory.
+
+Use:
+- `runtime` to answer "what adapter CLIs are installed and runnable?"
+- `catalog` to answer "what providers, models, and auth modes are available through them?"
+
+Current first-pass behavior:
+- OpenCode, Pi, and Factory enumerate models from local CLI surfaces.
+- Claude and Codex primarily report auth mode plus selected/provider context.
+- Gemini currently reports auth mode conservatively from local environment and config signals.
+- Pricing is intentionally not authoritative in this release; auth mode and billing class are the important routing signals.
 
 ## Configuration
 
@@ -213,7 +230,7 @@ Use cases:
 ## Next Recommended Work
 
 The highest-value remaining steps are:
-1. Implement provider/model/auth-mode catalog discovery.
-2. Build the low-cost live test matrix, including recursive `cagent` orchestration.
-3. Export richer transfer bundles with stronger evidence references into native session state when available.
-4. Improve event translation depth.
+1. Build the low-cost live test matrix, including recursive `cagent` orchestration.
+2. Export richer transfer bundles with stronger evidence references into native session state when available.
+3. Improve event translation depth.
+4. Add richer catalog coverage for vendors with weaker model-enumeration surfaces.

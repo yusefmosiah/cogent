@@ -7,5 +7,19 @@ if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ]; then
   printf '%s\n' 'fake-droid 0.0.1'
   exit 0
 fi
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "--help" ]; then
+  cat <<'EOF'
+Usage: droid exec [options] [prompt]
+
+Options:
+  -m, --model <id>            Model ID to use (default: glm-5)
+
+Available Models:
+  claude-sonnet-4-6            Claude Sonnet 4.6
+  gpt-5.2-codex               GPT-5.2-Codex
+  glm-5                       Droid Core (GLM-5)
+EOF
+  exit 0
+fi
 
 cat "$script_dir/../fixtures/factory/success.jsonl"

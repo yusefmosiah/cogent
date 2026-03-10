@@ -72,6 +72,22 @@ type cliArtifactResult struct {
 	Content  string            `json:"content"`
 }
 
+type cliCatalogResult struct {
+	Snapshot struct {
+		SnapshotID string              `json:"snapshot_id"`
+		Entries    []cliCatalogEntry   `json:"entries"`
+		Issues     []map[string]string `json:"issues"`
+	} `json:"snapshot"`
+}
+
+type cliCatalogEntry struct {
+	Adapter      string `json:"adapter"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	AuthMethod   string `json:"auth_method"`
+	BillingClass string `json:"billing_class"`
+}
+
 func TestDetachedRunCanBeCancelled(t *testing.T) {
 	binary := buildCagentBinary(t)
 	configPath := writeFakeCodexConfig(t)
@@ -246,6 +262,56 @@ func TestDebriefQueuesAndWritesArtifact(t *testing.T) {
 	}
 }
 
+func TestCatalogSyncAndShow(t *testing.T) {
+	binary := buildCagentBinary(t)
+	configPath := writeFakeCatalogConfig(t)
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
+
+	syncOutput := runCagent(t, binary, configPath, "--json", "catalog", "sync")
+	var synced cliCatalogResult
+	if err := json.Unmarshal([]byte(syncOutput), &synced); err != nil {
+		t.Fatalf("unmarshal catalog sync: %v\n%s", err, syncOutput)
+	}
+	if synced.Snapshot.SnapshotID == "" {
+		t.Fatal("expected catalog snapshot id")
+	}
+	if len(synced.Snapshot.Entries) == 0 {
+		t.Fatal("expected catalog entries")
+	}
+
+	showOutput := runCagent(t, binary, configPath, "--json", "catalog", "show")
+	var shown cliCatalogResult
+	if err := json.Unmarshal([]byte(showOutput), &shown); err != nil {
+		t.Fatalf("unmarshal catalog show: %v\n%s", err, showOutput)
+	}
+	if shown.Snapshot.SnapshotID != synced.Snapshot.SnapshotID {
+		t.Fatalf("expected shown snapshot %q, got %q", synced.Snapshot.SnapshotID, shown.Snapshot.SnapshotID)
+	}
+
+	assertEntry := func(adapter, provider, model, authMethod, billing string) {
+		t.Helper()
+		for _, entry := range shown.Snapshot.Entries {
+			if entry.Adapter == adapter && entry.Provider == provider && entry.Model == model {
+				if authMethod != "" && entry.AuthMethod != authMethod {
+					t.Fatalf("expected auth method %q for %+v, got %q", authMethod, entry, entry.AuthMethod)
+				}
+				if billing != "" && entry.BillingClass != billing {
+					t.Fatalf("expected billing class %q for %+v, got %q", billing, entry, entry.BillingClass)
+				}
+				return
+			}
+		}
+		t.Fatalf("missing catalog entry adapter=%s provider=%s model=%s", adapter, provider, model)
+	}
+
+	assertEntry("codex", "openai", "", "chatgpt", "subscription")
+	assertEntry("claude", "firstparty", "", "claude_ai", "subscription")
+	assertEntry("opencode", "openai", "gpt-5-nano", "oauth", "subscription")
+	assertEntry("pi", "google", "gemini-2.5-flash", "api_key", "metered_api")
+	assertEntry("factory", "factory", "glm-5", "api_key", "metered_api")
+	assertEntry("gemini", "google", "", "api_key", "metered_api")
+}
+
 func buildCagentBinary(t *testing.T) string {
 	t.Helper()
 
@@ -307,6 +373,62 @@ func writeFakeCodexGeminiConfig(t *testing.T) string {
 
 	configPath := filepath.Join(configDir, "config.toml")
 	configBody := []byte("[store]\nstate_dir = \"" + stateDir + "\"\n\n[adapters.codex]\nbinary = \"" + fakeCodex + "\"\nenabled = true\n\n[adapters.gemini]\nbinary = \"" + fakeGemini + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	return configPath
+}
+
+func writeFakeCatalogConfig(t *testing.T) string {
+	t.Helper()
+
+	configDir := t.TempDir()
+	stateDir := t.TempDir()
+	cacheDir := t.TempDir()
+	fakeCodex, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "codex"))
+	if err != nil {
+		t.Fatalf("resolve fake codex path: %v", err)
+	}
+	fakeClaude, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "claude"))
+	if err != nil {
+		t.Fatalf("resolve fake claude path: %v", err)
+	}
+	fakeOpenCode, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	fakePi, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "pi"))
+	if err != nil {
+		t.Fatalf("resolve fake pi path: %v", err)
+	}
+	fakeDroid, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "droid"))
+	if err != nil {
+		t.Fatalf("resolve fake droid path: %v", err)
+	}
+	fakeGemini, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "gemini"))
+	if err != nil {
+		t.Fatalf("resolve fake gemini path: %v", err)
+	}
+	for _, binary := range []string{fakeCodex, fakeClaude, fakeOpenCode, fakePi, fakeDroid, fakeGemini} {
+		if err := os.Chmod(binary, 0o755); err != nil {
+			t.Fatalf("chmod fake binary: %v", err)
+		}
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte(
+		"[store]\nstate_dir = \"" + stateDir + "\"\n\n" +
+			"[adapters.codex]\nbinary = \"" + fakeCodex + "\"\nenabled = true\n\n" +
+			"[adapters.claude]\nbinary = \"" + fakeClaude + "\"\nenabled = true\n\n" +
+			"[adapters.opencode]\nbinary = \"" + fakeOpenCode + "\"\nenabled = true\n\n" +
+			"[adapters.pi]\nbinary = \"" + fakePi + "\"\nenabled = true\n\n" +
+			"[adapters.factory]\nbinary = \"" + fakeDroid + "\"\nenabled = true\n\n" +
+			"[adapters.gemini]\nbinary = \"" + fakeGemini + "\"\nenabled = true\n",
+	)
 	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

@@ -656,6 +656,121 @@ func TestRuntimeIncludesAdapterTraits(t *testing.T) {
 	}
 }
 
+func TestSyncAndShowCatalog(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
+	setTestExecutable(t)
+
+	fakeCodex, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "codex"))
+	if err != nil {
+		t.Fatalf("resolve fake codex path: %v", err)
+	}
+	fakeClaude, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "claude"))
+	if err != nil {
+		t.Fatalf("resolve fake claude path: %v", err)
+	}
+	fakeOpenCode, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "opencode"))
+	if err != nil {
+		t.Fatalf("resolve fake opencode path: %v", err)
+	}
+	fakePi, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "pi"))
+	if err != nil {
+		t.Fatalf("resolve fake pi path: %v", err)
+	}
+	fakeDroid, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "droid"))
+	if err != nil {
+		t.Fatalf("resolve fake droid path: %v", err)
+	}
+	fakeGemini, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "gemini"))
+	if err != nil {
+		t.Fatalf("resolve fake gemini path: %v", err)
+	}
+	for _, binary := range []string{fakeCodex, fakeClaude, fakeOpenCode, fakePi, fakeDroid, fakeGemini} {
+		if err := os.Chmod(binary, 0o755); err != nil {
+			t.Fatalf("chmod fake binary: %v", err)
+		}
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte(
+		"[adapters.codex]\n" +
+			"binary = \"" + fakeCodex + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.claude]\n" +
+			"binary = \"" + fakeClaude + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.opencode]\n" +
+			"binary = \"" + fakeOpenCode + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.pi]\n" +
+			"binary = \"" + fakePi + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.factory]\n" +
+			"binary = \"" + fakeDroid + "\"\n" +
+			"enabled = true\n\n" +
+			"[adapters.gemini]\n" +
+			"binary = \"" + fakeGemini + "\"\n" +
+			"enabled = true\n",
+	)
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	synced, err := svc.SyncCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("SyncCatalog returned error: %v", err)
+	}
+	if synced.Snapshot.SnapshotID == "" {
+		t.Fatal("expected snapshot id")
+	}
+	if len(synced.Snapshot.Entries) == 0 {
+		t.Fatal("expected catalog entries")
+	}
+
+	shown, err := svc.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog returned error: %v", err)
+	}
+	if shown.Snapshot.SnapshotID != synced.Snapshot.SnapshotID {
+		t.Fatalf("expected latest snapshot %q, got %q", synced.Snapshot.SnapshotID, shown.Snapshot.SnapshotID)
+	}
+
+	assertCatalogEntry := func(adapter, provider, model, authMethod, billing string) {
+		t.Helper()
+		for _, entry := range shown.Snapshot.Entries {
+			if entry.Adapter == adapter && entry.Provider == provider && entry.Model == model {
+				if authMethod != "" && entry.AuthMethod != authMethod {
+					t.Fatalf("expected auth method %q for %+v, got %q", authMethod, entry, entry.AuthMethod)
+				}
+				if billing != "" && entry.BillingClass != billing {
+					t.Fatalf("expected billing %q for %+v, got %q", billing, entry, entry.BillingClass)
+				}
+				return
+			}
+		}
+		t.Fatalf("missing catalog entry adapter=%s provider=%s model=%s", adapter, provider, model)
+	}
+
+	assertCatalogEntry("codex", "openai", "", "chatgpt", "subscription")
+	assertCatalogEntry("claude", "firstparty", "", "claude_ai", "subscription")
+	assertCatalogEntry("opencode", "openai", "gpt-5-nano", "oauth", "subscription")
+	assertCatalogEntry("pi", "google", "gemini-2.5-flash", "api_key", "metered_api")
+	assertCatalogEntry("factory", "factory", "glm-5", "api_key", "metered_api")
+	assertCatalogEntry("gemini", "google", "", "api_key", "metered_api")
+}
+
 func TestTransferExportAndRun(t *testing.T) {
 	stateDir := t.TempDir()
 	configDir := t.TempDir()

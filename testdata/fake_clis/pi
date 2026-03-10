@@ -9,6 +9,26 @@ while [ "$#" -gt 0 ]; do
       printf '%s\n' 'fake-pi 0.0.1'
       exit 0
       ;;
+    --help|-h)
+      cat <<'EOF'
+pi - AI coding assistant with read, bash, edit, write tools
+
+Options:
+  --provider <name>              Provider name (default: google)
+  --model <id>                   Model ID (default: gemini-2.5-flash)
+  --list-models [search]         List available models (with optional fuzzy search)
+EOF
+      exit 0
+      ;;
+    --list-models)
+      cat <<'EOF'
+provider  model              context  max-out  thinking  images
+google    gemini-2.5-flash   1.0M     65.5K    yes       yes
+openai    gpt-4o-mini        128K     16K      no        yes
+zai       glm-5              128K     16K      no        no
+EOF
+      exit 0
+      ;;
     --session)
       shift
       session_path="${1:-}"

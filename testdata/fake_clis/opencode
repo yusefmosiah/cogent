@@ -5,6 +5,23 @@ if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ]; then
   printf '%s\n' 'fake-opencode 0.0.1'
   exit 0
 fi
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "list" ]; then
+  cat <<'EOF'
+Credentials ~/.local/share/opencode/auth.json
+● OpenAI oauth
+● Z.AI api
+● OpenRouter api
+EOF
+  exit 0
+fi
+if [ "${1:-}" = "models" ]; then
+  cat <<'EOF'
+openai/gpt-5-nano
+zai/glm-5
+openrouter/openai/gpt-4o-mini
+EOF
+  exit 0
+fi
 
 session_id="opencode-session-123"
 continued="false"

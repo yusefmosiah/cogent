@@ -110,6 +110,39 @@ type ArtifactRecord struct {
 	Metadata   map[string]any `json:"metadata"`
 }
 
+type CatalogProvenance struct {
+	Source     string    `json:"source"`
+	Command    string    `json:"command,omitempty"`
+	Path       string    `json:"path,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+type CatalogEntry struct {
+	Adapter      string            `json:"adapter"`
+	Provider     string            `json:"provider,omitempty"`
+	Model        string            `json:"model,omitempty"`
+	Selected     bool              `json:"selected"`
+	Available    bool              `json:"available"`
+	AuthMethod   string            `json:"auth_method,omitempty"`
+	BillingClass string            `json:"billing_class,omitempty"`
+	Source       string            `json:"source,omitempty"`
+	Provenance   CatalogProvenance `json:"provenance"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
+}
+
+type CatalogIssue struct {
+	Adapter  string `json:"adapter"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+type CatalogSnapshot struct {
+	SnapshotID string         `json:"snapshot_id"`
+	CreatedAt  time.Time      `json:"created_at"`
+	Entries    []CatalogEntry `json:"entries"`
+	Issues     []CatalogIssue `json:"issues,omitempty"`
+}
+
 type TransferSource struct {
 	Adapter         string `json:"adapter"`
 	Model           string `json:"model,omitempty"`

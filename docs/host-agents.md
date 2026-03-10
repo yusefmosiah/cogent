@@ -5,6 +5,7 @@
 Use it when the host agent wants:
 - one stable JSON CLI instead of vendor-specific command lines,
 - durable local sessions and artifacts,
+- provider/model/auth-mode discovery for routing,
 - same-vendor continuation through `send`,
 - a model-authored debrief from a still-live session,
 - explicit cross-vendor failover through `transfer`.
@@ -15,6 +16,8 @@ Use it when the host agent wants:
 
 ```bash
 cagent runtime --json
+cagent catalog sync --json
+cagent catalog show --json
 ```
 
 2. Choose an adapter based on:
@@ -70,6 +73,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter codex --cw
 - `cagent` does not perform vendor auth flows.
 - `cagent` preserves native session IDs and raw vendor output.
 - `runtime --json` is the preferred machine-facing inventory command.
+- `catalog show --json` is the preferred machine-facing provider/model inventory command.
 - Use `status`, `logs --follow`, `session`, and `cancel` as the control surface after launch.
 - Use `status --wait` when the host wants a blocking wait without writing its own polling loop.
 - Use `artifacts list/show` to inspect transfer and debrief outputs directly.

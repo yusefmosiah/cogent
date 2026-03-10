@@ -127,6 +127,7 @@ func NewRootCommand() *cobra.Command {
 		newTransferCommand(opts, "transfer", "Export and launch explicit cross-vendor transfers", false),
 		newTransferCommand(opts, "handoff", "Deprecated alias for transfer", true),
 		newAdaptersCommand(opts),
+		newCatalogCommand(opts),
 		newRuntimeCommand(opts, "runtime", "Show the current host-agent runtime inventory", false),
 		newInternalRunJobCommand(opts),
 		newVersionCommand(),
@@ -649,6 +650,52 @@ func newRuntimeCommand(root *rootOptions, use, short string, hidden bool) *cobra
 	return cmd
 }
 
+func newCatalogCommand(root *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "catalog",
+		Short: "Discover and show provider/model inventory",
+	}
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "sync",
+			Short: "Refresh the discovered provider/model catalog",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				result, err := svc.SyncCatalog(context.Background())
+				if err != nil {
+					return mapServiceError(err)
+				}
+				return renderCatalog(cmd, root.jsonOutput, result)
+			},
+		},
+		&cobra.Command{
+			Use:   "show",
+			Short: "Show the latest discovered provider/model catalog",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				svc, err := service.Open(context.Background(), root.configPath)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = svc.Close() }()
+
+				result, err := svc.Catalog(context.Background())
+				if err != nil {
+					return mapServiceError(err)
+				}
+				return renderCatalog(cmd, root.jsonOutput, result)
+			},
+		},
+	)
+
+	return cmd
+}
+
 func newTransferCommand(root *rootOptions, use, short string, hidden bool) *cobra.Command {
 	exportOpts := &transferExportOptions{}
 	runOpts := &transferRunOptions{}
@@ -1164,6 +1211,40 @@ func renderRuntime(cmd *cobra.Command, jsonOutput bool, result *service.RuntimeR
 		}
 	}
 
+	return nil
+}
+
+func renderCatalog(cmd *cobra.Command, jsonOutput bool, result *service.CatalogResult) error {
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), result)
+	}
+
+	if err := writef(cmd.OutOrStdout(), "snapshot: %s\n", result.Snapshot.SnapshotID); err != nil {
+		return err
+	}
+	if err := writef(cmd.OutOrStdout(), "created: %s\n", result.Snapshot.CreatedAt.Format("2006-01-02T15:04:05Z07:00")); err != nil {
+		return err
+	}
+	for _, entry := range result.Snapshot.Entries {
+		if err := writef(
+			cmd.OutOrStdout(),
+			"%s\t%s\t%s\tselected=%t\tauth=%s\tbilling=%s\tsource=%s\n",
+			entry.Adapter,
+			emptyDash(entry.Provider),
+			emptyDash(entry.Model),
+			entry.Selected,
+			emptyDash(entry.AuthMethod),
+			emptyDash(entry.BillingClass),
+			emptyDash(entry.Source),
+		); err != nil {
+			return err
+		}
+	}
+	for _, issue := range result.Snapshot.Issues {
+		if err := writef(cmd.OutOrStdout(), "issue: %s\t%s\t%s\n", issue.Adapter, issue.Severity, issue.Message); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

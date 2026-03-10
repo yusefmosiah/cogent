@@ -11,6 +11,7 @@ Use `cagent` when you want a local control plane over installed coding-agent CLI
 
 Typical cases:
 - choose among Codex, Claude, Pi, Gemini, Factory, or OpenCode at runtime,
+- inspect discovered provider/model/auth-mode inventory before routing work,
 - launch a task through one stable `--json` interface,
 - continue a same-vendor session through `send`,
 - ask a still-live session to land the plane with `debrief`,
@@ -23,6 +24,8 @@ Typical cases:
 
 ```bash
 cagent runtime --json
+cagent catalog sync --json
+cagent catalog show --json
 ```
 
 2. Choose an adapter using:
@@ -76,6 +79,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 ## Operating rules
 
 - Prefer `runtime --json` as the machine-facing inventory command.
+- Prefer `catalog show --json` when choosing among providers/models and auth modes.
 - Treat `cagent` as machine-facing first. Use `--json` unless a human-readable summary is explicitly better.
 - Treat `run`, `send`, and `transfer run` as launch operations, not blocking operations.
 - Treat `debrief` as a debugging/recovery workflow, not a normal orchestration step.
