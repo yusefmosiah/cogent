@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -188,19 +189,80 @@ func usagePayload(payload map[string]any) map[string]any {
 		}
 	}
 	if modelUsage, ok := payload["modelUsage"].(map[string]any); ok {
+		var (
+			entries          []map[string]any
+			totalInput       int64
+			totalOutput      int64
+			totalTokens      int64
+			totalCached      int64
+			totalCacheRead   int64
+			totalCacheCreate int64
+			totalCost        float64
+		)
 		for model, value := range modelUsage {
 			entry, ok := value.(map[string]any)
 			if !ok {
 				continue
 			}
-			if result["model"] == nil {
-				result["model"] = model
+			normalized := map[string]any{
+				"model": model,
 			}
-			appendUsageFields(result, entry)
+			appendUsageFields(normalized, entry)
+			input, _ := intValue(normalized["input_tokens"])
+			output, _ := intValue(normalized["output_tokens"])
+			total, _ := intValue(normalized["total_tokens"])
+			cached, _ := intValue(normalized["cached_input_tokens"])
+			cacheRead, _ := intValue(normalized["cache_read_input_tokens"])
+			cacheCreate, _ := intValue(normalized["cache_creation_input_tokens"])
+			if total == 0 {
+				total = input + output + cached + cacheRead + cacheCreate
+				if total > 0 {
+					normalized["total_tokens"] = total
+				}
+			}
 			if cost, ok := number(entry["costUSD"]); ok {
-				result["cost_usd"] = cost
+				normalized["cost_usd"] = cost
+				totalCost += cost
 			}
-			break
+			totalInput += input
+			totalOutput += output
+			totalTokens += total
+			totalCached += cached
+			totalCacheRead += cacheRead
+			totalCacheCreate += cacheCreate
+			entries = append(entries, normalized)
+		}
+		if len(entries) > 0 {
+			sort.Slice(entries, func(i, j int) bool {
+				return firstString(entries[i], "model") < firstString(entries[j], "model")
+			})
+			if len(entries) == 1 {
+				result["model"] = firstString(entries[0], "model")
+			} else {
+				result["model"] = "multi"
+				result["model_usage"] = entries
+			}
+			if totalInput > 0 {
+				result["input_tokens"] = totalInput
+			}
+			if totalOutput > 0 {
+				result["output_tokens"] = totalOutput
+			}
+			if totalTokens > 0 {
+				result["total_tokens"] = totalTokens
+			}
+			if totalCached > 0 {
+				result["cached_input_tokens"] = totalCached
+			}
+			if totalCacheRead > 0 {
+				result["cache_read_input_tokens"] = totalCacheRead
+			}
+			if totalCacheCreate > 0 {
+				result["cache_creation_input_tokens"] = totalCacheCreate
+			}
+			if _, ok := result["cost_usd"]; !ok && totalCost > 0 {
+				result["cost_usd"] = totalCost
+			}
 		}
 	}
 

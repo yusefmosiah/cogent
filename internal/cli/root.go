@@ -459,6 +459,9 @@ func newListCommand(root *rootOptions) *cobra.Command {
 					return mapServiceError(err)
 				}
 				if root.jsonOutput {
+					if jobs == nil {
+						jobs = []core.JobRecord{}
+					}
 					return writeJSON(cmd.OutOrStdout(), jobs)
 				}
 				for _, job := range jobs {
@@ -485,6 +488,9 @@ func newListCommand(root *rootOptions) *cobra.Command {
 					return mapServiceError(err)
 				}
 				if root.jsonOutput {
+					if sessions == nil {
+						sessions = []core.SessionRecord{}
+					}
 					return writeJSON(cmd.OutOrStdout(), sessions)
 				}
 				for _, session := range sessions {
@@ -1044,6 +1050,31 @@ func renderStatus(cmd *cobra.Command, jsonOutput bool, status *service.StatusRes
 			status.Usage.CacheReadInputTokens,
 			status.Usage.CacheCreationInputTokens,
 		); err != nil {
+			return err
+		}
+	}
+	for _, usage := range status.UsageByModel {
+		if err := writef(
+			cmd.OutOrStdout(),
+			"usage_model: %s input=%d output=%d total=%d cache_read=%d cache_write=%d cost=$%.6f\n",
+			emptyDash(usage.Model),
+			usage.InputTokens,
+			usage.OutputTokens,
+			usage.TotalTokens,
+			usage.CacheReadInputTokens,
+			usage.CacheCreationInputTokens,
+			usage.CostUSD,
+		); err != nil {
+			return err
+		}
+	}
+	if status.VendorCost != nil && status.VendorCost.TotalCostUSD > 0 {
+		if err := writef(cmd.OutOrStdout(), "api_cost_vendor: $%.6f\n", status.VendorCost.TotalCostUSD); err != nil {
+			return err
+		}
+	}
+	if status.EstimatedCost != nil && status.EstimatedCost.TotalCostUSD > 0 {
+		if err := writef(cmd.OutOrStdout(), "api_cost_estimated: $%.6f\n", status.EstimatedCost.TotalCostUSD); err != nil {
 			return err
 		}
 	}

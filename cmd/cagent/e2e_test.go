@@ -41,6 +41,23 @@ type cliStatusResult struct {
 		Estimated    bool    `json:"estimated"`
 		Source       string  `json:"source"`
 	} `json:"cost"`
+	VendorCost *struct {
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		Estimated    bool    `json:"estimated"`
+		Source       string  `json:"source"`
+	} `json:"vendor_cost"`
+	EstimatedCost *struct {
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		Estimated    bool    `json:"estimated"`
+		Source       string  `json:"source"`
+	} `json:"estimated_cost"`
+	UsageByModel []struct {
+		Model        string  `json:"model"`
+		TotalTokens  int64   `json:"total_tokens"`
+		CostUSD      float64 `json:"cost_usd"`
+		InputTokens  int64   `json:"input_tokens"`
+		OutputTokens int64   `json:"output_tokens"`
+	} `json:"usage_by_model"`
 }
 
 type cliJobRecord struct {
@@ -231,6 +248,9 @@ func TestStatusReportsUsageAndEstimatedCost(t *testing.T) {
 	if !status.Cost.Estimated {
 		t.Fatalf("expected estimated cost for codex fake run, got %+v", status.Cost)
 	}
+	if status.EstimatedCost == nil || status.EstimatedCost.TotalCostUSD != status.Cost.TotalCostUSD {
+		t.Fatalf("expected explicit estimated_cost in status, got %+v", status.EstimatedCost)
+	}
 }
 
 func TestClaudeStatusReportsVendorCost(t *testing.T) {
@@ -254,6 +274,22 @@ func TestClaudeStatusReportsVendorCost(t *testing.T) {
 	}
 	if status.Cost.Estimated {
 		t.Fatalf("expected vendor-reported cost, got %+v", status.Cost)
+	}
+	if status.VendorCost == nil || status.VendorCost.TotalCostUSD != status.Cost.TotalCostUSD {
+		t.Fatalf("expected explicit vendor_cost in status, got %+v", status.VendorCost)
+	}
+	if status.EstimatedCost == nil || status.EstimatedCost.TotalCostUSD <= 0 {
+		t.Fatalf("expected fallback estimated_cost alongside vendor cost, got %+v", status.EstimatedCost)
+	}
+}
+
+func TestListRunningJobsReturnsEmptyArray(t *testing.T) {
+	binary := buildCagentBinary(t)
+	configPath := writeFakeCodexConfig(t)
+
+	output := runCagent(t, binary, configPath, "--json", "list", "--state", "running")
+	if strings.TrimSpace(output) != "[]" {
+		t.Fatalf("expected empty JSON array, got %s", output)
 	}
 }
 

@@ -134,6 +134,19 @@ type UsageReport struct {
 	Source                   string `json:"source,omitempty"`
 }
 
+type ModelUsageReport struct {
+	Provider                 string  `json:"provider,omitempty"`
+	Model                    string  `json:"model,omitempty"`
+	InputTokens              int64   `json:"input_tokens,omitempty"`
+	OutputTokens             int64   `json:"output_tokens,omitempty"`
+	TotalTokens              int64   `json:"total_tokens,omitempty"`
+	CachedInputTokens        int64   `json:"cached_input_tokens,omitempty"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens,omitempty"`
+	CostUSD                  float64 `json:"cost_usd,omitempty"`
+	Source                   string  `json:"source,omitempty"`
+}
+
 type CostEstimate struct {
 	Currency             string     `json:"currency,omitempty"`
 	InputCostUSD         float64    `json:"input_cost_usd,omitempty"`

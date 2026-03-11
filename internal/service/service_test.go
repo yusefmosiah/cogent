@@ -210,6 +210,9 @@ func TestRunStatusEstimatesCostWhenModelPricingKnown(t *testing.T) {
 	if !status.Cost.Estimated {
 		t.Fatalf("expected estimated cost, got %+v", status.Cost)
 	}
+	if status.EstimatedCost == nil || status.EstimatedCost.TotalCostUSD != status.Cost.TotalCostUSD {
+		t.Fatalf("expected explicit estimated cost, got %+v", status.EstimatedCost)
+	}
 }
 
 func TestClaudeRunStatusUsesVendorCost(t *testing.T) {
@@ -259,6 +262,12 @@ func TestClaudeRunStatusUsesVendorCost(t *testing.T) {
 	}
 	if status.Cost.Estimated {
 		t.Fatalf("expected vendor-reported cost, got %+v", status.Cost)
+	}
+	if status.VendorCost == nil || status.VendorCost.TotalCostUSD != status.Cost.TotalCostUSD {
+		t.Fatalf("expected explicit vendor cost, got %+v", status.VendorCost)
+	}
+	if status.EstimatedCost == nil || status.EstimatedCost.TotalCostUSD <= 0 {
+		t.Fatalf("expected explicit estimated cost alongside vendor cost, got %+v", status.EstimatedCost)
 	}
 }
 

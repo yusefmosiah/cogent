@@ -11,6 +11,8 @@ It gives you one machine-readable interface for:
 - launching new jobs from those transfers.
 
 The implementation is driven by [cagent-spec-and-implementation-guide.md](/Users/wiz/cagent/cagent-spec-and-implementation-guide.md).
+The emerging work-runtime direction is specified in [docs/cagent-work-runtime.md](/Users/wiz/cagent/docs/cagent-work-runtime.md).
+The concrete work schema and CLI/API plan are specified in [docs/cagent-work-api-and-schema.md](/Users/wiz/cagent/docs/cagent-work-api-and-schema.md).
 
 ## Status
 

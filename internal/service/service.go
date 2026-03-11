@@ -121,7 +121,10 @@ type StatusResult struct {
 	NativeSessions []core.NativeSessionRecord `json:"native_sessions"`
 	Events         []core.EventRecord         `json:"events"`
 	Usage          *core.UsageReport          `json:"usage,omitempty"`
+	UsageByModel   []core.ModelUsageReport    `json:"usage_by_model,omitempty"`
 	Cost           *core.CostEstimate         `json:"cost,omitempty"`
+	VendorCost     *core.CostEstimate         `json:"vendor_cost,omitempty"`
+	EstimatedCost  *core.CostEstimate         `json:"estimated_cost,omitempty"`
 }
 
 type SessionAction struct {
@@ -895,13 +898,23 @@ func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, erro
 		return nil, err
 	}
 
+	vendorCost := vendorCostFromSummary(job)
+	estimatedCost := estimatedCostFromSummary(job)
+	selectedCost := vendorCost
+	if selectedCost == nil {
+		selectedCost = estimatedCost
+	}
+
 	return &StatusResult{
 		Job:            job,
 		Session:        session,
 		NativeSessions: nativeSessions,
 		Events:         events,
 		Usage:          usageFromSummary(job.Summary),
-		Cost:           s.costFromSummary(job),
+		UsageByModel:   modelUsageFromSummary(job.Summary),
+		Cost:           selectedCost,
+		VendorCost:     vendorCost,
+		EstimatedCost:  estimatedCost,
 	}, nil
 }
 
@@ -2479,11 +2492,20 @@ func (s *Service) applyUsageHint(ctx context.Context, job *core.JobRecord, paylo
 			"source":                      merged.Source,
 		}
 	}
+	if usageByModel := modelUsageFromPayload(payload); len(usageByModel) > 0 {
+		job.Summary["usage_by_model"] = modelUsageMaps(usageByModel)
+	}
 
-	if cost := costFromPayload(payload); cost != nil {
-		job.Summary["cost"] = costMap(*cost)
-	} else if estimated := s.costFromSummary(*job); estimated != nil {
-		job.Summary["cost"] = costMap(*estimated)
+	if vendor := costFromPayload(payload); vendor != nil {
+		job.Summary["vendor_cost"] = costMap(*vendor)
+	}
+	if estimated := s.estimateCostForJob(*job); estimated != nil {
+		job.Summary["estimated_cost"] = costMap(*estimated)
+	}
+	if preferred := preferredCostFromSummary(*job); preferred != nil {
+		job.Summary["cost"] = costMap(*preferred)
+	} else {
+		delete(job.Summary, "cost")
 	}
 
 	return s.store.UpdateJob(ctx, *job)
@@ -2562,6 +2584,112 @@ func mergeUsageReports(existing *core.UsageReport, incoming core.UsageReport) *c
 	return &merged
 }
 
+func modelUsageFromPayload(payload map[string]any) []core.ModelUsageReport {
+	raw, ok := payload["model_usage"].([]any)
+	if !ok {
+		return nil
+	}
+
+	models := make([]core.ModelUsageReport, 0, len(raw))
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		report := core.ModelUsageReport{
+			Provider:                 summaryString(entry, "provider"),
+			Model:                    summaryString(entry, "model"),
+			InputTokens:              summaryInt64(entry, "input_tokens"),
+			OutputTokens:             summaryInt64(entry, "output_tokens"),
+			TotalTokens:              summaryInt64(entry, "total_tokens"),
+			CachedInputTokens:        summaryInt64(entry, "cached_input_tokens"),
+			CacheReadInputTokens:     summaryInt64(entry, "cache_read_input_tokens"),
+			CacheCreationInputTokens: summaryInt64(entry, "cache_creation_input_tokens"),
+			CostUSD:                  summaryFloat64(entry, "cost_usd"),
+			Source:                   "vendor_report",
+		}
+		if report.TotalTokens == 0 {
+			report.TotalTokens = report.InputTokens + report.OutputTokens + report.CachedInputTokens + report.CacheReadInputTokens + report.CacheCreationInputTokens
+		}
+		if report.Model == "" {
+			continue
+		}
+		models = append(models, report)
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Model < models[j].Model
+	})
+	return models
+}
+
+func modelUsageFromSummary(summary map[string]any) []core.ModelUsageReport {
+	if summary == nil {
+		return nil
+	}
+	raw, ok := summary["usage_by_model"].([]any)
+	if !ok {
+		return nil
+	}
+	models := make([]core.ModelUsageReport, 0, len(raw))
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		model := core.ModelUsageReport{
+			Provider:                 summaryString(entry, "provider"),
+			Model:                    summaryString(entry, "model"),
+			InputTokens:              summaryInt64(entry, "input_tokens"),
+			OutputTokens:             summaryInt64(entry, "output_tokens"),
+			TotalTokens:              summaryInt64(entry, "total_tokens"),
+			CachedInputTokens:        summaryInt64(entry, "cached_input_tokens"),
+			CacheReadInputTokens:     summaryInt64(entry, "cache_read_input_tokens"),
+			CacheCreationInputTokens: summaryInt64(entry, "cache_creation_input_tokens"),
+			CostUSD:                  summaryFloat64(entry, "cost_usd"),
+			Source:                   summaryString(entry, "source"),
+		}
+		if model.TotalTokens == 0 {
+			model.TotalTokens = model.InputTokens + model.OutputTokens + model.CachedInputTokens + model.CacheReadInputTokens + model.CacheCreationInputTokens
+		}
+		if model.Model == "" {
+			continue
+		}
+		models = append(models, model)
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Model < models[j].Model
+	})
+	return models
+}
+
+func modelUsageMaps(models []core.ModelUsageReport) []map[string]any {
+	if len(models) == 0 {
+		return nil
+	}
+	result := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		result = append(result, map[string]any{
+			"provider":                    model.Provider,
+			"model":                       model.Model,
+			"input_tokens":                model.InputTokens,
+			"output_tokens":               model.OutputTokens,
+			"total_tokens":                model.TotalTokens,
+			"cached_input_tokens":         model.CachedInputTokens,
+			"cache_read_input_tokens":     model.CacheReadInputTokens,
+			"cache_creation_input_tokens": model.CacheCreationInputTokens,
+			"cost_usd":                    model.CostUSD,
+			"source":                      model.Source,
+		})
+	}
+	return result
+}
+
 func costFromPayload(payload map[string]any) *core.CostEstimate {
 	total := summaryFloat64(payload, "cost_usd")
 	if total == 0 {
@@ -2575,27 +2703,79 @@ func costFromPayload(payload map[string]any) *core.CostEstimate {
 	}
 }
 
-func (s *Service) costFromSummary(job core.JobRecord) *core.CostEstimate {
-	if job.Summary != nil {
-		if raw, ok := job.Summary["cost"].(map[string]any); ok {
-			cost := &core.CostEstimate{
-				Currency:             summaryString(raw, "currency"),
-				InputCostUSD:         summaryFloat64(raw, "input_cost_usd"),
-				OutputCostUSD:        summaryFloat64(raw, "output_cost_usd"),
-				CachedInputCostUSD:   summaryFloat64(raw, "cached_input_cost_usd"),
-				CacheReadCostUSD:     summaryFloat64(raw, "cache_read_cost_usd"),
-				CacheCreationCostUSD: summaryFloat64(raw, "cache_creation_cost_usd"),
-				TotalCostUSD:         summaryFloat64(raw, "total_cost_usd"),
-				Estimated:            summaryBool(raw, "estimated"),
-				Source:               summaryString(raw, "source"),
-				SourceURL:            summaryString(raw, "source_url"),
+func preferredCostFromSummary(job core.JobRecord) *core.CostEstimate {
+	if vendor := vendorCostFromSummary(job); vendor != nil {
+		return vendor
+	}
+	return estimatedCostFromSummary(job)
+}
+
+func vendorCostFromSummary(job core.JobRecord) *core.CostEstimate {
+	if cost := summaryCost(job.Summary, "vendor_cost"); cost != nil {
+		return cost
+	}
+	if cost := summaryCost(job.Summary, "cost"); cost != nil && !cost.Estimated {
+		return cost
+	}
+	return nil
+}
+
+func estimatedCostFromSummary(job core.JobRecord) *core.CostEstimate {
+	if cost := summaryCost(job.Summary, "estimated_cost"); cost != nil {
+		return cost
+	}
+	if cost := summaryCost(job.Summary, "cost"); cost != nil && cost.Estimated {
+		return cost
+	}
+	return nil
+}
+
+func (s *Service) estimateCostForJob(job core.JobRecord) *core.CostEstimate {
+	if models := modelUsageFromSummary(job.Summary); len(models) > 0 {
+		total := &core.CostEstimate{
+			Currency:  "USD",
+			Estimated: true,
+		}
+		for _, modelUsage := range models {
+			usage := core.UsageReport{
+				Provider:                 modelUsage.Provider,
+				Model:                    modelUsage.Model,
+				InputTokens:              modelUsage.InputTokens,
+				OutputTokens:             modelUsage.OutputTokens,
+				TotalTokens:              modelUsage.TotalTokens,
+				CachedInputTokens:        modelUsage.CachedInputTokens,
+				CacheReadInputTokens:     modelUsage.CacheReadInputTokens,
+				CacheCreationInputTokens: modelUsage.CacheCreationInputTokens,
+				Source:                   modelUsage.Source,
 			}
-			if cost.Currency == "" {
-				cost.Currency = "USD"
+			provider, model := pricingLookupContext(job, &usage)
+			if provider == "" || model == "" {
+				continue
 			}
-			if cost.TotalCostUSD > 0 {
-				return cost
+			usage.Provider = provider
+			usage.Model = model
+			estimate := pricing.Estimate(usage, pricing.Resolve(s.Config, provider, model))
+			if estimate == nil {
+				continue
 			}
+			total.InputCostUSD += estimate.InputCostUSD
+			total.OutputCostUSD += estimate.OutputCostUSD
+			total.CachedInputCostUSD += estimate.CachedInputCostUSD
+			total.CacheReadCostUSD += estimate.CacheReadCostUSD
+			total.CacheCreationCostUSD += estimate.CacheCreationCostUSD
+			total.TotalCostUSD += estimate.TotalCostUSD
+			if total.Source == "" {
+				total.Source = estimate.Source
+			}
+			if total.SourceURL == "" {
+				total.SourceURL = estimate.SourceURL
+			}
+			if total.ObservedAt == nil {
+				total.ObservedAt = estimate.ObservedAt
+			}
+		}
+		if total.TotalCostUSD > 0 {
+			return total
 		}
 	}
 
@@ -2610,6 +2790,10 @@ func (s *Service) costFromSummary(job core.JobRecord) *core.CostEstimate {
 	usage.Provider = provider
 	usage.Model = model
 	return pricing.Estimate(*usage, pricing.Resolve(s.Config, provider, model))
+}
+
+func (s *Service) costFromSummary(job core.JobRecord) *core.CostEstimate {
+	return preferredCostFromSummary(job)
 }
 
 func pricingLookupContext(job core.JobRecord, usage *core.UsageReport) (string, string) {
@@ -2658,6 +2842,35 @@ func costMap(cost core.CostEstimate) map[string]any {
 		"source":                  cost.Source,
 		"source_url":              cost.SourceURL,
 	}
+}
+
+func summaryCost(summary map[string]any, key string) *core.CostEstimate {
+	if summary == nil {
+		return nil
+	}
+	raw, ok := summary[key].(map[string]any)
+	if !ok {
+		return nil
+	}
+	cost := &core.CostEstimate{
+		Currency:             summaryString(raw, "currency"),
+		InputCostUSD:         summaryFloat64(raw, "input_cost_usd"),
+		OutputCostUSD:        summaryFloat64(raw, "output_cost_usd"),
+		CachedInputCostUSD:   summaryFloat64(raw, "cached_input_cost_usd"),
+		CacheReadCostUSD:     summaryFloat64(raw, "cache_read_cost_usd"),
+		CacheCreationCostUSD: summaryFloat64(raw, "cache_creation_cost_usd"),
+		TotalCostUSD:         summaryFloat64(raw, "total_cost_usd"),
+		Estimated:            summaryBool(raw, "estimated"),
+		Source:               summaryString(raw, "source"),
+		SourceURL:            summaryString(raw, "source_url"),
+	}
+	if cost.Currency == "" {
+		cost.Currency = "USD"
+	}
+	if cost.TotalCostUSD <= 0 {
+		return nil
+	}
+	return cost
 }
 
 func summaryInt64(summary map[string]any, key string) int64 {
