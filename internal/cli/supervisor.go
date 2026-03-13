@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -179,6 +180,21 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 			}
 			sleepOrStop(ctx, opts.interval, sigCh, &stopping)
 			continue
+		}
+
+		// 0. Auto-init: if no active work on first cycle, bootstrap
+		if cycle == 1 {
+			readyWork, listErr := svc.ReadyWork(ctx, 1)
+			if listErr == nil && len(readyWork) == 0 {
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: empty work graph, bootstrapping %s\n", cwd)
+				}
+				if bootstrapErr := bootstrapRepo(ctx, svc, cwd); bootstrapErr != nil {
+					if !jsonOutput {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: bootstrap failed: %v\n", bootstrapErr)
+					}
+				}
+			}
 		}
 
 		// 1. Reconcile expired leases
@@ -437,4 +453,81 @@ func sleepOrStop(ctx context.Context, d time.Duration, sigCh chan os.Signal, sto
 	case <-ctx.Done():
 		*stopping = true
 	}
+}
+
+// bootstrapRepo creates a root "bootstrap" work item from repo metadata.
+// The objective includes enough context for an agent to analyze the repo
+// and create child work items.
+func bootstrapRepo(ctx context.Context, svc *service.Service, cwd string) error {
+	repoName := filepath.Base(cwd)
+
+	// Gather repo context
+	var context strings.Builder
+	context.WriteString(fmt.Sprintf("Repository: %s\nPath: %s\n", repoName, cwd))
+
+	// Read README if present
+	for _, name := range []string{"README.md", "README", "README.txt", "readme.md"} {
+		readmePath := filepath.Join(cwd, name)
+		data, err := os.ReadFile(readmePath)
+		if err == nil {
+			excerpt := string(data)
+			if len(excerpt) > 2000 {
+				excerpt = excerpt[:2000] + "\n...(truncated)"
+			}
+			context.WriteString(fmt.Sprintf("\n## %s\n%s\n", name, excerpt))
+			break
+		}
+	}
+
+	// List docs/ if present
+	docsDir := filepath.Join(cwd, "docs")
+	if entries, err := os.ReadDir(docsDir); err == nil {
+		context.WriteString("\n## docs/\n")
+		for _, e := range entries {
+			if !e.IsDir() {
+				context.WriteString(fmt.Sprintf("- %s\n", e.Name()))
+			}
+		}
+	}
+
+	// List top-level structure
+	if entries, err := os.ReadDir(cwd); err == nil {
+		context.WriteString("\n## Top-level files/dirs\n")
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			marker := ""
+			if e.IsDir() {
+				marker = "/"
+			}
+			context.WriteString(fmt.Sprintf("- %s%s\n", e.Name(), marker))
+		}
+	}
+
+	objective := fmt.Sprintf(`Bootstrap the %s repository into the cagent work graph.
+
+Analyze the codebase, documentation, and project structure. Then:
+1. Create root work items for major components or features
+2. Create child work items for actionable tasks
+3. Set up blocking edges where dependencies exist
+4. Add required attestation policies where appropriate
+5. Record notes with key findings about the codebase
+
+Use cagent CLI commands to create the work graph:
+- cagent work create --title "..." --objective "..." --kind <kind>
+- cagent work discover <parent-id> --title "..." --objective "..."
+- cagent work note-add <id> --type finding --text "..."
+- cagent work update <id> --message "..."
+
+Context:
+%s`, repoName, context.String())
+
+	_, err := svc.CreateWork(ctx, service.WorkCreateRequest{
+		Title:     fmt.Sprintf("Bootstrap %s", repoName),
+		Objective: objective,
+		Kind:      "plan",
+		Priority:  1,
+	})
+	return err
 }
