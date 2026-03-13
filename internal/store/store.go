@@ -398,6 +398,10 @@ func (s *Store) CreateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 	if err != nil {
 		return fmt.Errorf("marshal work avoid models: %w", err)
 	}
+	requiredAttestations, err := marshalJSON(rec.RequiredAttestations)
+	if err != nil {
+		return fmt.Errorf("marshal work required attestations: %w", err)
+	}
 	acceptance, err := marshalJSON(rec.Acceptance)
 	if err != nil {
 		return fmt.Errorf("marshal work acceptance: %w", err)
@@ -410,17 +414,19 @@ func (s *Store) CreateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 	_, err = s.db.ExecContext(
 		ctx,
 		`INSERT INTO work_items (
-			work_id, title, objective, kind, execution_state, approval_state, phase,
+			work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 			priority, required_capabilities_json, required_model_traits_json,
-			preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json, acceptance_json, metadata_json,
+			preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
+			required_attestations_json, acceptance_json, metadata_json, head_commit_oid,
 			current_job_id, current_session_id, claimed_by, claimed_until, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.WorkID,
 		rec.Title,
 		rec.Objective,
 		rec.Kind,
 		rec.ExecutionState,
 		rec.ApprovalState,
+		rec.LockState,
 		nullIfEmpty(rec.Phase),
 		rec.Priority,
 		string(required),
@@ -429,8 +435,10 @@ func (s *Store) CreateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		string(forbidden),
 		string(preferredModels),
 		string(avoidModels),
+		string(requiredAttestations),
 		string(acceptance),
 		string(metadata),
+		nullIfEmpty(rec.HeadCommitOID),
 		nullIfEmpty(rec.CurrentJobID),
 		nullIfEmpty(rec.CurrentSessionID),
 		nullIfEmpty(rec.ClaimedBy),
@@ -470,6 +478,10 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 	if err != nil {
 		return fmt.Errorf("marshal work avoid models: %w", err)
 	}
+	requiredAttestations, err := marshalJSON(rec.RequiredAttestations)
+	if err != nil {
+		return fmt.Errorf("marshal work required attestations: %w", err)
+	}
 	acceptance, err := marshalJSON(rec.Acceptance)
 	if err != nil {
 		return fmt.Errorf("marshal work acceptance: %w", err)
@@ -487,6 +499,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		        kind = ?,
 		        execution_state = ?,
 		        approval_state = ?,
+		        lock_state = ?,
 		        phase = ?,
 		        priority = ?,
 		        required_capabilities_json = ?,
@@ -495,8 +508,10 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		        forbidden_adapters_json = ?,
 		        preferred_models_json = ?,
 		        avoid_models_json = ?,
+		        required_attestations_json = ?,
 		        acceptance_json = ?,
 		        metadata_json = ?,
+		        head_commit_oid = ?,
 		        current_job_id = ?,
 		        current_session_id = ?,
 		        claimed_by = ?,
@@ -508,6 +523,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		rec.Kind,
 		rec.ExecutionState,
 		rec.ApprovalState,
+		rec.LockState,
 		nullIfEmpty(rec.Phase),
 		rec.Priority,
 		string(required),
@@ -516,8 +532,10 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		string(forbidden),
 		string(preferredModels),
 		string(avoidModels),
+		string(requiredAttestations),
 		string(acceptance),
 		string(metadata),
+		nullIfEmpty(rec.HeadCommitOID),
 		nullIfEmpty(rec.CurrentJobID),
 		nullIfEmpty(rec.CurrentSessionID),
 		nullIfEmpty(rec.ClaimedBy),
@@ -542,9 +560,10 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 func (s *Store) GetWorkItem(ctx context.Context, workID string) (core.WorkItemRecord, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT work_id, title, objective, kind, execution_state, approval_state, phase,
+		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, required_capabilities_json, required_model_traits_json,
-		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json, acceptance_json, metadata_json,
+		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
+		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid,
 		        current_job_id, current_session_id, claimed_by, claimed_until, created_at, updated_at
 		   FROM work_items
 		  WHERE work_id = ?`,
@@ -575,9 +594,10 @@ func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionSta
 		args = append(args, approvalState)
 	}
 
-	query := `SELECT work_id, title, objective, kind, execution_state, approval_state, phase,
+	query := `SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, required_capabilities_json, required_model_traits_json,
-		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json, acceptance_json, metadata_json,
+		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
+		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid,
 		        current_job_id, current_session_id, claimed_by, claimed_until, created_at, updated_at
 		   FROM work_items`
 	if len(clauses) > 0 {
@@ -614,9 +634,10 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int) ([]core.WorkItemRe
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.phase,
+		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
 		        wi.priority, wi.required_capabilities_json, wi.required_model_traits_json,
-		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json, wi.acceptance_json, wi.metadata_json,
+		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
+		        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid,
 		        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.created_at, wi.updated_at
 		   FROM work_items wi
 		  WHERE (
@@ -634,6 +655,7 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int) ([]core.WorkItemRe
 		        OR wi.claimed_by = ''
 		        OR (wi.claimed_until IS NOT NULL AND wi.claimed_until <= ?)
 		    )
+		    AND wi.lock_state <> 'human_locked'
 		    AND NOT EXISTS (
 		        SELECT 1
 		          FROM work_edges we
@@ -689,6 +711,7 @@ func (s *Store) ClaimWorkItem(ctx context.Context, workID, claimant string, leas
 		        updated_at = ?
 		  WHERE work_id = ?
 		    AND execution_state NOT IN ('done', 'failed', 'cancelled')
+		    AND lock_state <> 'human_locked'
 		    AND (
 		        claimed_by IS NULL
 		        OR claimed_by = ''
@@ -773,6 +796,104 @@ func (s *Store) ReleaseWorkItemClaim(ctx context.Context, workID, claimant strin
 		return core.WorkItemRecord{}, ErrBusy
 	}
 	return s.GetWorkItem(ctx, workID)
+}
+
+func (s *Store) RenewWorkItemLease(ctx context.Context, workID, claimant string, leaseUntil time.Time) (core.WorkItemRecord, error) {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE work_items
+		    SET claimed_until = ?,
+		        updated_at = ?
+		  WHERE work_id = ?
+		    AND claimed_by = ?
+		    AND claimed_by IS NOT NULL
+		    AND claimed_by <> ''`,
+		leaseUntil.UTC().Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano),
+		workID,
+		claimant,
+	)
+	if err != nil {
+		return core.WorkItemRecord{}, fmt.Errorf("renew work item lease: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return core.WorkItemRecord{}, fmt.Errorf("check renewed work item rows: %w", err)
+	}
+	if rows == 0 {
+		current, getErr := s.GetWorkItem(ctx, workID)
+		if getErr != nil {
+			return core.WorkItemRecord{}, getErr
+		}
+		if current.ClaimedBy == "" {
+			return core.WorkItemRecord{}, fmt.Errorf("work item %s is not currently claimed", workID)
+		}
+		if current.ClaimedBy != claimant {
+			return core.WorkItemRecord{}, ErrBusy
+		}
+		return core.WorkItemRecord{}, ErrBusy
+	}
+	return s.GetWorkItem(ctx, workID)
+}
+
+func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRecord, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
+		        priority, required_capabilities_json, required_model_traits_json,
+		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
+		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid,
+		        current_job_id, current_session_id, claimed_by, claimed_until, created_at, updated_at
+		   FROM work_items
+		  WHERE execution_state = 'claimed'
+		    AND claimed_until IS NOT NULL
+		    AND claimed_until <= ?`,
+		now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query expired work claims: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var items []core.WorkItemRecord
+	for rows.Next() {
+		rec, err := scanWorkItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expired work claims: %w", err)
+	}
+
+	for i, item := range items {
+		_, err := s.db.ExecContext(
+			ctx,
+			`UPDATE work_items
+			    SET execution_state = 'ready',
+			        claimed_by = NULL,
+			        claimed_until = NULL,
+			        updated_at = ?
+			  WHERE work_id = ?
+			    AND execution_state = 'claimed'
+			    AND claimed_until <= ?`,
+			now,
+			item.WorkID,
+			now,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("release expired claim %s: %w", item.WorkID, err)
+		}
+		items[i].ExecutionState = core.WorkExecutionStateReady
+		items[i].ClaimedBy = ""
+		items[i].ClaimedUntil = nil
+	}
+
+	return items, nil
 }
 
 func (s *Store) ListJobsByWork(ctx context.Context, workID string, limit int) ([]core.JobRecord, error) {
@@ -903,9 +1024,10 @@ func (s *Store) ListWorkChildren(ctx context.Context, workID string, limit int) 
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.phase,
+		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
 		        wi.priority, wi.required_capabilities_json, wi.required_model_traits_json,
-		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json, wi.acceptance_json, wi.metadata_json,
+		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
+		        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid,
 		        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.created_at, wi.updated_at
 		   FROM work_edges we
 		   JOIN work_items wi ON wi.work_id = we.to_work_id
@@ -1204,69 +1326,205 @@ func (s *Store) ListWorkProposals(ctx context.Context, limit int, state, targetW
 	return proposals, nil
 }
 
-func (s *Store) CreateVerificationRecord(ctx context.Context, rec core.VerificationRecord) error {
+func (s *Store) CreateAttestationRecord(ctx context.Context, rec core.AttestationRecord) error {
 	metadata, err := marshalJSON(rec.Metadata)
 	if err != nil {
-		return fmt.Errorf("marshal verification metadata: %w", err)
+		return fmt.Errorf("marshal attestation metadata: %w", err)
 	}
 
 	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO verification_records (
-			verification_id, target_kind, target_id, result, summary, artifact_id,
-			job_id, session_id, metadata_json, created_by, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.VerificationID,
-		rec.TargetKind,
-		rec.TargetID,
+		`INSERT INTO attestation_records (
+			attestation_id, subject_kind, subject_id, result, summary, artifact_id,
+			job_id, session_id, method, verifier_kind, verifier_identity,
+			confidence, blocking, supersedes_attestation_id, metadata_json,
+			created_by, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.AttestationID,
+		rec.SubjectKind,
+		rec.SubjectID,
 		rec.Result,
 		nullIfEmpty(rec.Summary),
 		nullIfEmpty(rec.ArtifactID),
 		nullIfEmpty(rec.JobID),
 		nullIfEmpty(rec.SessionID),
+		nullIfEmpty(rec.Method),
+		nullIfEmpty(rec.VerifierKind),
+		nullIfEmpty(rec.VerifierIdentity),
+		rec.Confidence,
+		boolToInt(rec.Blocking),
+		nullIfEmpty(rec.SupersedesAttestationID),
 		string(metadata),
 		nullIfEmpty(rec.CreatedBy),
 		rec.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
-		return fmt.Errorf("insert verification record: %w", err)
+		return fmt.Errorf("insert attestation record: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) ListVerificationRecords(ctx context.Context, targetKind, targetID string, limit int) ([]core.VerificationRecord, error) {
+func (s *Store) ListAttestationRecords(ctx context.Context, subjectKind, subjectID string, limit int) ([]core.AttestationRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT verification_id, target_kind, target_id, result, summary, artifact_id,
-		        job_id, session_id, metadata_json, created_by, created_at
-		   FROM verification_records
-		  WHERE target_kind = ?
-		    AND target_id = ?
+		`SELECT attestation_id, subject_kind, subject_id, result, summary, artifact_id,
+		        job_id, session_id, method, verifier_kind, verifier_identity,
+		        confidence, blocking, supersedes_attestation_id, metadata_json,
+		        created_by, created_at
+		   FROM attestation_records
+		  WHERE subject_kind = ?
+		    AND subject_id = ?
 		  ORDER BY created_at DESC
 		  LIMIT ?`,
-		targetKind,
-		targetID,
+		subjectKind,
+		subjectID,
 		limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query verification records: %w", err)
+		return nil, fmt.Errorf("query attestation records: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []core.VerificationRecord
+	var records []core.AttestationRecord
 	for rows.Next() {
-		rec, err := scanVerificationRecord(rows)
+		rec, err := scanAttestationRecord(rows)
 		if err != nil {
 			return nil, err
 		}
 		records = append(records, rec)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate verification records: %w", err)
+		return nil, fmt.Errorf("iterate attestation records: %w", err)
+	}
+	return records, nil
+}
+
+func (s *Store) CreateApprovalRecord(ctx context.Context, rec core.ApprovalRecord) error {
+	attestationIDs, err := marshalJSON(rec.AttestationIDs)
+	if err != nil {
+		return fmt.Errorf("marshal approval attestation ids: %w", err)
+	}
+	metadata, err := marshalJSON(rec.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal approval metadata: %w", err)
+	}
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO approval_records (
+			approval_id, work_id, approved_commit_oid, approved_ref, attestation_ids_json,
+			status, supersedes_approval_id, approved_by, approved_at, metadata_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ApprovalID,
+		rec.WorkID,
+		nullIfEmpty(rec.ApprovedCommitOID),
+		nullIfEmpty(rec.ApprovedRef),
+		string(attestationIDs),
+		rec.Status,
+		nullIfEmpty(rec.SupersedesApprovalID),
+		nullIfEmpty(rec.ApprovedBy),
+		rec.ApprovedAt.UTC().Format(time.RFC3339Nano),
+		string(metadata),
+	)
+	if err != nil {
+		return fmt.Errorf("insert approval record: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListApprovalRecords(ctx context.Context, workID string, limit int) ([]core.ApprovalRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT approval_id, work_id, approved_commit_oid, approved_ref, attestation_ids_json,
+		        status, supersedes_approval_id, approved_by, approved_at, metadata_json
+		   FROM approval_records
+		  WHERE work_id = ?
+		  ORDER BY approved_at DESC
+		  LIMIT ?`,
+		workID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query approval records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var records []core.ApprovalRecord
+	for rows.Next() {
+		rec, err := scanApprovalRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate approval records: %w", err)
+	}
+	return records, nil
+}
+
+func (s *Store) CreatePromotionRecord(ctx context.Context, rec core.PromotionRecord) error {
+	metadata, err := marshalJSON(rec.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal promotion metadata: %w", err)
+	}
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO promotion_records (
+			promotion_id, work_id, approval_id, environment, promoted_commit_oid,
+			target_ref, status, promoted_by, promoted_at, metadata_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.PromotionID,
+		rec.WorkID,
+		nullIfEmpty(rec.ApprovalID),
+		rec.Environment,
+		nullIfEmpty(rec.PromotedCommitOID),
+		nullIfEmpty(rec.TargetRef),
+		rec.Status,
+		nullIfEmpty(rec.PromotedBy),
+		rec.PromotedAt.UTC().Format(time.RFC3339Nano),
+		string(metadata),
+	)
+	if err != nil {
+		return fmt.Errorf("insert promotion record: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListPromotionRecords(ctx context.Context, workID string, limit int) ([]core.PromotionRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT promotion_id, work_id, approval_id, environment, promoted_commit_oid,
+		        target_ref, status, promoted_by, promoted_at, metadata_json
+		   FROM promotion_records
+		  WHERE work_id = ?
+		  ORDER BY promoted_at DESC
+		  LIMIT ?`,
+		workID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query promotion records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var records []core.PromotionRecord
+	for rows.Next() {
+		rec, err := scanPromotionRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate promotion records: %w", err)
 	}
 	return records, nil
 }
@@ -2095,6 +2353,25 @@ func (s *Store) bootstrap(ctx context.Context) error {
 		`ALTER TABLE work_items ADD COLUMN required_model_traits_json TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE work_items ADD COLUMN preferred_models_json TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE work_items ADD COLUMN avoid_models_json TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE work_items ADD COLUMN lock_state TEXT NOT NULL DEFAULT 'unlocked'`,
+		`ALTER TABLE work_items ADD COLUMN required_attestations_json TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE work_items ADD COLUMN head_commit_oid TEXT`,
+		`ALTER TABLE attestation_records ADD COLUMN method TEXT`,
+		`ALTER TABLE attestation_records ADD COLUMN verifier_kind TEXT`,
+		`ALTER TABLE attestation_records ADD COLUMN verifier_identity TEXT`,
+		`ALTER TABLE attestation_records ADD COLUMN confidence REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE attestation_records ADD COLUMN blocking INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE attestation_records ADD COLUMN supersedes_attestation_id TEXT`,
+		`INSERT OR IGNORE INTO attestation_records (
+			attestation_id, subject_kind, subject_id, result, summary, artifact_id,
+			job_id, session_id, metadata_json, created_by, created_at
+		)
+		SELECT verification_id, target_kind, target_id, result, summary, artifact_id,
+		       job_id, session_id, metadata_json, created_by, created_at
+		  FROM verification_records`,
+		`UPDATE work_items SET approval_state = 'pending' WHERE approval_state = 'pending_verification'`,
+		`UPDATE work_updates SET approval_state = 'pending' WHERE approval_state = 'pending_verification'`,
+		`CREATE INDEX IF NOT EXISTS idx_attestation_records_subject_created_at ON attestation_records(subject_kind, subject_id, created_at DESC)`,
 	}
 	for _, stmt := range migrations {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !ignorableSQLiteMigrationErr(err) {
@@ -2569,6 +2846,7 @@ func scanJobRuntime(scanner interface{ Scan(...any) error }) (core.JobRuntimeRec
 
 func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord, error) {
 	var rec core.WorkItemRecord
+	var lockState sql.NullString
 	var phase sql.NullString
 	var currentJobID sql.NullString
 	var currentSessionID sql.NullString
@@ -2582,8 +2860,10 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	var forbiddenJSON string
 	var preferredModelsJSON string
 	var avoidModelsJSON string
+	var requiredAttestationsJSON string
 	var acceptanceJSON string
 	var metadataJSON string
+	var headCommitOID sql.NullString
 
 	if err := scanner.Scan(
 		&rec.WorkID,
@@ -2592,6 +2872,7 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 		&rec.Kind,
 		&rec.ExecutionState,
 		&rec.ApprovalState,
+		&lockState,
 		&phase,
 		&rec.Priority,
 		&requiredJSON,
@@ -2600,8 +2881,10 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 		&forbiddenJSON,
 		&preferredModelsJSON,
 		&avoidModelsJSON,
+		&requiredAttestationsJSON,
 		&acceptanceJSON,
 		&metadataJSON,
+		&headCommitOID,
 		&currentJobID,
 		&currentSessionID,
 		&claimedBy,
@@ -2615,7 +2898,12 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 		return core.WorkItemRecord{}, fmt.Errorf("scan work item: %w", err)
 	}
 
+	rec.LockState = core.WorkLockState(lockState.String)
+	if rec.LockState == "" {
+		rec.LockState = core.WorkLockStateUnlocked
+	}
 	rec.Phase = phase.String
+	rec.HeadCommitOID = headCommitOID.String
 	rec.CurrentJobID = currentJobID.String
 	rec.CurrentSessionID = currentSessionID.String
 	rec.ClaimedBy = claimedBy.String
@@ -2656,6 +2944,9 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	if err := json.Unmarshal([]byte(avoidModelsJSON), &rec.AvoidModels); err != nil {
 		return core.WorkItemRecord{}, fmt.Errorf("decode work avoid models: %w", err)
 	}
+	if err := json.Unmarshal([]byte(requiredAttestationsJSON), &rec.RequiredAttestations); err != nil {
+		return core.WorkItemRecord{}, fmt.Errorf("decode work required attestations: %w", err)
+	}
 	if err := json.Unmarshal([]byte(acceptanceJSON), &rec.Acceptance); err != nil {
 		return core.WorkItemRecord{}, fmt.Errorf("decode work acceptance: %w", err)
 	}
@@ -2679,6 +2970,9 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	}
 	if rec.AvoidModels == nil {
 		rec.AvoidModels = []string{}
+	}
+	if rec.RequiredAttestations == nil {
+		rec.RequiredAttestations = []core.RequiredAttestation{}
 	}
 	if rec.Acceptance == nil {
 		rec.Acceptance = map[string]any{}
@@ -2880,47 +3174,158 @@ func scanWorkProposal(scanner interface{ Scan(...any) error }) (core.WorkProposa
 	return rec, nil
 }
 
-func scanVerificationRecord(scanner interface{ Scan(...any) error }) (core.VerificationRecord, error) {
-	var rec core.VerificationRecord
+func scanAttestationRecord(scanner interface{ Scan(...any) error }) (core.AttestationRecord, error) {
+	var rec core.AttestationRecord
 	var summary sql.NullString
 	var artifactID sql.NullString
 	var jobID sql.NullString
 	var sessionID sql.NullString
+	var method sql.NullString
+	var verifierKind sql.NullString
+	var verifierIdentity sql.NullString
+	var confidence sql.NullFloat64
+	var blocking int
+	var supersedesAttestationID sql.NullString
 	var metadataJSON string
 	var createdBy sql.NullString
 	var createdAt string
 
 	if err := scanner.Scan(
-		&rec.VerificationID,
-		&rec.TargetKind,
-		&rec.TargetID,
+		&rec.AttestationID,
+		&rec.SubjectKind,
+		&rec.SubjectID,
 		&rec.Result,
 		&summary,
 		&artifactID,
 		&jobID,
 		&sessionID,
+		&method,
+		&verifierKind,
+		&verifierIdentity,
+		&confidence,
+		&blocking,
+		&supersedesAttestationID,
 		&metadataJSON,
 		&createdBy,
 		&createdAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return core.VerificationRecord{}, ErrNotFound
+			return core.AttestationRecord{}, ErrNotFound
 		}
-		return core.VerificationRecord{}, fmt.Errorf("scan verification record: %w", err)
+		return core.AttestationRecord{}, fmt.Errorf("scan attestation record: %w", err)
 	}
 
 	rec.Summary = summary.String
 	rec.ArtifactID = artifactID.String
 	rec.JobID = jobID.String
 	rec.SessionID = sessionID.String
+	rec.Method = method.String
+	rec.VerifierKind = verifierKind.String
+	rec.VerifierIdentity = verifierIdentity.String
+	rec.Confidence = confidence.Float64
+	rec.Blocking = blocking != 0
+	rec.SupersedesAttestationID = supersedesAttestationID.String
 	rec.CreatedBy = createdBy.String
 	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
-		return core.VerificationRecord{}, fmt.Errorf("parse verification created_at: %w", err)
+		return core.AttestationRecord{}, fmt.Errorf("parse attestation created_at: %w", err)
 	}
 	rec.CreatedAt = parsed
 	if err := json.Unmarshal([]byte(metadataJSON), &rec.Metadata); err != nil {
-		return core.VerificationRecord{}, fmt.Errorf("decode verification metadata: %w", err)
+		return core.AttestationRecord{}, fmt.Errorf("decode attestation metadata: %w", err)
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]any{}
+	}
+	return rec, nil
+}
+
+func scanApprovalRecord(scanner interface{ Scan(...any) error }) (core.ApprovalRecord, error) {
+	var rec core.ApprovalRecord
+	var approvedCommitOID sql.NullString
+	var approvedRef sql.NullString
+	var attestationIDsJSON string
+	var supersedesApprovalID sql.NullString
+	var approvedBy sql.NullString
+	var approvedAt string
+	var metadataJSON string
+	if err := scanner.Scan(
+		&rec.ApprovalID,
+		&rec.WorkID,
+		&approvedCommitOID,
+		&approvedRef,
+		&attestationIDsJSON,
+		&rec.Status,
+		&supersedesApprovalID,
+		&approvedBy,
+		&approvedAt,
+		&metadataJSON,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.ApprovalRecord{}, ErrNotFound
+		}
+		return core.ApprovalRecord{}, fmt.Errorf("scan approval record: %w", err)
+	}
+	rec.ApprovedCommitOID = approvedCommitOID.String
+	rec.ApprovedRef = approvedRef.String
+	rec.SupersedesApprovalID = supersedesApprovalID.String
+	rec.ApprovedBy = approvedBy.String
+	parsed, err := time.Parse(time.RFC3339Nano, approvedAt)
+	if err != nil {
+		return core.ApprovalRecord{}, fmt.Errorf("parse approval approved_at: %w", err)
+	}
+	rec.ApprovedAt = parsed
+	if err := json.Unmarshal([]byte(attestationIDsJSON), &rec.AttestationIDs); err != nil {
+		return core.ApprovalRecord{}, fmt.Errorf("decode approval attestation ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(metadataJSON), &rec.Metadata); err != nil {
+		return core.ApprovalRecord{}, fmt.Errorf("decode approval metadata: %w", err)
+	}
+	if rec.AttestationIDs == nil {
+		rec.AttestationIDs = []string{}
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]any{}
+	}
+	return rec, nil
+}
+
+func scanPromotionRecord(scanner interface{ Scan(...any) error }) (core.PromotionRecord, error) {
+	var rec core.PromotionRecord
+	var approvalID sql.NullString
+	var promotedCommitOID sql.NullString
+	var targetRef sql.NullString
+	var promotedBy sql.NullString
+	var promotedAt string
+	var metadataJSON string
+	if err := scanner.Scan(
+		&rec.PromotionID,
+		&rec.WorkID,
+		&approvalID,
+		&rec.Environment,
+		&promotedCommitOID,
+		&targetRef,
+		&rec.Status,
+		&promotedBy,
+		&promotedAt,
+		&metadataJSON,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.PromotionRecord{}, ErrNotFound
+		}
+		return core.PromotionRecord{}, fmt.Errorf("scan promotion record: %w", err)
+	}
+	rec.ApprovalID = approvalID.String
+	rec.PromotedCommitOID = promotedCommitOID.String
+	rec.TargetRef = targetRef.String
+	rec.PromotedBy = promotedBy.String
+	parsed, err := time.Parse(time.RFC3339Nano, promotedAt)
+	if err != nil {
+		return core.PromotionRecord{}, fmt.Errorf("parse promotion promoted_at: %w", err)
+	}
+	rec.PromotedAt = parsed
+	if err := json.Unmarshal([]byte(metadataJSON), &rec.Metadata); err != nil {
+		return core.PromotionRecord{}, fmt.Errorf("decode promotion metadata: %w", err)
 	}
 	if rec.Metadata == nil {
 		rec.Metadata = map[string]any{}
@@ -2993,7 +3398,7 @@ func ignorableSQLiteMigrationErr(err error) bool {
 	}
 
 	text := err.Error()
-	return strings.Contains(text, "duplicate column name")
+	return strings.Contains(text, "duplicate column name") || strings.Contains(text, "no such table")
 }
 
 func boolToInt(value bool) int {
@@ -3128,6 +3533,7 @@ CREATE TABLE IF NOT EXISTS work_items (
 	kind TEXT NOT NULL,
 	execution_state TEXT NOT NULL,
 	approval_state TEXT NOT NULL,
+	lock_state TEXT NOT NULL DEFAULT 'unlocked',
 	phase TEXT,
 	priority INTEGER NOT NULL DEFAULT 0,
 	configuration_class TEXT,
@@ -3138,8 +3544,10 @@ CREATE TABLE IF NOT EXISTS work_items (
 	forbidden_adapters_json TEXT NOT NULL DEFAULT '[]',
 	preferred_models_json TEXT NOT NULL DEFAULT '[]',
 	avoid_models_json TEXT NOT NULL DEFAULT '[]',
+	required_attestations_json TEXT NOT NULL DEFAULT '[]',
 	acceptance_json TEXT NOT NULL DEFAULT '{}',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
+	head_commit_oid TEXT,
 	current_job_id TEXT,
 	current_session_id TEXT,
 	claimed_by TEXT,
@@ -3198,18 +3606,50 @@ CREATE TABLE IF NOT EXISTS work_proposals (
 	reviewed_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS verification_records (
-	verification_id TEXT PRIMARY KEY,
-	target_kind TEXT NOT NULL,
-	target_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS attestation_records (
+	attestation_id TEXT PRIMARY KEY,
+	subject_kind TEXT NOT NULL,
+	subject_id TEXT NOT NULL,
 	result TEXT NOT NULL,
 	summary TEXT,
 	artifact_id TEXT,
 	job_id TEXT,
 	session_id TEXT,
+	method TEXT,
+	verifier_kind TEXT,
+	verifier_identity TEXT,
+	confidence REAL NOT NULL DEFAULT 0,
+	blocking INTEGER NOT NULL DEFAULT 0,
+	supersedes_attestation_id TEXT,
 	metadata_json TEXT NOT NULL DEFAULT '{}',
 	created_by TEXT,
 	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approval_records (
+	approval_id TEXT PRIMARY KEY,
+	work_id TEXT NOT NULL REFERENCES work_items(work_id) ON DELETE CASCADE,
+	approved_commit_oid TEXT,
+	approved_ref TEXT,
+	attestation_ids_json TEXT NOT NULL DEFAULT '[]',
+	status TEXT NOT NULL,
+	supersedes_approval_id TEXT,
+	approved_by TEXT,
+	approved_at TEXT NOT NULL,
+	metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS promotion_records (
+	promotion_id TEXT PRIMARY KEY,
+	work_id TEXT NOT NULL REFERENCES work_items(work_id) ON DELETE CASCADE,
+	approval_id TEXT,
+	environment TEXT NOT NULL,
+	promoted_commit_oid TEXT,
+	target_ref TEXT,
+	status TEXT NOT NULL,
+	promoted_by TEXT,
+	promoted_at TEXT NOT NULL,
+	metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_session_id ON jobs(session_id);
@@ -3224,5 +3664,7 @@ CREATE INDEX IF NOT EXISTS idx_work_edges_from_type ON work_edges(from_work_id, 
 CREATE INDEX IF NOT EXISTS idx_work_updates_work_id_created_at ON work_updates(work_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_work_notes_work_id_created_at ON work_notes(work_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_work_proposals_target_state_created_at ON work_proposals(target_work_id, state, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_verification_records_target_created_at ON verification_records(target_kind, target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attestation_records_subject_created_at ON attestation_records(subject_kind, subject_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_approval_records_work_id_approved_at ON approval_records(work_id, approved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_promotion_records_work_id_promoted_at ON promotion_records(work_id, promoted_at DESC);
 `

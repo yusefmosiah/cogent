@@ -1576,6 +1576,138 @@ func TestBootstrapCreateSeedsWorkAndBootstrapNote(t *testing.T) {
 	}
 }
 
+func TestReviewWorkProposalRejectsSecondParentEdge(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	rootA, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:     "Root A",
+		Objective: "first root",
+		Kind:      "feature",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork rootA returned error: %v", err)
+	}
+	rootB, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:     "Root B",
+		Objective: "second root",
+		Kind:      "feature",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork rootB returned error: %v", err)
+	}
+	child, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:        "Child",
+		Objective:    "child work",
+		Kind:         "task",
+		ParentWorkID: rootA.WorkID,
+	})
+	if err != nil {
+		t.Fatalf("CreateWork child returned error: %v", err)
+	}
+
+	proposal, err := svc.CreateWorkProposal(context.Background(), WorkProposalCreateRequest{
+		ProposalType: "add_edge",
+		Rationale:    "try to add a second parent",
+		Patch: map[string]any{
+			"from_work_id": rootB.WorkID,
+			"to_work_id":   child.WorkID,
+			"edge_type":    "parent_of",
+		},
+		CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkProposal returned error: %v", err)
+	}
+
+	if _, _, err := svc.ReviewWorkProposal(context.Background(), proposal.ProposalID, "accept"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for second parent edge, got %v", err)
+	}
+}
+
+func TestReviewWorkProposalRejectsParentCycleOnReparent(t *testing.T) {
+	stateDir := t.TempDir()
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	t.Setenv("CAGENT_STATE_DIR", stateDir)
+	t.Setenv("CAGENT_CONFIG_DIR", configDir)
+	t.Setenv("CAGENT_CACHE_DIR", cacheDir)
+	setTestExecutable(t)
+
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc, err := Open(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	root, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:     "Root",
+		Objective: "root work",
+		Kind:      "feature",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork root returned error: %v", err)
+	}
+	child, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:        "Child",
+		Objective:    "child work",
+		Kind:         "task",
+		ParentWorkID: root.WorkID,
+	})
+	if err != nil {
+		t.Fatalf("CreateWork child returned error: %v", err)
+	}
+	grandchild, err := svc.CreateWork(context.Background(), WorkCreateRequest{
+		Title:        "Grandchild",
+		Objective:    "grandchild work",
+		Kind:         "task",
+		ParentWorkID: child.WorkID,
+	})
+	if err != nil {
+		t.Fatalf("CreateWork grandchild returned error: %v", err)
+	}
+
+	proposal, err := svc.CreateWorkProposal(context.Background(), WorkProposalCreateRequest{
+		ProposalType: "reparent_work",
+		TargetWorkID: root.WorkID,
+		Rationale:    "this should be rejected because it creates a cycle",
+		Patch: map[string]any{
+			"parent_work_id": grandchild.WorkID,
+		},
+		CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkProposal returned error: %v", err)
+	}
+
+	if _, _, err := svc.ReviewWorkProposal(context.Background(), proposal.ProposalID, "accept"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for parent cycle, got %v", err)
+	}
+}
+
 func setTestExecutable(t *testing.T) {
 	t.Helper()
 

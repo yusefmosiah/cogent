@@ -6,5 +6,13 @@
 bin/
 dist/
 coverage.out
-web-desktop/
+mind-graph/node_modules/
+mind-graph/dist/
+mind-graph/src/
+mind-graph/public/
+mind-graph/tests/
+mind-graph/package-lock.json
+mind-graph/SPEC.md
+mind-graph/README.md
+mind-graph/eslint.config.js
 work_seed/

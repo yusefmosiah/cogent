@@ -55,6 +55,7 @@ type workCreateOptions struct {
 	objective            string
 	kind                 string
 	parent               string
+	lockState            string
 	priority             int
 	requiredCapabilities string
 	requiredModelTraits  string
@@ -62,7 +63,9 @@ type workCreateOptions struct {
 	forbiddenAdapters    string
 	preferredModels      string
 	avoidModels          string
+	requiredAttestations string
 	acceptance           string
+	headCommitOID        string
 }
 
 type workListOptions struct {
@@ -75,6 +78,7 @@ type workListOptions struct {
 type workUpdateOptions struct {
 	executionState string
 	approvalState  string
+	lockState      string
 	phase          string
 	message        string
 	jobID          string
@@ -123,16 +127,38 @@ type workProposalCreateOptions struct {
 	patch        string
 }
 
-type workVerifyOptions struct {
-	result     string
-	summary    string
-	jobID      string
-	sessionID  string
-	artifactID string
+type workAttestOptions struct {
+	result                  string
+	summary                 string
+	jobID                   string
+	sessionID               string
+	artifactID              string
+	method                  string
+	verifierKind            string
+	verifierIdentity        string
+	confidence              float64
+	blocking                bool
+	supersedesAttestationID string
+	metadata                string
 }
 
 type workProjectionOptions struct {
 	format string
+}
+
+type workApproveOptions struct {
+	message string
+}
+
+type workHydrateOptions struct {
+	mode    string
+	debrief bool
+}
+
+type workPromoteOptions struct {
+	environment string
+	targetRef   string
+	message     string
 }
 
 type debriefOptions struct {
@@ -251,6 +277,9 @@ func NewRootCommand() *cobra.Command {
 		newCatalogCommand(opts),
 		newRuntimeCommand(opts, "runtime", "Show the current host-agent runtime inventory", false),
 		newInternalRunJobCommand(opts),
+		newInboxCommand(opts),
+		newReconcileCommand(opts),
+		newSupervisorCommand(opts),
 		newVersionCommand(),
 	)
 
@@ -858,7 +887,10 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	discoverOpts := &workDiscoverOptions{}
 	proposalListOpts := &workProposalListOptions{}
 	proposalCreateOpts := &workProposalCreateOptions{}
-	verifyOpts := &workVerifyOptions{}
+	attestOpts := &workAttestOptions{}
+	approveOpts := &workApproveOptions{}
+	hydrateOpts := &workHydrateOptions{mode: "standard"}
+	promoteOpts := &workPromoteOptions{environment: "staging"}
 	projectionOpts := &workProjectionOptions{format: "markdown"}
 
 	cmd := &cobra.Command{
@@ -880,11 +912,16 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			if err != nil {
 				return exitf(2, "invalid --acceptance JSON: %v", err)
 			}
+			requiredAttestations, err := parseRequiredAttestations(createOpts.requiredAttestations)
+			if err != nil {
+				return exitf(2, "invalid --required-attestations JSON: %v", err)
+			}
 			work, err := svc.CreateWork(context.Background(), service.WorkCreateRequest{
 				Title:                createOpts.title,
 				Objective:            createOpts.objective,
 				Kind:                 createOpts.kind,
 				ParentWorkID:         createOpts.parent,
+				LockState:            core.WorkLockState(createOpts.lockState),
 				Priority:             createOpts.priority,
 				RequiredCapabilities: splitCSV(createOpts.requiredCapabilities),
 				RequiredModelTraits:  splitCSV(createOpts.requiredModelTraits),
@@ -892,7 +929,9 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 				ForbiddenAdapters:    splitCSV(createOpts.forbiddenAdapters),
 				PreferredModels:      splitCSV(createOpts.preferredModels),
 				AvoidModels:          splitCSV(createOpts.avoidModels),
+				RequiredAttestations: requiredAttestations,
 				Acceptance:           acceptance,
+				HeadCommitOID:        createOpts.headCommitOID,
 			})
 			if err != nil {
 				return mapServiceError(err)
@@ -904,6 +943,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	createCmd.Flags().StringVar(&createOpts.objective, "objective", "", "work objective")
 	createCmd.Flags().StringVar(&createOpts.kind, "kind", "task", "work kind")
 	createCmd.Flags().StringVar(&createOpts.parent, "parent", "", "optional parent work id")
+	createCmd.Flags().StringVar(&createOpts.lockState, "lock-state", string(core.WorkLockStateUnlocked), "initial lock state")
 	createCmd.Flags().IntVar(&createOpts.priority, "priority", 0, "priority")
 	createCmd.Flags().StringVar(&createOpts.requiredCapabilities, "required-capabilities", "", "comma-separated required capabilities")
 	createCmd.Flags().StringVar(&createOpts.requiredModelTraits, "required-model-traits", "", "comma-separated required model traits")
@@ -911,7 +951,9 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	createCmd.Flags().StringVar(&createOpts.forbiddenAdapters, "forbidden-adapters", "", "comma-separated forbidden adapters")
 	createCmd.Flags().StringVar(&createOpts.preferredModels, "preferred-models", "", "comma-separated preferred model ids")
 	createCmd.Flags().StringVar(&createOpts.avoidModels, "avoid-models", "", "comma-separated model ids to avoid")
+	createCmd.Flags().StringVar(&createOpts.requiredAttestations, "required-attestations", "", "JSON array of required attestation policy slots")
 	createCmd.Flags().StringVar(&createOpts.acceptance, "acceptance", "", "JSON object for acceptance criteria")
+	createCmd.Flags().StringVar(&createOpts.headCommitOID, "head-commit", "", "Git commit oid currently associated with the work")
 	_ = createCmd.MarkFlagRequired("title")
 	_ = createCmd.MarkFlagRequired("objective")
 
@@ -946,8 +988,14 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 				if len(result.Proposals) > showOpts.limit {
 					result.Proposals = result.Proposals[:showOpts.limit]
 				}
-				if len(result.Verifications) > showOpts.limit {
-					result.Verifications = result.Verifications[:showOpts.limit]
+				if len(result.Attestations) > showOpts.limit {
+					result.Attestations = result.Attestations[:showOpts.limit]
+				}
+				if len(result.Approvals) > showOpts.limit {
+					result.Approvals = result.Approvals[:showOpts.limit]
+				}
+				if len(result.Promotions) > showOpts.limit {
+					result.Promotions = result.Promotions[:showOpts.limit]
 				}
 				if len(result.Artifacts) > showOpts.limit {
 					result.Artifacts = result.Artifacts[:showOpts.limit]
@@ -995,6 +1043,9 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			}
 			defer func() { _ = svc.Close() }()
 
+			// Self-heal: release orphaned claims before listing ready work.
+			_, _ = svc.ReconcileOnStartup(context.Background())
+
 			items, err := svc.ReadyWork(context.Background(), readyOpts.limit)
 			if err != nil {
 				return mapServiceError(err)
@@ -1039,6 +1090,9 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			}
 			defer func() { _ = svc.Close() }()
 
+			// Self-heal: release orphaned claims before claiming next.
+			_, _ = svc.ReconcileOnStartup(context.Background())
+
 			work, err := svc.ClaimNextWork(context.Background(), service.WorkClaimNextRequest{
 				Claimant:      claimOpts.claimant,
 				LeaseDuration: claimOpts.lease,
@@ -1078,6 +1132,31 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	}
 	releaseCmd.Flags().StringVar(&claimOpts.claimant, "claimant", "cli", "worker or runtime releasing the claim")
 
+	renewLeaseCmd := &cobra.Command{
+		Use:   "renew-lease <work-id>",
+		Short: "Extend the lease on a claimed work item",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			work, err := svc.RenewWorkLease(context.Background(), service.WorkRenewLeaseRequest{
+				WorkID:        args[0],
+				Claimant:      claimOpts.claimant,
+				LeaseDuration: claimOpts.lease,
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+	renewLeaseCmd.Flags().StringVar(&claimOpts.claimant, "claimant", "cli", "worker or runtime renewing the lease")
+	renewLeaseCmd.Flags().DurationVar(&claimOpts.lease, "lease", 15*time.Minute, "lease duration")
+
 	updateCmd := &cobra.Command{
 		Use:   "update <work-id>",
 		Short: "Append a structured work update and mutate current work state",
@@ -1093,6 +1172,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 				WorkID:         args[0],
 				ExecutionState: core.WorkExecutionState(updateOpts.executionState),
 				ApprovalState:  core.WorkApprovalState(updateOpts.approvalState),
+				LockState:      core.WorkLockState(updateOpts.lockState),
 				Phase:          updateOpts.phase,
 				Message:        updateOpts.message,
 				JobID:          updateOpts.jobID,
@@ -1108,6 +1188,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	}
 	updateCmd.Flags().StringVar(&updateOpts.executionState, "execution-state", "", "new execution state")
 	updateCmd.Flags().StringVar(&updateOpts.approvalState, "approval-state", "", "new approval state")
+	updateCmd.Flags().StringVar(&updateOpts.lockState, "lock-state", "", "new lock state")
 	updateCmd.Flags().StringVar(&updateOpts.phase, "phase", "", "phase label")
 	updateCmd.Flags().StringVar(&updateOpts.message, "message", "", "update message")
 	updateCmd.Flags().StringVar(&updateOpts.jobID, "job", "", "related job id")
@@ -1272,9 +1353,9 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	_ = discoverCmd.MarkFlagRequired("title")
 	_ = discoverCmd.MarkFlagRequired("objective")
 
-	verifyCmd := &cobra.Command{
-		Use:   "verify <work-id>",
-		Short: "Record a verification result for a work item",
+	attestCmd := &cobra.Command{
+		Use:   "attest <work-id>",
+		Short: "Record an attestation for a work item",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := service.Open(context.Background(), root.configPath)
@@ -1282,27 +1363,146 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 				return err
 			}
 			defer func() { _ = svc.Close() }()
-			record, work, err := svc.VerifyWork(context.Background(), service.WorkVerifyRequest{
-				WorkID:     args[0],
-				Result:     verifyOpts.result,
-				Summary:    verifyOpts.summary,
-				JobID:      verifyOpts.jobID,
-				SessionID:  verifyOpts.sessionID,
-				ArtifactID: verifyOpts.artifactID,
-				CreatedBy:  "cli",
+			metadata, err := parseJSONObjectFlag(attestOpts.metadata)
+			if err != nil {
+				return exitf(2, "invalid --metadata JSON: %v", err)
+			}
+			record, work, err := svc.AttestWork(context.Background(), service.WorkAttestRequest{
+				WorkID:                  args[0],
+				Result:                  attestOpts.result,
+				Summary:                 attestOpts.summary,
+				JobID:                   attestOpts.jobID,
+				SessionID:               attestOpts.sessionID,
+				ArtifactID:              attestOpts.artifactID,
+				Method:                  attestOpts.method,
+				VerifierKind:            attestOpts.verifierKind,
+				VerifierIdentity:        attestOpts.verifierIdentity,
+				Confidence:              attestOpts.confidence,
+				Blocking:                attestOpts.blocking,
+				SupersedesAttestationID: attestOpts.supersedesAttestationID,
+				Metadata:                metadata,
+				CreatedBy:               "cli",
 			})
 			if err != nil {
 				return mapServiceError(err)
 			}
-			return renderVerification(cmd, root.jsonOutput, record, work)
+			return renderAttestation(cmd, root.jsonOutput, record, work)
 		},
 	}
-	verifyCmd.Flags().StringVar(&verifyOpts.result, "result", "", "verification result: passed, failed, blocked, inconclusive")
-	verifyCmd.Flags().StringVar(&verifyOpts.summary, "summary", "", "verification summary")
-	verifyCmd.Flags().StringVar(&verifyOpts.jobID, "job", "", "related job id")
-	verifyCmd.Flags().StringVar(&verifyOpts.sessionID, "session", "", "related session id")
-	verifyCmd.Flags().StringVar(&verifyOpts.artifactID, "artifact", "", "related artifact id")
-	_ = verifyCmd.MarkFlagRequired("result")
+	attestCmd.Flags().StringVar(&attestOpts.result, "result", "", "attestation result: passed, failed, blocked, inconclusive")
+	attestCmd.Flags().StringVar(&attestOpts.summary, "summary", "", "attestation summary")
+	attestCmd.Flags().StringVar(&attestOpts.jobID, "job", "", "related job id")
+	attestCmd.Flags().StringVar(&attestOpts.sessionID, "session", "", "related session id")
+	attestCmd.Flags().StringVar(&attestOpts.artifactID, "artifact", "", "related artifact id")
+	attestCmd.Flags().StringVar(&attestOpts.method, "method", "", "attestation method, such as test or review")
+	attestCmd.Flags().StringVar(&attestOpts.verifierKind, "verifier-kind", "", "verifier kind, such as deterministic or code_review")
+	attestCmd.Flags().StringVar(&attestOpts.verifierIdentity, "verifier-identity", "", "verifier identity, such as a model or script name")
+	attestCmd.Flags().Float64Var(&attestOpts.confidence, "confidence", 0, "confidence score from 0 to 1")
+	attestCmd.Flags().BoolVar(&attestOpts.blocking, "blocking", false, "mark this attestation as blocking evidence")
+	attestCmd.Flags().StringVar(&attestOpts.supersedesAttestationID, "supersedes", "", "prior attestation id this record supersedes")
+	attestCmd.Flags().StringVar(&attestOpts.metadata, "metadata", "", "JSON object with attestation metadata")
+	_ = attestCmd.MarkFlagRequired("result")
+
+	lockCmd := &cobra.Command{
+		Use:   "lock <work-id>",
+		Short: "Apply a human lock to a work item",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			work, err := svc.SetWorkLock(context.Background(), args[0], core.WorkLockStateHumanLocked, "cli", "human lock applied")
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+
+	unlockCmd := &cobra.Command{
+		Use:   "unlock <work-id>",
+		Short: "Remove a human lock from a work item",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			work, err := svc.SetWorkLock(context.Background(), args[0], core.WorkLockStateUnlocked, "cli", "human lock released")
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+
+	approveCmd := &cobra.Command{
+		Use:   "approve <work-id>",
+		Short: "Approve a work item after required attestations pass",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			work, err := svc.ApproveWork(context.Background(), args[0], "cli", approveOpts.message)
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+	approveCmd.Flags().StringVar(&approveOpts.message, "message", "", "approval note")
+
+	rejectCmd := &cobra.Command{
+		Use:   "reject <work-id>",
+		Short: "Reject a work item during approval",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			work, err := svc.RejectWork(context.Background(), args[0], "cli", approveOpts.message)
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+	rejectCmd.Flags().StringVar(&approveOpts.message, "message", "", "rejection note")
+
+	promoteCmd := &cobra.Command{
+		Use:   "promote <work-id>",
+		Short: "Record a promotion event for approved work",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			record, work, err := svc.PromoteWork(context.Background(), service.WorkPromoteRequest{
+				WorkID:      args[0],
+				Environment: promoteOpts.environment,
+				TargetRef:   promoteOpts.targetRef,
+				Message:     promoteOpts.message,
+				CreatedBy:   "cli",
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderPromotion(cmd, root.jsonOutput, record, work)
+		},
+	}
+	promoteCmd.Flags().StringVar(&promoteOpts.environment, "environment", "staging", "promotion environment")
+	promoteCmd.Flags().StringVar(&promoteOpts.targetRef, "ref", "", "target Git ref or tag")
+	promoteCmd.Flags().StringVar(&promoteOpts.message, "message", "", "promotion note")
 
 	proposalCmd := &cobra.Command{
 		Use:   "proposal",
@@ -1347,6 +1547,30 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		Use:   "projection",
 		Short: "Render deterministic text projections from work state",
 	}
+
+	hydrateCmd := &cobra.Command{
+		Use:   "hydrate <work-id>",
+		Short: "Compile a deterministic worker briefing for a work item",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			result, err := svc.HydrateWork(context.Background(), service.WorkHydrateRequest{
+				WorkID:  args[0],
+				Mode:    hydrateOpts.mode,
+				Debrief: hydrateOpts.debrief,
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return writeJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	hydrateCmd.Flags().StringVar(&hydrateOpts.mode, "mode", "standard", "hydration mode: thin, standard, or deep")
+	hydrateCmd.Flags().BoolVar(&hydrateOpts.debrief, "debrief", false, "request debrief hydration mode (not yet implemented)")
 
 	proposalListCmd := &cobra.Command{
 		Use:   "list",
@@ -1468,7 +1692,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	projectionStatusCmd.Flags().StringVar(&projectionOpts.format, "format", "markdown", "projection format")
 
 	projectionCmd.AddCommand(projectionChecklistCmd, projectionStatusCmd)
-	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, updateCmd, completeCmd, blockCmd, failCmd, notesCmd, noteAddCmd, childrenCmd, discoverCmd, verifyCmd, proposalCmd, projectionCmd)
+	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd)
 	return cmd
 }
 
@@ -1738,6 +1962,80 @@ func newTransferCommand(root *rootOptions, use, short string, hidden bool) *cobr
 	_ = runCmd.MarkFlagRequired("adapter")
 
 	return cmd
+}
+
+func newInboxCommand(root *rootOptions) *cobra.Command {
+	var kind string
+	var objective string
+	var priority int
+
+	cmd := &cobra.Command{
+		Use:   "inbox [title...]",
+		Short: "Quick-add an idea to the work graph (shorthand for work create --kind idea)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			title := strings.Join(args, " ")
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			obj := objective
+			if obj == "" {
+				obj = title
+			}
+
+			work, err := svc.CreateWork(context.Background(), service.WorkCreateRequest{
+				Title:     title,
+				Objective: obj,
+				Kind:      kind,
+				Priority:  priority,
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+	cmd.Flags().StringVar(&kind, "kind", "idea", "work kind (default: idea)")
+	cmd.Flags().StringVar(&objective, "objective", "", "work objective (defaults to title)")
+	cmd.Flags().IntVar(&priority, "priority", 3, "priority (default: 3)")
+	return cmd
+}
+
+func newReconcileCommand(root *rootOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reconcile",
+		Short: "Release orphaned work items with expired leases",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			ids, err := svc.ReconcileOnStartup(context.Background())
+			if err != nil {
+				return mapServiceError(err)
+			}
+			if root.jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), map[string]any{
+					"reconciled_work_ids": ids,
+					"count":              len(ids),
+				})
+			}
+			if len(ids) == 0 {
+				cmd.Println("No orphaned work items found.")
+				return nil
+			}
+			cmd.Printf("Reconciled %d orphaned work item(s):\n", len(ids))
+			for _, id := range ids {
+				cmd.Printf("  %s\n", id)
+			}
+			return nil
+		},
+	}
 }
 
 func newVersionCommand() *cobra.Command {
@@ -2107,8 +2405,23 @@ func renderWorkItem(cmd *cobra.Command, jsonOutput bool, work *core.WorkItemReco
 			return err
 		}
 	}
+	if work.LockState != "" {
+		if err := writef(cmd.OutOrStdout(), "  lock_state=%s\n", work.LockState); err != nil {
+			return err
+		}
+	}
+	if work.HeadCommitOID != "" {
+		if err := writef(cmd.OutOrStdout(), "  head_commit=%s\n", work.HeadCommitOID); err != nil {
+			return err
+		}
+	}
 	if len(work.RequiredModelTraits) > 0 {
 		if err := writef(cmd.OutOrStdout(), "  required_model_traits=%s\n", strings.Join(work.RequiredModelTraits, ",")); err != nil {
+			return err
+		}
+	}
+	if len(work.RequiredAttestations) > 0 {
+		if err := writef(cmd.OutOrStdout(), "  required_attestations=%d\n", len(work.RequiredAttestations)); err != nil {
 			return err
 		}
 	}
@@ -2264,12 +2577,32 @@ func renderWorkShow(cmd *cobra.Command, jsonOutput bool, result *service.WorkSho
 			}
 		}
 	}
-	if len(result.Verifications) > 0 {
-		if err := writef(cmd.OutOrStdout(), "verifications: %d\n", len(result.Verifications)); err != nil {
+	if len(result.Attestations) > 0 {
+		if err := writef(cmd.OutOrStdout(), "attestations: %d\n", len(result.Attestations)); err != nil {
 			return err
 		}
-		for _, verification := range result.Verifications {
-			if err := writef(cmd.OutOrStdout(), "  %s\t%s\t%s\n", verification.CreatedAt.Format("2006-01-02 15:04:05"), verification.Result, verification.Summary); err != nil {
+		for _, attestation := range result.Attestations {
+			if err := writef(cmd.OutOrStdout(), "  %s\t%s\t%s\t%s\n", attestation.CreatedAt.Format("2006-01-02 15:04:05"), attestation.Result, emptyDash(attestation.VerifierKind), attestation.Summary); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.Approvals) > 0 {
+		if err := writef(cmd.OutOrStdout(), "approvals: %d\n", len(result.Approvals)); err != nil {
+			return err
+		}
+		for _, approval := range result.Approvals {
+			if err := writef(cmd.OutOrStdout(), "  %s\t%s\t%s\n", approval.ApprovedAt.Format("2006-01-02 15:04:05"), approval.Status, emptyDash(approval.ApprovedCommitOID)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.Promotions) > 0 {
+		if err := writef(cmd.OutOrStdout(), "promotions: %d\n", len(result.Promotions)); err != nil {
+			return err
+		}
+		for _, promotion := range result.Promotions {
+			if err := writef(cmd.OutOrStdout(), "  %s\t%s\t%s\n", promotion.PromotedAt.Format("2006-01-02 15:04:05"), promotion.Environment, emptyDash(promotion.TargetRef)); err != nil {
 				return err
 			}
 		}
@@ -2338,21 +2671,40 @@ func renderWorkProposal(cmd *cobra.Command, jsonOutput bool, proposal *core.Work
 	return nil
 }
 
-func renderVerification(cmd *cobra.Command, jsonOutput bool, record *core.VerificationRecord, work *core.WorkItemRecord) error {
+func renderAttestation(cmd *cobra.Command, jsonOutput bool, record *core.AttestationRecord, work *core.WorkItemRecord) error {
 	if jsonOutput {
 		payload := map[string]any{
-			"verification": record,
-			"work":         work,
+			"attestation": record,
+			"work":        work,
 		}
 		return writeJSON(cmd.OutOrStdout(), payload)
 	}
-	if err := writef(cmd.OutOrStdout(), "%s\t%s\t%s\n", record.VerificationID, record.Result, record.TargetID); err != nil {
+	if err := writef(cmd.OutOrStdout(), "%s\t%s\t%s\n", record.AttestationID, record.Result, record.SubjectID); err != nil {
 		return err
 	}
 	if record.Summary != "" {
 		if err := writef(cmd.OutOrStdout(), "  %s\n", record.Summary); err != nil {
 			return err
 		}
+	}
+	if work != nil {
+		if err := writef(cmd.OutOrStdout(), "  approval=%s\n", work.ApprovalState); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderPromotion(cmd *cobra.Command, jsonOutput bool, record *core.PromotionRecord, work *core.WorkItemRecord) error {
+	if jsonOutput {
+		payload := map[string]any{
+			"promotion": record,
+			"work":      work,
+		}
+		return writeJSON(cmd.OutOrStdout(), payload)
+	}
+	if err := writef(cmd.OutOrStdout(), "%s\t%s\t%s\n", record.PromotionID, record.Environment, emptyDash(record.TargetRef)); err != nil {
+		return err
 	}
 	if work != nil {
 		if err := writef(cmd.OutOrStdout(), "  approval=%s\n", work.ApprovalState); err != nil {
@@ -2424,9 +2776,17 @@ func renderStatusProjection(result *service.WorkShowResult) string {
 		update := result.Updates[0]
 		fmt.Fprintf(&b, "\n## Latest Update\n\n%s\n", update.Message)
 	}
-	if len(result.Verifications) > 0 {
-		verification := result.Verifications[0]
-		fmt.Fprintf(&b, "\n## Latest Verification\n\n- Result: %s\n- Summary: %s\n", verification.Result, emptyDash(verification.Summary))
+	if len(result.Attestations) > 0 {
+		attestation := result.Attestations[0]
+		fmt.Fprintf(&b, "\n## Latest Attestation\n\n- Result: %s\n- Verifier: %s\n- Summary: %s\n", attestation.Result, emptyDash(attestation.VerifierKind), emptyDash(attestation.Summary))
+	}
+	if len(result.Approvals) > 0 {
+		approval := result.Approvals[0]
+		fmt.Fprintf(&b, "\n## Latest Approval\n\n- Status: %s\n- Commit: %s\n", approval.Status, emptyDash(approval.ApprovedCommitOID))
+	}
+	if len(result.Promotions) > 0 {
+		promotion := result.Promotions[0]
+		fmt.Fprintf(&b, "\n## Latest Promotion\n\n- Environment: %s\n- Ref: %s\n", promotion.Environment, emptyDash(promotion.TargetRef))
 	}
 	if len(result.Children) > 0 {
 		b.WriteString("\n## Children\n\n")
@@ -2739,6 +3099,25 @@ func parseJSONObjectFlag(value string) (map[string]any, error) {
 	}
 	if decoded == nil {
 		decoded = map[string]any{}
+	}
+	return decoded, nil
+}
+
+func parseRequiredAttestations(value string) ([]core.RequiredAttestation, error) {
+	if strings.TrimSpace(value) == "" {
+		return []core.RequiredAttestation{}, nil
+	}
+	var decoded []core.RequiredAttestation
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return nil, err
+	}
+	if decoded == nil {
+		decoded = []core.RequiredAttestation{}
+	}
+	for i := range decoded {
+		if decoded[i].Metadata == nil {
+			decoded[i].Metadata = map[string]any{}
+		}
 	}
 	return decoded, nil
 }

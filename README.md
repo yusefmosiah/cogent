@@ -1,20 +1,25 @@
 # cagent
 
-`cagent` is a local control-plane CLI for coding-agent CLIs.
+`cagent` is a local work-control plane for governed agent work.
 
-It gives you one machine-readable interface for:
-- starting jobs on vendor CLIs,
-- persisting canonical jobs, sessions, turns, events, and artifacts,
-- continuing same-vendor sessions when supported,
-- asking a live session to produce a model-authored debrief,
-- exporting explicit cross-vendor transfers,
-- launching new jobs from those transfers.
+It gives you:
+- a **work graph** (SQLite) that tracks work items, dependency edges, attestations, approvals, and promotions,
+- a **command vocabulary** for mutating work state: create, claim, release, block, attest, approve, promote, hydrate,
+- **6 adapter CLIs** (Codex, Claude, Factory, Pi, Gemini, OpenCode) for dispatching work to coding agents,
+- **work hydration** that compiles deterministic briefings so any agent can pick up where any other left off,
+- a **mind-graph UI** (Poincaré disk hyperbolic visualization) for observing causal relations in the work graph,
+- durable session persistence, transfers, debriefs, and canonical history search.
 
-The implementation is driven by [cagent-spec-and-implementation-guide.md](/Users/wiz/cagent/cagent-spec-and-implementation-guide.md).
-The emerging work-runtime direction is specified in [docs/cagent-work-runtime.md](/Users/wiz/cagent/docs/cagent-work-runtime.md).
-The concrete work schema and CLI/API plan are specified in [docs/cagent-work-api-and-schema.md](/Users/wiz/cagent/docs/cagent-work-api-and-schema.md).
-The stable compiled worker hydration contract is defined in [docs/cagent-worker-briefing-schema.md](/Users/wiz/cagent/docs/cagent-worker-briefing-schema.md) and [schemas/worker-briefing.schema.json](/Users/wiz/cagent/schemas/worker-briefing.schema.json).
-The local board/control-plane v0 direction is specified in [docs/cagent-v0-local-control-plane.md](/Users/wiz/cagent/docs/cagent-v0-local-control-plane.md).
+The core invariant: **agents may always stop, the system may always resume.**
+
+Attestation is the centerpiece. Work is not "done" because an agent says so — it's done when durable evidence from tests, scripts, agent reviewers, and human review satisfies the attestation policy. Docs are projections of the work graph, not independent stores.
+
+Key specs:
+- [docs/cagent-v0-local-control-plane.md](docs/cagent-v0-local-control-plane.md) — product direction and v0 scope
+- [docs/cagent-work-runtime.md](docs/cagent-work-runtime.md) — work runtime design
+- [docs/cagent-work-api-and-schema.md](docs/cagent-work-api-and-schema.md) — work CLI/API schema
+- [docs/cagent-worker-briefing-schema.md](docs/cagent-worker-briefing-schema.md) — hydration contract
+- [schemas/worker-briefing.schema.json](schemas/worker-briefing.schema.json) — briefing JSON schema
 
 ## Status
 
@@ -35,20 +40,16 @@ Practical summary:
 
 ## Intended Use
 
-`cagent` is meant to be used as a bash-callable background subagent for existing coding agents.
+`cagent` is a local runtime for governed agent work. The operator experience:
+- capture ideas and work from the terminal (`work create`, `inbox`)
+- define or bootstrap work locally
+- inspect the work graph via CLI or mind-graph UI
+- dispatch work to agents (`run`, `send`)
+- review attestation results
+- approve or reject work based on evidence
+- promote approved work
 
-That means:
-- the primary public surface is the CLI plus `--json`,
-- `run`, `send`, `debrief`, and `transfer run` queue background jobs and return IDs immediately,
-- host agents should be able to inspect runtime availability before choosing an adapter,
-- adapter-specific auth remains owned by each vendor CLI,
-- `cagent` keeps durable session state and raw artifacts instead of trying to act like a janitor or hosted control plane.
-
-The intended orchestration model is:
-- `run` starts a fresh background subagent.
-- `send` continues a native session on the same adapter.
-- `debrief` asks a still-live agent to export its current world model as a durable artifact.
-- `transfer` is for explicit failover or provider switching when native continuation is not possible.
+The primary surface is the CLI with `--json`. Jobs queue in the background and return IDs immediately. The work graph (not the agent) is the source of truth.
 
 ## Spec Coverage
 
@@ -268,10 +269,32 @@ Use cases:
 - a same-vendor continuation against the live source session
 - a durable markdown artifact that captures the agent's self-reported world model
 
+## Mind Graph UI
+
+`mind-graph/hyperbolic-proto.html` is a Poincaré disk visualization of the work graph.
+
+Features:
+- Hyperbolic geometry: exponential compression at the periphery, everything visible at all zoom levels
+- Force simulation: attention shells (urgency → center), parent-child springs, blocking tension, pairwise repulsion
+- Möbius focus transforms: click to center a node, esc to ascend
+- Text LOD: full label → abbreviated → initials → ink-stroke as nodes approach the boundary
+- Loads live data from the Vite API (`npm run dev` in `mind-graph/`) or falls back to mock data
+
+Run standalone:
+```bash
+open mind-graph/hyperbolic-proto.html
+```
+
+Run with live data:
+```bash
+cd mind-graph && npm run dev
+# then open http://localhost:5173/hyperbolic-proto.html
+```
+
 ## Next Recommended Work
 
-The highest-value remaining steps are:
-1. Expand the low-cost live matrix beyond smoke tests into full multi-agent workflows.
-2. Export richer transfer bundles with stronger evidence references into native session state when available.
-3. Improve event translation depth.
-4. Add richer catalog coverage for vendors with weaker model-enumeration surfaces.
+1. Implement `work hydrate` fully — deterministic briefing compilation with debrief mode.
+2. Add parent/child edges to existing work items (the graph is currently flat).
+3. Build the mind-graph into a proper component with operator controls (lock, approve, attest).
+4. Add blocking edge discovery and visualization from the work graph.
+5. Expand live adapter testing beyond smoke tests into multi-agent workflows.

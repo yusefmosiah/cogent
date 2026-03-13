@@ -23,9 +23,9 @@ import (
 	"github.com/yusefmosiah/cagent/internal/core"
 	debriefpkg "github.com/yusefmosiah/cagent/internal/debrief"
 	"github.com/yusefmosiah/cagent/internal/events"
-	transferpkg "github.com/yusefmosiah/cagent/internal/transfer"
 	"github.com/yusefmosiah/cagent/internal/pricing"
 	"github.com/yusefmosiah/cagent/internal/store"
+	transferpkg "github.com/yusefmosiah/cagent/internal/transfer"
 )
 
 var (
@@ -122,7 +122,7 @@ type StatusResult struct {
 	NativeSessions []core.NativeSessionRecord `json:"native_sessions"`
 	Events         []core.EventRecord         `json:"events"`
 	Usage          *core.UsageReport          `json:"usage,omitempty"`
-	UsageByModel   []core.UsageReport    `json:"usage_by_model,omitempty"`
+	UsageByModel   []core.UsageReport         `json:"usage_by_model,omitempty"`
 	Cost           *core.CostEstimate         `json:"cost,omitempty"`
 	VendorCost     *core.CostEstimate         `json:"vendor_cost,omitempty"`
 	EstimatedCost  *core.CostEstimate         `json:"estimated_cost,omitempty"`
@@ -243,6 +243,7 @@ type WorkCreateRequest struct {
 	Objective            string
 	Kind                 string
 	ParentWorkID         string
+	LockState            core.WorkLockState
 	Priority             int
 	RequiredCapabilities []string
 	RequiredModelTraits  []string
@@ -250,8 +251,10 @@ type WorkCreateRequest struct {
 	ForbiddenAdapters    []string
 	PreferredModels      []string
 	AvoidModels          []string
+	RequiredAttestations []core.RequiredAttestation
 	Acceptance           map[string]any
 	Metadata             map[string]any
+	HeadCommitOID        string
 }
 
 type WorkListRequest struct {
@@ -265,6 +268,7 @@ type WorkUpdateRequest struct {
 	WorkID         string
 	ExecutionState core.WorkExecutionState
 	ApprovalState  core.WorkApprovalState
+	LockState      core.WorkLockState
 	Phase          string
 	Message        string
 	JobID          string
@@ -299,26 +303,34 @@ type WorkProposalListRequest struct {
 	SourceWorkID string
 }
 
-type WorkVerifyRequest struct {
-	WorkID     string
-	Result     string
-	Summary    string
-	ArtifactID string
-	JobID      string
-	SessionID  string
-	Metadata   map[string]any
-	CreatedBy  string
+type WorkAttestRequest struct {
+	WorkID                  string
+	Result                  string
+	Summary                 string
+	ArtifactID              string
+	JobID                   string
+	SessionID               string
+	Method                  string
+	VerifierKind            string
+	VerifierIdentity        string
+	Confidence              float64
+	Blocking                bool
+	SupersedesAttestationID string
+	Metadata                map[string]any
+	CreatedBy               string
 }
 
 type WorkShowResult struct {
-	Work          core.WorkItemRecord       `json:"work"`
-	Children      []core.WorkItemRecord     `json:"children,omitempty"`
-	Updates       []core.WorkUpdateRecord   `json:"updates,omitempty"`
-	Notes         []core.WorkNoteRecord     `json:"notes,omitempty"`
-	Jobs          []core.JobRecord          `json:"jobs,omitempty"`
-	Proposals     []core.WorkProposalRecord `json:"proposals,omitempty"`
-	Verifications []core.VerificationRecord `json:"verifications,omitempty"`
-	Artifacts     []core.ArtifactRecord     `json:"artifacts,omitempty"`
+	Work         core.WorkItemRecord       `json:"work"`
+	Children     []core.WorkItemRecord     `json:"children,omitempty"`
+	Updates      []core.WorkUpdateRecord   `json:"updates,omitempty"`
+	Notes        []core.WorkNoteRecord     `json:"notes,omitempty"`
+	Jobs         []core.JobRecord          `json:"jobs,omitempty"`
+	Proposals    []core.WorkProposalRecord `json:"proposals,omitempty"`
+	Attestations []core.AttestationRecord  `json:"attestations,omitempty"`
+	Approvals    []core.ApprovalRecord     `json:"approvals,omitempty"`
+	Promotions   []core.PromotionRecord    `json:"promotions,omitempty"`
+	Artifacts    []core.ArtifactRecord     `json:"artifacts,omitempty"`
 }
 
 type WorkClaimRequest struct {
@@ -337,6 +349,29 @@ type WorkReleaseRequest struct {
 	WorkID    string
 	Claimant  string
 	CreatedBy string
+}
+
+type WorkRenewLeaseRequest struct {
+	WorkID        string
+	Claimant      string
+	LeaseDuration time.Duration
+}
+
+type WorkHydrateRequest struct {
+	WorkID   string
+	Mode     string
+	Debrief  bool
+	Claimant string
+}
+
+type WorkHydrateResult map[string]any
+
+type WorkPromoteRequest struct {
+	WorkID      string
+	Environment string
+	TargetRef   string
+	Message     string
+	CreatedBy   string
 }
 
 type lineItem struct {
@@ -1105,6 +1140,10 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		kind = "task"
 	}
 	now := time.Now().UTC()
+	lockState := req.LockState
+	if lockState == "" {
+		lockState = core.WorkLockStateUnlocked
+	}
 	work := core.WorkItemRecord{
 		WorkID:               core.GenerateID("work"),
 		Title:                title,
@@ -1112,6 +1151,7 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		Kind:                 kind,
 		ExecutionState:       core.WorkExecutionStateReady,
 		ApprovalState:        core.WorkApprovalStateNone,
+		LockState:            lockState,
 		Priority:             req.Priority,
 		RequiredCapabilities: cloneSlice(req.RequiredCapabilities),
 		RequiredModelTraits:  cloneSlice(req.RequiredModelTraits),
@@ -1119,8 +1159,10 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		ForbiddenAdapters:    cloneSlice(req.ForbiddenAdapters),
 		PreferredModels:      cloneSlice(req.PreferredModels),
 		AvoidModels:          cloneSlice(req.AvoidModels),
+		RequiredAttestations: cloneRequiredAttestations(req.RequiredAttestations),
 		Acceptance:           cloneMap(req.Acceptance),
 		Metadata:             cloneMap(req.Metadata),
+		HeadCommitOID:        strings.TrimSpace(req.HeadCommitOID),
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
@@ -1131,15 +1173,7 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		if _, err := s.store.GetWorkItem(ctx, req.ParentWorkID); err != nil {
 			return nil, normalizeStoreError("work", req.ParentWorkID, err)
 		}
-		if err := s.store.CreateWorkEdge(ctx, core.WorkEdgeRecord{
-			EdgeID:     core.GenerateID("wedge"),
-			FromWorkID: req.ParentWorkID,
-			ToWorkID:   work.WorkID,
-			EdgeType:   "parent_of",
-			CreatedBy:  "service",
-			CreatedAt:  now,
-			Metadata:   map[string]any{},
-		}); err != nil {
+		if err := s.attachParentEdge(ctx, req.ParentWorkID, work.WorkID, "service", now, map[string]any{}, false); err != nil {
 			return nil, err
 		}
 	}
@@ -1186,7 +1220,15 @@ func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, err
 		}
 		proposals = append(proposals, proposal)
 	}
-	verifications, err := s.store.ListVerificationRecords(ctx, "work", workID, 50)
+	attestations, err := s.store.ListAttestationRecords(ctx, "work", workID, 50)
+	if err != nil {
+		return nil, err
+	}
+	approvals, err := s.store.ListApprovalRecords(ctx, workID, 50)
+	if err != nil {
+		return nil, err
+	}
+	promotions, err := s.store.ListPromotionRecords(ctx, workID, 50)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,15 +1237,215 @@ func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, err
 		return nil, err
 	}
 	return &WorkShowResult{
-		Work:          work,
-		Children:      children,
-		Updates:       updates,
-		Notes:         notes,
-		Jobs:          jobs,
-		Proposals:     proposals,
-		Verifications: verifications,
-		Artifacts:     artifacts,
+		Work:         work,
+		Children:     children,
+		Updates:      updates,
+		Notes:        notes,
+		Jobs:         jobs,
+		Proposals:    proposals,
+		Attestations: attestations,
+		Approvals:    approvals,
+		Promotions:   promotions,
+		Artifacts:    artifacts,
 	}, nil
+}
+
+func (s *Service) HydrateWork(ctx context.Context, req WorkHydrateRequest) (WorkHydrateResult, error) {
+	if req.Debrief {
+		return nil, fmt.Errorf("%w: debrief hydration is not implemented yet", ErrUnsupported)
+	}
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = "standard"
+	}
+	if mode != "thin" && mode != "standard" && mode != "deep" {
+		return nil, fmt.Errorf("%w: hydrate mode must be thin, standard, or deep", ErrInvalidInput)
+	}
+	result, err := s.Work(ctx, req.WorkID)
+	if err != nil {
+		return nil, err
+	}
+
+	parent, _ := s.firstRelatedWork(ctx, req.WorkID, "parent_of", false)
+	blockingInbound, _ := s.relatedWork(ctx, req.WorkID, "blocks", false, 25)
+	blockingOutbound, _ := s.relatedWork(ctx, req.WorkID, "blocks", true, 25)
+	children, _ := s.relatedWork(ctx, req.WorkID, "parent_of", true, 25)
+	verifierNodes, _ := s.relatedWork(ctx, req.WorkID, "verifier", false, 25)
+	discoveredNodes, _ := s.relatedWork(ctx, req.WorkID, "discovered_from", false, 25)
+	supersedes, _ := s.relatedWork(ctx, req.WorkID, "supersedes", true, 25)
+	supersededBy, _ := s.relatedWork(ctx, req.WorkID, "supersedes", false, 25)
+
+	updateLimit, noteLimit, attestationLimit, artifactLimit, jobLimit := hydrationLimits(mode)
+	updates := result.Updates
+	if len(updates) > updateLimit {
+		updates = updates[:updateLimit]
+	}
+	notes := result.Notes
+	if len(notes) > noteLimit {
+		notes = notes[:noteLimit]
+	}
+	attestations := result.Attestations
+	if len(attestations) > attestationLimit {
+		attestations = attestations[:attestationLimit]
+	}
+	artifacts := result.Artifacts
+	if len(artifacts) > artifactLimit {
+		artifacts = artifacts[:artifactLimit]
+	}
+	jobs := result.Jobs
+	if len(jobs) > jobLimit {
+		jobs = jobs[:jobLimit]
+	}
+
+	summary := fmt.Sprintf("%s: %s", result.Work.Kind, result.Work.Objective)
+	if len(updates) > 0 && strings.TrimSpace(updates[0].Message) != "" {
+		summary = summary + " Latest update: " + strings.TrimSpace(updates[0].Message)
+	}
+	openQuestions := []string{}
+	if len(blockingInbound) > 0 {
+		openQuestions = append(openQuestions, fmt.Sprintf("%d blocking dependencies remain unresolved.", len(blockingInbound)))
+	}
+	if len(attestations) == 0 && len(result.Work.RequiredAttestations) > 0 {
+		openQuestions = append(openQuestions, "Required attestations have not been recorded yet.")
+	}
+	nextActions := []string{
+		"Inspect the current work item objective and acceptance before making changes.",
+		"Review the most recent updates, notes, and attestations.",
+		"Publish a structured work update before handing off or stopping.",
+	}
+	nextActions = append(nextActions, delegationNextAction(result.Work))
+
+	runtimeSection := map[string]any{
+		"runtime_version": "dev",
+		"config_path":     s.ConfigPath,
+		"state_dir":       s.Paths.StateDir,
+	}
+	if claimant := firstNonEmpty(req.Claimant, result.Work.ClaimedBy); claimant != "" {
+		runtimeSection["claimant"] = claimant
+	}
+
+	assignmentSection := map[string]any{
+		"work_id":         result.Work.WorkID,
+		"title":           result.Work.Title,
+		"objective":       result.Work.Objective,
+		"kind":            result.Work.Kind,
+		"execution_state": result.Work.ExecutionState,
+		"approval_state":  result.Work.ApprovalState,
+		"priority":        result.Work.Priority,
+		"metadata":        cloneMap(result.Work.Metadata),
+	}
+	if result.Work.Phase != "" {
+		assignmentSection["phase"] = result.Work.Phase
+	}
+	if result.Work.CurrentJobID != "" {
+		assignmentSection["current_job_id"] = result.Work.CurrentJobID
+	}
+	if result.Work.CurrentSessionID != "" {
+		assignmentSection["current_session_id"] = result.Work.CurrentSessionID
+	}
+	if result.Work.ClaimedBy != "" {
+		assignmentSection["claimed_by"] = result.Work.ClaimedBy
+	}
+	if result.Work.ClaimedUntil != nil {
+		assignmentSection["claimed_until"] = result.Work.ClaimedUntil.UTC().Format(time.RFC3339Nano)
+	}
+
+	return WorkHydrateResult{
+		"schema_version": "cagent.worker_briefing.v1",
+		"briefing_kind":  "assignment",
+		"generated_at":   time.Now().UTC().Format(time.RFC3339Nano),
+		"runtime":        runtimeSection,
+		"assignment":     assignmentSection,
+		"requirements": map[string]any{
+			"acceptance":            cloneMap(result.Work.Acceptance),
+			"required_capabilities": cloneSlice(result.Work.RequiredCapabilities),
+			"preferred_adapters":    cloneSlice(result.Work.PreferredAdapters),
+			"forbidden_adapters":    cloneSlice(result.Work.ForbiddenAdapters),
+			"policy": map[string]any{
+				"child_creation":      "proposal_only",
+				"dependency_edits":    "proposal_only",
+				"scope_expansion":     "proposal_only",
+				"verification_policy": "attestation_driven",
+			},
+		},
+		"graph_context": map[string]any{
+			"parent":            workRefOrNil(parent),
+			"blocking_inbound":  workRefs(blockingInbound),
+			"blocking_outbound": workRefs(blockingOutbound),
+			"children":          workRefs(children),
+			"verifier_nodes":    workRefs(verifierNodes),
+			"discovered_nodes":  workRefs(discoveredNodes),
+			"supersession": map[string]any{
+				"supersedes":    workRefs(supersedes),
+				"superseded_by": workRefs(supersededBy),
+			},
+		},
+		"evidence": map[string]any{
+			"latest_updates":      updateRefs(updates),
+			"latest_notes":        noteRefs(notes),
+			"latest_attestations": attestationRefs(attestations),
+			"artifacts":           artifactRefs(artifacts),
+			"recent_jobs":         jobRefs(jobs),
+			"history_matches":     []map[string]any{},
+		},
+		"worker_contract": map[string]any{
+			"read_commands": []string{
+				"cagent work show <work-id>",
+				"cagent work notes <work-id>",
+				"cagent artifacts list --work <work-id>",
+				"cagent history search --query <text>",
+			},
+			"write_commands": []string{
+				"cagent work update <work-id>",
+				"cagent work note-add <work-id>",
+				"cagent work attest <work-id>",
+				"cagent work proposal create",
+			},
+			"rules": []string{
+				"Publish structured updates as work progresses.",
+				"Record notes for findings, risks, and open questions.",
+				"Use attestations for evidence; do not silently treat verification as approval.",
+				"Create child work directly only for unexpected work, fanout work, or sequential context isolation with a bounded result and a clear verifier or attestation target.",
+				"If a possible child cannot be verified cheaply or clearly, create a proposal instead of creating the child directly.",
+				"Do not create child work just to offload thinking; the parent should remain able to judge success from bounded results.",
+			},
+		},
+		"hydration": map[string]any{
+			"mode":                     mode,
+			"summary":                  summary,
+			"open_questions":           openQuestions,
+			"recommended_next_actions": nextActions,
+		},
+	}, nil
+}
+
+func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
+	released, err := s.store.ReleaseExpiredWorkClaims(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile expired claims: %w", err)
+	}
+	now := time.Now().UTC()
+	ids := make([]string, 0, len(released))
+	for _, item := range released {
+		ids = append(ids, item.WorkID)
+		_ = s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+			UpdateID:       core.GenerateID("wup"),
+			WorkID:         item.WorkID,
+			ExecutionState: core.WorkExecutionStateReady,
+			Message:        "Lease expired — released by startup reconciliation",
+			CreatedBy:      "reconciler",
+			CreatedAt:      now,
+		})
+		_ = s.store.CreateWorkNote(ctx, core.WorkNoteRecord{
+			NoteID:    core.GenerateID("wnote"),
+			WorkID:    item.WorkID,
+			NoteType:  "reconciliation",
+			Body:      "Lease expired — released by startup reconciliation",
+			CreatedBy: "reconciler",
+			CreatedAt: now,
+		})
+	}
+	return ids, nil
 }
 
 func (s *Service) ListWork(ctx context.Context, req WorkListRequest) ([]core.WorkItemRecord, error) {
@@ -1335,6 +1577,45 @@ func (s *Service) ReleaseWork(ctx context.Context, req WorkReleaseRequest) (*cor
 	return &work, nil
 }
 
+func (s *Service) RenewWorkLease(ctx context.Context, req WorkRenewLeaseRequest) (*core.WorkItemRecord, error) {
+	workID := strings.TrimSpace(req.WorkID)
+	claimant := strings.TrimSpace(req.Claimant)
+	if workID == "" {
+		return nil, fmt.Errorf("%w: work id must not be empty", ErrInvalidInput)
+	}
+	if claimant == "" {
+		return nil, fmt.Errorf("%w: claimant must not be empty", ErrInvalidInput)
+	}
+	leaseDuration := req.LeaseDuration
+	if leaseDuration <= 0 {
+		leaseDuration = 15 * time.Minute
+	}
+	work, err := s.store.RenewWorkItemLease(ctx, workID, claimant, time.Now().UTC().Add(leaseDuration))
+	if err != nil {
+		if strings.Contains(err.Error(), "is not currently claimed") {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidInput, err.Error())
+		}
+		return nil, normalizeWorkClaimError(workID, err)
+	}
+	now := time.Now().UTC()
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:       core.GenerateID("wup"),
+		WorkID:         work.WorkID,
+		ExecutionState: work.ExecutionState,
+		Message:        fmt.Sprintf("lease renewed by %s", claimant),
+		Metadata: map[string]any{
+			"claimed_by":    claimant,
+			"claimed_until": timeStringPtr(work.ClaimedUntil),
+			"lease_seconds": int(leaseDuration.Seconds()),
+		},
+		CreatedBy: claimant,
+		CreatedAt: now,
+	}); err != nil {
+		return nil, err
+	}
+	return &work, nil
+}
+
 func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.WorkItemRecord, error) {
 	work, err := s.store.GetWorkItem(ctx, req.WorkID)
 	if err != nil {
@@ -1346,6 +1627,9 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	if req.ApprovalState != "" {
 		work.ApprovalState = req.ApprovalState
+	}
+	if req.LockState != "" {
+		work.LockState = req.LockState
 	}
 	if req.Phase != "" {
 		work.Phase = req.Phase
@@ -1363,6 +1647,13 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	if req.SessionID != "" {
 		work.CurrentSessionID = req.SessionID
+	}
+	if req.LockState == core.WorkLockStateHumanLocked {
+		work.ClaimedBy = ""
+		work.ClaimedUntil = nil
+	}
+	if req.ExecutionState == core.WorkExecutionStateDone && req.ApprovalState == "" && shouldSetPendingApproval(work) {
+		work.ApprovalState = core.WorkApprovalStatePending
 	}
 	work.UpdatedAt = now
 	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
@@ -1385,6 +1676,264 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 		return nil, err
 	}
 	return &work, nil
+}
+
+func (s *Service) SetWorkLock(ctx context.Context, workID string, lockState core.WorkLockState, createdBy, message string) (*core.WorkItemRecord, error) {
+	if lockState == "" {
+		return nil, fmt.Errorf("%w: lock state must not be empty", ErrInvalidInput)
+	}
+	work, err := s.store.GetWorkItem(ctx, workID)
+	if err != nil {
+		return nil, normalizeStoreError("work", workID, err)
+	}
+	work.LockState = lockState
+	if lockState == core.WorkLockStateHumanLocked {
+		work.ClaimedBy = ""
+		work.ClaimedUntil = nil
+	}
+	work.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, err
+	}
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:  core.GenerateID("wup"),
+		WorkID:    work.WorkID,
+		Message:   message,
+		Metadata:  map[string]any{"lock_state": string(lockState)},
+		CreatedBy: createdBy,
+		CreatedAt: work.UpdatedAt,
+	}); err != nil {
+		return nil, err
+	}
+	return &work, nil
+}
+
+func (s *Service) ApproveWork(ctx context.Context, workID, createdBy, message string) (*core.WorkItemRecord, error) {
+	work, err := s.store.GetWorkItem(ctx, workID)
+	if err != nil {
+		return nil, normalizeStoreError("work", workID, err)
+	}
+	attestations, err := s.store.ListAttestationRecords(ctx, "work", workID, 200)
+	if err != nil {
+		return nil, err
+	}
+	if !requiredAttestationsResolved(work, attestations) {
+		return nil, fmt.Errorf("%w: blocking attestation policy unresolved", ErrInvalidInput)
+	}
+	previousApprovals, err := s.store.ListApprovalRecords(ctx, workID, 1)
+	if err != nil {
+		return nil, err
+	}
+	work.ApprovalState = core.WorkApprovalStateVerified
+	work.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, err
+	}
+	approval := core.ApprovalRecord{
+		ApprovalID:        core.GenerateID("approval"),
+		WorkID:            work.WorkID,
+		ApprovedCommitOID: work.HeadCommitOID,
+		AttestationIDs:    attestationIDs(attestations),
+		Status:            "approved",
+		ApprovedBy:        createdBy,
+		ApprovedAt:        work.UpdatedAt,
+		Metadata:          map[string]any{"message": message},
+	}
+	if len(previousApprovals) > 0 {
+		approval.SupersedesApprovalID = previousApprovals[0].ApprovalID
+	}
+	if err := s.store.CreateApprovalRecord(ctx, approval); err != nil {
+		return nil, err
+	}
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:      core.GenerateID("wup"),
+		WorkID:        work.WorkID,
+		ApprovalState: work.ApprovalState,
+		Message:       message,
+		CreatedBy:     createdBy,
+		CreatedAt:     work.UpdatedAt,
+		Metadata:      map[string]any{"approval_action": "approve"},
+	}); err != nil {
+		return nil, err
+	}
+	return &work, nil
+}
+
+func (s *Service) RejectWork(ctx context.Context, workID, createdBy, message string) (*core.WorkItemRecord, error) {
+	work, err := s.store.GetWorkItem(ctx, workID)
+	if err != nil {
+		return nil, normalizeStoreError("work", workID, err)
+	}
+	attestations, err := s.store.ListAttestationRecords(ctx, "work", workID, 200)
+	if err != nil {
+		return nil, err
+	}
+	previousApprovals, err := s.store.ListApprovalRecords(ctx, workID, 1)
+	if err != nil {
+		return nil, err
+	}
+	work.ApprovalState = core.WorkApprovalStateRejected
+	work.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, err
+	}
+	approval := core.ApprovalRecord{
+		ApprovalID:        core.GenerateID("approval"),
+		WorkID:            work.WorkID,
+		ApprovedCommitOID: work.HeadCommitOID,
+		AttestationIDs:    attestationIDs(attestations),
+		Status:            "rejected",
+		ApprovedBy:        createdBy,
+		ApprovedAt:        work.UpdatedAt,
+		Metadata:          map[string]any{"message": message},
+	}
+	if len(previousApprovals) > 0 {
+		approval.SupersedesApprovalID = previousApprovals[0].ApprovalID
+	}
+	if err := s.store.CreateApprovalRecord(ctx, approval); err != nil {
+		return nil, err
+	}
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:      core.GenerateID("wup"),
+		WorkID:        work.WorkID,
+		ApprovalState: work.ApprovalState,
+		Message:       message,
+		CreatedBy:     createdBy,
+		CreatedAt:     work.UpdatedAt,
+		Metadata:      map[string]any{"approval_action": "reject"},
+	}); err != nil {
+		return nil, err
+	}
+	return &work, nil
+}
+
+func (s *Service) PromoteWork(ctx context.Context, req WorkPromoteRequest) (*core.PromotionRecord, *core.WorkItemRecord, error) {
+	work, err := s.store.GetWorkItem(ctx, req.WorkID)
+	if err != nil {
+		return nil, nil, normalizeStoreError("work", req.WorkID, err)
+	}
+	if work.ApprovalState != core.WorkApprovalStateVerified {
+		return nil, nil, fmt.Errorf("%w: work must be approved before promotion", ErrInvalidInput)
+	}
+	approvals, err := s.store.ListApprovalRecords(ctx, req.WorkID, 1)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(approvals) == 0 || approvals[0].Status != "approved" {
+		return nil, nil, fmt.Errorf("%w: missing approval record for promotion", ErrInvalidInput)
+	}
+	now := time.Now().UTC()
+	promotion := core.PromotionRecord{
+		PromotionID:       core.GenerateID("promote"),
+		WorkID:            work.WorkID,
+		ApprovalID:        approvals[0].ApprovalID,
+		Environment:       strings.TrimSpace(req.Environment),
+		PromotedCommitOID: work.HeadCommitOID,
+		TargetRef:         strings.TrimSpace(req.TargetRef),
+		Status:            "promoted",
+		PromotedBy:        req.CreatedBy,
+		PromotedAt:        now,
+		Metadata:          map[string]any{"message": req.Message},
+	}
+	if promotion.Environment == "" {
+		promotion.Environment = "staging"
+	}
+	if err := s.store.CreatePromotionRecord(ctx, promotion); err != nil {
+		return nil, nil, err
+	}
+	if work.Metadata == nil {
+		work.Metadata = map[string]any{}
+	}
+	work.Metadata["promoted"] = true
+	work.Metadata["promoted_environment"] = promotion.Environment
+	work.UpdatedAt = now
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, nil, err
+	}
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:      core.GenerateID("wup"),
+		WorkID:        work.WorkID,
+		ApprovalState: work.ApprovalState,
+		Message:       firstNonEmpty(req.Message, "promoted"),
+		CreatedBy:     req.CreatedBy,
+		CreatedAt:     now,
+		Metadata: map[string]any{
+			"promotion_id": promotion.PromotionID,
+			"environment":  promotion.Environment,
+			"target_ref":   promotion.TargetRef,
+		},
+	}); err != nil {
+		return nil, nil, err
+	}
+	return &promotion, &work, nil
+}
+
+func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.AttestationRecord, *core.WorkItemRecord, error) {
+	work, err := s.store.GetWorkItem(ctx, req.WorkID)
+	if err != nil {
+		return nil, nil, normalizeStoreError("work", req.WorkID, err)
+	}
+	now := time.Now().UTC()
+	metadata := cloneMap(req.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if work.HeadCommitOID != "" {
+		if _, ok := metadata["commit_oid"]; !ok {
+			metadata["commit_oid"] = work.HeadCommitOID
+		}
+	}
+	record := core.AttestationRecord{
+		AttestationID:           core.GenerateID("attest"),
+		SubjectKind:             "work",
+		SubjectID:               req.WorkID,
+		Result:                  req.Result,
+		Summary:                 req.Summary,
+		ArtifactID:              req.ArtifactID,
+		JobID:                   req.JobID,
+		SessionID:               req.SessionID,
+		Method:                  strings.TrimSpace(req.Method),
+		VerifierKind:            strings.TrimSpace(req.VerifierKind),
+		VerifierIdentity:        strings.TrimSpace(req.VerifierIdentity),
+		Confidence:              req.Confidence,
+		Blocking:                req.Blocking,
+		SupersedesAttestationID: strings.TrimSpace(req.SupersedesAttestationID),
+		Metadata:                metadata,
+		CreatedBy:               req.CreatedBy,
+		CreatedAt:               now,
+	}
+	if record.VerifierKind == "" {
+		record.VerifierKind = "manual"
+	}
+	if err := s.store.CreateAttestationRecord(ctx, record); err != nil {
+		return nil, nil, err
+	}
+	if shouldSetPendingApproval(work) {
+		work.ApprovalState = core.WorkApprovalStatePending
+		work.UpdatedAt = now
+		if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:      core.GenerateID("wup"),
+		WorkID:        work.WorkID,
+		ApprovalState: work.ApprovalState,
+		Message:       req.Summary,
+		JobID:         req.JobID,
+		SessionID:     req.SessionID,
+		ArtifactID:    req.ArtifactID,
+		CreatedBy:     req.CreatedBy,
+		CreatedAt:     now,
+		Metadata: map[string]any{
+			"attestation_result":   req.Result,
+			"attestation_method":   record.Method,
+			"attestation_verifier": record.VerifierKind,
+		},
+	}); err != nil {
+		return nil, nil, err
+	}
+	return &record, &work, nil
 }
 
 func (s *Service) AddWorkNote(ctx context.Context, req WorkNoteRequest) (*core.WorkNoteRecord, error) {
@@ -1530,15 +2079,7 @@ func (s *Service) ReviewWorkProposal(ctx context.Context, proposalID, decision s
 			if err != nil {
 				return nil, nil, err
 			}
-			if err := s.store.CreateWorkEdge(ctx, core.WorkEdgeRecord{
-				EdgeID:     core.GenerateID("wedge"),
-				FromWorkID: parentID,
-				ToWorkID:   item.WorkID,
-				EdgeType:   "parent_of",
-				CreatedBy:  "service",
-				CreatedAt:  now,
-				Metadata:   map[string]any{},
-			}); err != nil {
+			if err := s.attachParentEdge(ctx, parentID, item.WorkID, "service", now, map[string]any{}, false); err != nil {
 				return nil, nil, err
 			}
 			proposal.TargetWorkID = item.WorkID
@@ -1600,6 +2141,7 @@ func (s *Service) createWorkFromPatch(ctx context.Context, proposal core.WorkPro
 		Kind:           kind,
 		ExecutionState: core.WorkExecutionStateReady,
 		ApprovalState:  core.WorkApprovalStateNone,
+		LockState:      core.WorkLockStateUnlocked,
 		Metadata:       map[string]any{"proposal_id": proposal.ProposalID},
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -1622,6 +2164,9 @@ func (s *Service) applyAddEdgeProposal(ctx context.Context, proposal core.WorkPr
 	}
 	if _, err := s.store.GetWorkItem(ctx, toWorkID); err != nil {
 		return normalizeStoreError("work", toWorkID, err)
+	}
+	if edgeType == "parent_of" {
+		return s.attachParentEdge(ctx, fromWorkID, toWorkID, "service", now, cloneMap(proposal.Metadata), false)
 	}
 	return s.store.CreateWorkEdge(ctx, core.WorkEdgeRecord{
 		EdgeID:     core.GenerateID("wedge"),
@@ -1685,6 +2230,9 @@ func (s *Service) applyReparentProposal(ctx context.Context, proposal core.WorkP
 	if _, err := s.store.GetWorkItem(ctx, newParentID); err != nil {
 		return normalizeStoreError("work", newParentID, err)
 	}
+	if err := s.validateParentEdge(ctx, newParentID, targetID, true); err != nil {
+		return err
+	}
 	existing, err := s.store.ListWorkEdges(ctx, 100, "parent_of", "", targetID)
 	if err != nil {
 		return err
@@ -1694,15 +2242,7 @@ func (s *Service) applyReparentProposal(ctx context.Context, proposal core.WorkP
 			return err
 		}
 	}
-	return s.store.CreateWorkEdge(ctx, core.WorkEdgeRecord{
-		EdgeID:     core.GenerateID("wedge"),
-		FromWorkID: newParentID,
-		ToWorkID:   targetID,
-		EdgeType:   "parent_of",
-		CreatedBy:  "service",
-		CreatedAt:  now,
-		Metadata:   map[string]any{},
-	})
+	return s.attachParentEdge(ctx, newParentID, targetID, "service", now, map[string]any{}, true)
 }
 
 func (s *Service) applySupersedeProposal(ctx context.Context, proposal core.WorkProposalRecord, now time.Time) (*core.WorkItemRecord, error) {
@@ -1739,59 +2279,6 @@ func (s *Service) applySupersedeProposal(ctx context.Context, proposal core.Work
 		return nil, err
 	}
 	return created, nil
-}
-
-func (s *Service) VerifyWork(ctx context.Context, req WorkVerifyRequest) (*core.VerificationRecord, *core.WorkItemRecord, error) {
-	work, err := s.store.GetWorkItem(ctx, req.WorkID)
-	if err != nil {
-		return nil, nil, normalizeStoreError("work", req.WorkID, err)
-	}
-	now := time.Now().UTC()
-	record := core.VerificationRecord{
-		VerificationID: core.GenerateID("verify"),
-		TargetKind:     "work",
-		TargetID:       req.WorkID,
-		Result:         req.Result,
-		Summary:        req.Summary,
-		ArtifactID:     req.ArtifactID,
-		JobID:          req.JobID,
-		SessionID:      req.SessionID,
-		Metadata:       cloneMap(req.Metadata),
-		CreatedBy:      req.CreatedBy,
-		CreatedAt:      now,
-	}
-	if err := s.store.CreateVerificationRecord(ctx, record); err != nil {
-		return nil, nil, err
-	}
-	switch req.Result {
-	case "passed":
-		work.ApprovalState = core.WorkApprovalStateVerified
-	case "failed":
-		work.ApprovalState = core.WorkApprovalStateRejected
-	case "blocked", "inconclusive":
-		work.ApprovalState = core.WorkApprovalStatePendingVerification
-	default:
-		return nil, nil, fmt.Errorf("%w: invalid verification result", ErrInvalidInput)
-	}
-	work.UpdatedAt = now
-	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
-		return nil, nil, err
-	}
-	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
-		UpdateID:      core.GenerateID("wup"),
-		WorkID:        work.WorkID,
-		ApprovalState: work.ApprovalState,
-		Message:       req.Summary,
-		JobID:         req.JobID,
-		SessionID:     req.SessionID,
-		ArtifactID:    req.ArtifactID,
-		CreatedBy:     req.CreatedBy,
-		CreatedAt:     now,
-		Metadata:      map[string]any{"verification_result": req.Result},
-	}); err != nil {
-		return nil, nil, err
-	}
-	return &record, &work, nil
 }
 
 func (s *Service) SearchHistory(ctx context.Context, req HistorySearchRequest) (*HistorySearchResult, error) {
@@ -3067,6 +3554,318 @@ func cloneSlice(src []string) []string {
 	return dst
 }
 
+func cloneRequiredAttestations(src []core.RequiredAttestation) []core.RequiredAttestation {
+	if len(src) == 0 {
+		return []core.RequiredAttestation{}
+	}
+	dst := make([]core.RequiredAttestation, len(src))
+	for i, slot := range src {
+		dst[i] = core.RequiredAttestation{
+			VerifierKind: slot.VerifierKind,
+			Method:       slot.Method,
+			Blocking:     slot.Blocking,
+			Metadata:     cloneMap(slot.Metadata),
+		}
+	}
+	return dst
+}
+
+func shouldSetPendingApproval(work core.WorkItemRecord) bool {
+	if work.ExecutionState != core.WorkExecutionStateDone {
+		return false
+	}
+	if work.ApprovalState == core.WorkApprovalStateVerified || work.ApprovalState == core.WorkApprovalStateRejected {
+		return false
+	}
+	for _, slot := range work.RequiredAttestations {
+		if slot.Blocking {
+			return true
+		}
+	}
+	return false
+}
+
+func requiredAttestationsResolved(work core.WorkItemRecord, attestations []core.AttestationRecord) bool {
+	superseded := supersededAttestationIDs(attestations)
+	for _, slot := range work.RequiredAttestations {
+		if !slot.Blocking {
+			continue
+		}
+		if !hasPassingAttestationForSlot(work, slot, attestations, superseded) {
+			return false
+		}
+	}
+	return true
+}
+
+func supersededAttestationIDs(attestations []core.AttestationRecord) map[string]bool {
+	superseded := make(map[string]bool, len(attestations))
+	for _, attestation := range attestations {
+		if attestation.SupersedesAttestationID != "" {
+			superseded[attestation.SupersedesAttestationID] = true
+		}
+	}
+	return superseded
+}
+
+func hasPassingAttestationForSlot(work core.WorkItemRecord, slot core.RequiredAttestation, attestations []core.AttestationRecord, superseded map[string]bool) bool {
+	for _, attestation := range attestations {
+		if attestation.Result != "passed" {
+			continue
+		}
+		if superseded[attestation.AttestationID] {
+			continue
+		}
+		if slot.VerifierKind != "" && attestation.VerifierKind != slot.VerifierKind {
+			continue
+		}
+		if slot.Method != "" && attestation.Method != slot.Method {
+			continue
+		}
+		if work.HeadCommitOID != "" {
+			commitOID, _ := attestation.Metadata["commit_oid"].(string)
+			if commitOID != work.HeadCommitOID {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (s *Service) attachParentEdge(ctx context.Context, parentID, childID, createdBy string, createdAt time.Time, metadata map[string]any, allowReplace bool) error {
+	if err := s.validateParentEdge(ctx, parentID, childID, allowReplace); err != nil {
+		return err
+	}
+	return s.store.CreateWorkEdge(ctx, core.WorkEdgeRecord{
+		EdgeID:     core.GenerateID("wedge"),
+		FromWorkID: parentID,
+		ToWorkID:   childID,
+		EdgeType:   "parent_of",
+		CreatedBy:  createdBy,
+		CreatedAt:  createdAt,
+		Metadata:   metadata,
+	})
+}
+
+func (s *Service) validateParentEdge(ctx context.Context, parentID, childID string, allowReplace bool) error {
+	if parentID == "" || childID == "" {
+		return fmt.Errorf("%w: parent and child work ids must not be empty", ErrInvalidInput)
+	}
+	if parentID == childID {
+		return fmt.Errorf("%w: parent edge cannot target the same work item", ErrInvalidInput)
+	}
+	existingParents, err := s.store.ListWorkEdges(ctx, 2, "parent_of", "", childID)
+	if err != nil {
+		return err
+	}
+	if len(existingParents) > 0 {
+		if !allowReplace {
+			return fmt.Errorf("%w: work item %s already has a parent", ErrInvalidInput, childID)
+		}
+		for _, edge := range existingParents {
+			if edge.FromWorkID == parentID {
+				return nil
+			}
+		}
+	}
+	current := parentID
+	seen := map[string]bool{}
+	for current != "" {
+		if current == childID {
+			return fmt.Errorf("%w: parent edge would create a cycle", ErrInvalidInput)
+		}
+		if seen[current] {
+			return fmt.Errorf("%w: parent lineage already contains a cycle", ErrInvalidInput)
+		}
+		seen[current] = true
+		edges, err := s.store.ListWorkEdges(ctx, 2, "parent_of", "", current)
+		if err != nil {
+			return err
+		}
+		if len(edges) == 0 {
+			break
+		}
+		current = edges[0].FromWorkID
+	}
+	return nil
+}
+
+func hydrationLimits(mode string) (updates, notes, attestations, artifacts, jobs int) {
+	switch mode {
+	case "thin":
+		return 5, 5, 5, 10, 5
+	case "deep":
+		return 20, 20, 20, 25, 15
+	default:
+		return 10, 10, 10, 20, 10
+	}
+}
+
+func delegationNextAction(work core.WorkItemRecord) string {
+	if len(work.RequiredAttestations) > 0 {
+		return "Create child work only when the needed result is bounded and cheaply attestable; otherwise propose the child instead of creating it directly."
+	}
+	return "Create child work only for unexpected work, fanout, or sequential context isolation when success can be judged from bounded results."
+}
+
+func attestationIDs(attestations []core.AttestationRecord) []string {
+	ids := make([]string, 0, len(attestations))
+	for _, attestation := range attestations {
+		ids = append(ids, attestation.AttestationID)
+	}
+	return ids
+}
+
+func workRef(item core.WorkItemRecord) map[string]any {
+	return map[string]any{
+		"work_id":         item.WorkID,
+		"title":           item.Title,
+		"kind":            item.Kind,
+		"execution_state": item.ExecutionState,
+		"approval_state":  item.ApprovalState,
+	}
+}
+
+func workRefOrNil(item *core.WorkItemRecord) any {
+	if item == nil {
+		return nil
+	}
+	return workRef(*item)
+}
+
+func workRefs(items []core.WorkItemRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, workRef(item))
+	}
+	return result
+}
+
+func updateRefs(items []core.WorkUpdateRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"update_id":       item.UpdateID,
+			"created_at":      item.CreatedAt.Format(time.RFC3339Nano),
+			"phase":           item.Phase,
+			"execution_state": item.ExecutionState,
+			"approval_state":  item.ApprovalState,
+			"message":         item.Message,
+			"job_id":          item.JobID,
+			"session_id":      item.SessionID,
+			"artifact_id":     item.ArtifactID,
+		})
+	}
+	return result
+}
+
+func noteRefs(items []core.WorkNoteRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"note_id":    item.NoteID,
+			"created_at": item.CreatedAt.Format(time.RFC3339Nano),
+			"note_type":  item.NoteType,
+			"body":       item.Body,
+		})
+	}
+	return result
+}
+
+func attestationRefs(items []core.AttestationRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"attestation_id": item.AttestationID,
+			"created_at":     item.CreatedAt.Format(time.RFC3339Nano),
+			"result":         item.Result,
+			"summary":        item.Summary,
+			"artifact_id":    item.ArtifactID,
+			"verifier_kind":  item.VerifierKind,
+			"method":         item.Method,
+		})
+	}
+	return result
+}
+
+func artifactRefs(items []core.ArtifactRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"artifact_id": item.ArtifactID,
+			"kind":        item.Kind,
+			"path":        item.Path,
+			"job_id":      item.JobID,
+			"session_id":  item.SessionID,
+		})
+	}
+	return result
+}
+
+func jobRefs(items []core.JobRecord) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"job_id":            item.JobID,
+			"state":             item.State,
+			"adapter":           item.Adapter,
+			"native_session_id": item.NativeSessionID,
+			"summary_message":   summaryString(item.Summary, "message"),
+		})
+	}
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (s *Service) firstRelatedWork(ctx context.Context, workID, edgeType string, outbound bool) (*core.WorkItemRecord, error) {
+	items, err := s.relatedWork(ctx, workID, edgeType, outbound, 1)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	return &items[0], nil
+}
+
+func (s *Service) relatedWork(ctx context.Context, workID, edgeType string, outbound bool, limit int) ([]core.WorkItemRecord, error) {
+	var fromWorkID, toWorkID string
+	if outbound {
+		fromWorkID = workID
+	} else {
+		toWorkID = workID
+	}
+	edges, err := s.store.ListWorkEdges(ctx, limit, edgeType, fromWorkID, toWorkID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]core.WorkItemRecord, 0, len(edges))
+	for _, edge := range edges {
+		relatedID := edge.FromWorkID
+		if outbound {
+			relatedID = edge.ToWorkID
+		}
+		if relatedID == "" {
+			continue
+		}
+		item, err := s.store.GetWorkItem(ctx, relatedID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
 func (s *Service) listArtifactsForWork(ctx context.Context, workID string, limit int) ([]core.ArtifactRecord, error) {
 	jobs, err := s.store.ListJobsByWork(ctx, workID, limit)
 	if err != nil {
@@ -4160,7 +4959,6 @@ func summaryBool(summary map[string]any, key string) bool {
 	return value
 }
 
-
 func (s *Service) upsertJobRuntime(ctx context.Context, jobID string, mutate func(*core.JobRuntimeRecord)) error {
 	now := time.Now().UTC()
 	rec, err := s.store.GetJobRuntime(ctx, jobID)
@@ -4244,10 +5042,11 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 		workState = core.WorkExecutionStateInProgress
 	case core.JobStateCompleted:
 		workState = core.WorkExecutionStateDone
+		work.ExecutionState = workState
 		work.ClaimedBy = ""
 		work.ClaimedUntil = nil
-		if work.ApprovalState == core.WorkApprovalStateNone {
-			work.ApprovalState = core.WorkApprovalStatePendingVerification
+		if shouldSetPendingApproval(work) {
+			work.ApprovalState = core.WorkApprovalStatePending
 		}
 	case core.JobStateFailed:
 		workState = core.WorkExecutionStateFailed

@@ -67,11 +67,20 @@ cagent work update <work-id> --phase implementation --message "Started implement
 cagent work note-add <work-id> --type finding --text "Need a verifier child work item."
 cagent work discover <work-id> --title "Add E2E coverage" --objective "Create browser verification work" --kind verify --rationale "UI changes need browser coverage"
 cagent work proposal create --type add_edge --target <work-id> --rationale "Verifier should block approval" --patch '{"edge_type":"verifies","source_work_id":"<verify-work-id>"}'
-cagent work verify <work-id> --result passed --summary "Playwright passed"
+cagent work attest <work-id> --result passed --summary "Playwright passed" --verifier-kind deterministic --method test
 cagent work claim <work-id> --claimant worker-a
 cagent work release <work-id> --claimant worker-a
 cagent artifacts attach --work <work-id> --path ./report.md --kind report
 ```
+
+Child-work policy:
+- create child work directly only for:
+  - unexpected local work discovered during execution,
+  - fanout work that can run in parallel with distinct bounded outputs,
+  - sequential context isolation where the next step benefits from a fresh bounded context.
+- create a child only when you can stay ignorant of implementation details and still name the required result, artifact, or attestation bundle up front.
+- if the proposed child does not have a clear cheap verifier or attestation target, do not create it directly; create a proposal instead.
+- do not create children just to offload thinking or explore vaguely. If scope may expand or verification is unclear, use `cagent work proposal create`.
 
 5. Continue same-vendor work:
 
@@ -122,6 +131,8 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 - Treat adapter-native history import as a future special case when the session was not created by `cagent`.
 - Publish structured updates at phase boundaries, and use notes for findings, feedback, and recovery context.
 - Use proposals for structural graph edits instead of silently rewriting the work graph.
+- Use direct child creation only for unexpected work, fanout work, or sequential context isolation with bounded and easily verified outputs.
+- If a possible child cannot be verified cheaply or clearly, propose it instead of creating it.
 - Do not self-approve implementation work; verification and review are separate work.
 - Before claiming a planning phase succeeded, verify the expected child work actually exists with `cagent work children` or `cagent work show`.
 - Stay within the repo and declared target paths; do not run broad home-directory scans like `find /Users/...` when the target path is already known.

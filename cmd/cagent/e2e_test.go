@@ -173,10 +173,20 @@ type cliWorkShowResult struct {
 		ProposalID string `json:"proposal_id"`
 		State      string `json:"state"`
 	} `json:"proposals"`
-	Verifications []struct {
-		VerificationID string `json:"verification_id"`
-		Result         string `json:"result"`
-	} `json:"verifications"`
+	Attestations []struct {
+		AttestationID string `json:"attestation_id"`
+		Result        string `json:"result"`
+	} `json:"attestations"`
+	Approvals []struct {
+		ApprovalID        string `json:"approval_id"`
+		Status            string `json:"status"`
+		ApprovedCommitOID string `json:"approved_commit_oid"`
+	} `json:"approvals"`
+	Promotions []struct {
+		PromotionID string `json:"promotion_id"`
+		Environment string `json:"environment"`
+		TargetRef   string `json:"target_ref"`
+	} `json:"promotions"`
 }
 
 type cliWorkProposalPayload struct {
@@ -190,12 +200,21 @@ type cliWorkProposalPayload struct {
 	CreatedWork *cliWorkItem `json:"created_work"`
 }
 
-type cliVerificationPayload struct {
-	Verification struct {
-		VerificationID string `json:"verification_id"`
-		Result         string `json:"result"`
-		TargetID       string `json:"target_id"`
-	} `json:"verification"`
+type cliAttestationPayload struct {
+	Attestation struct {
+		AttestationID string `json:"attestation_id"`
+		Result        string `json:"result"`
+		SubjectID     string `json:"subject_id"`
+	} `json:"attestation"`
+	Work cliWorkItem `json:"work"`
+}
+
+type cliPromotionPayload struct {
+	Promotion struct {
+		PromotionID string `json:"promotion_id"`
+		Environment string `json:"environment"`
+		TargetRef   string `json:"target_ref"`
+	} `json:"promotion"`
 	Work cliWorkItem `json:"work"`
 }
 
@@ -586,7 +605,7 @@ func TestWorkLifecycleCommands(t *testing.T) {
 		t.Fatal("expected root work id")
 	}
 
-	childOutput := runCagent(t, binary, configPath, "--json", "work", "create", "--title", "Implement child", "--objective", "Attach run lifecycle to work", "--kind", "implement", "--parent", rootWork.WorkID)
+	childOutput := runCagent(t, binary, configPath, "--json", "work", "create", "--title", "Implement child", "--objective", "Attach run lifecycle to work", "--kind", "implement", "--parent", rootWork.WorkID, "--head-commit", "abc123", "--required-attestations", `[{"verifier_kind":"deterministic","method":"test","blocking":true}]`)
 	var childWork cliWorkItem
 	if err := json.Unmarshal([]byte(childOutput), &childWork); err != nil {
 		t.Fatalf("unmarshal child work: %v\n%s", err, childOutput)
@@ -610,8 +629,8 @@ func TestWorkLifecycleCommands(t *testing.T) {
 	if show.Work.ExecutionState != "done" {
 		t.Fatalf("expected done execution state, got %+v", show.Work)
 	}
-	if show.Work.ApprovalState != "pending_verification" {
-		t.Fatalf("expected pending_verification, got %+v", show.Work)
+	if show.Work.ApprovalState != "pending" {
+		t.Fatalf("expected pending, got %+v", show.Work)
 	}
 	foundJob := false
 	for _, job := range show.Jobs {
@@ -642,13 +661,44 @@ func TestWorkLifecycleCommands(t *testing.T) {
 		t.Fatalf("expected note in work notes, got %+v", notes)
 	}
 
-	verifyOutput := runCagent(t, binary, configPath, "--json", "work", "verify", childWork.WorkID, "--result", "passed", "--summary", "Verification passed")
-	var verification cliVerificationPayload
-	if err := json.Unmarshal([]byte(verifyOutput), &verification); err != nil {
-		t.Fatalf("unmarshal verification payload: %v\n%s", err, verifyOutput)
+	attestOutput := runCagent(t, binary, configPath, "--json", "work", "attest", childWork.WorkID, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
+	var attestation cliAttestationPayload
+	if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
+		t.Fatalf("unmarshal attestation payload: %v\n%s", err, attestOutput)
 	}
-	if verification.Work.ApprovalState != "verified" {
-		t.Fatalf("expected verified approval state, got %+v", verification.Work)
+	if attestation.Work.ApprovalState != "pending" {
+		t.Fatalf("expected pending approval state after attestation, got %+v", attestation.Work)
+	}
+
+	approveOutput := runCagent(t, binary, configPath, "--json", "work", "approve", childWork.WorkID, "--message", "Ready to land")
+	if err := json.Unmarshal([]byte(approveOutput), &childWork); err != nil {
+		t.Fatalf("unmarshal work approval: %v\n%s", err, approveOutput)
+	}
+	if childWork.ApprovalState != "verified" {
+		t.Fatalf("expected verified approval state, got %+v", childWork)
+	}
+	showOutput = runCagent(t, binary, configPath, "--json", "work", "show", childWork.WorkID)
+	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
+		t.Fatalf("unmarshal work show after approval: %v\n%s", err, showOutput)
+	}
+	if len(show.Approvals) == 0 || show.Approvals[0].Status != "approved" || show.Approvals[0].ApprovedCommitOID != "abc123" {
+		t.Fatalf("expected approval ledger entry in work show, got %+v", show.Approvals)
+	}
+
+	promoteOutput := runCagent(t, binary, configPath, "--json", "work", "promote", childWork.WorkID, "--environment", "staging", "--ref", "refs/cagent/promoted/staging", "--message", "Ship to staging")
+	var promotion cliPromotionPayload
+	if err := json.Unmarshal([]byte(promoteOutput), &promotion); err != nil {
+		t.Fatalf("unmarshal work promotion: %v\n%s", err, promoteOutput)
+	}
+	if promotion.Promotion.Environment != "staging" || promotion.Promotion.TargetRef != "refs/cagent/promoted/staging" {
+		t.Fatalf("expected staging promotion payload, got %+v", promotion)
+	}
+	showOutput = runCagent(t, binary, configPath, "--json", "work", "show", childWork.WorkID)
+	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
+		t.Fatalf("unmarshal work show after promotion: %v\n%s", err, showOutput)
+	}
+	if len(show.Promotions) == 0 || show.Promotions[0].Environment != "staging" {
+		t.Fatalf("expected promotion record in work show, got %+v", show.Promotions)
 	}
 
 	artifactsOutput := runCagent(t, binary, configPath, "--json", "artifacts", "list", "--work", childWork.WorkID)
@@ -727,8 +777,43 @@ func TestWorkLifecycleCommands(t *testing.T) {
 	}
 
 	statusProjection := runCagent(t, binary, configPath, "work", "projection", "status", childWork.WorkID)
-	if !strings.Contains(statusProjection, "Latest Verification") || !strings.Contains(statusProjection, "Verification passed") {
+	if !strings.Contains(statusProjection, "Latest Attestation") || !strings.Contains(statusProjection, "Attestation passed") {
 		t.Fatalf("expected status projection content, got:\n%s", statusProjection)
+	}
+
+	hydrateOutput := runCagent(t, binary, configPath, "--json", "work", "hydrate", childWork.WorkID)
+	var briefing map[string]any
+	if err := json.Unmarshal([]byte(hydrateOutput), &briefing); err != nil {
+		t.Fatalf("unmarshal work hydrate: %v\n%s", err, hydrateOutput)
+	}
+	if briefing["schema_version"] != "cagent.worker_briefing.v1" {
+		t.Fatalf("unexpected hydrate schema version: %+v", briefing)
+	}
+	evidence, ok := briefing["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hydrate evidence object, got %+v", briefing)
+	}
+	if _, ok := evidence["latest_attestations"]; !ok {
+		t.Fatalf("expected latest_attestations in hydrate evidence, got %+v", evidence)
+	}
+	workerContract, ok := briefing["worker_contract"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hydrate worker_contract object, got %+v", briefing)
+	}
+	rules, ok := workerContract["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("expected hydrate worker_contract rules, got %+v", workerContract)
+	}
+	foundDelegationRule := false
+	for _, rule := range rules {
+		text, _ := rule.(string)
+		if strings.Contains(text, "Create child work directly only for unexpected work, fanout work, or sequential context isolation") {
+			foundDelegationRule = true
+			break
+		}
+	}
+	if !foundDelegationRule {
+		t.Fatalf("expected hydrate worker_contract to include delegation rule, got %+v", rules)
 	}
 
 	createChildProposalOutput := runCagent(t, binary, configPath, "--json", "work", "proposal", "create", "--type", "create_child", "--target", rootWork.WorkID, "--patch", `{"title":"Review child","objective":"Review the implementation","kind":"review"}`)

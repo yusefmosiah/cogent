@@ -220,22 +220,22 @@ type TransferArtifact struct {
 }
 
 type TransferPacket struct {
-	TransferID           string                `json:"transfer_id"`
-	ExportedAt           time.Time             `json:"exported_at"`
-	Mode                 string                `json:"mode"`
-	Reason               string                `json:"reason,omitempty"`
-	Disclaimer           string                `json:"disclaimer"`
-	Source               TransferSource        `json:"source"`
-	Objective            string                `json:"objective"`
-	Summary              string                `json:"summary"`
-	Unresolved           []string              `json:"unresolved"`
-	ImportantFiles       []string              `json:"important_files"`
-	RecentTurnsInline    []TurnRecord          `json:"recent_turns_inline,omitempty"`
-	RecentEventsInline   []EventRecord         `json:"recent_events_inline,omitempty"`
-	EvidenceRefs         []TransferArtifact    `json:"evidence_refs"`
-	Artifacts            []TransferArtifact    `json:"artifacts"`
-	Constraints          []string              `json:"constraints"`
-	RecommendedNextSteps []string              `json:"recommended_next_steps"`
+	TransferID           string             `json:"transfer_id"`
+	ExportedAt           time.Time          `json:"exported_at"`
+	Mode                 string             `json:"mode"`
+	Reason               string             `json:"reason,omitempty"`
+	Disclaimer           string             `json:"disclaimer"`
+	Source               TransferSource     `json:"source"`
+	Objective            string             `json:"objective"`
+	Summary              string             `json:"summary"`
+	Unresolved           []string           `json:"unresolved"`
+	ImportantFiles       []string           `json:"important_files"`
+	RecentTurnsInline    []TurnRecord       `json:"recent_turns_inline,omitempty"`
+	RecentEventsInline   []EventRecord      `json:"recent_events_inline,omitempty"`
+	EvidenceRefs         []TransferArtifact `json:"evidence_refs"`
+	Artifacts            []TransferArtifact `json:"artifacts"`
+	Constraints          []string           `json:"constraints"`
+	RecommendedNextSteps []string           `json:"recommended_next_steps"`
 }
 
 type TransferRecord struct {
@@ -308,35 +308,52 @@ func (s WorkExecutionState) Terminal() bool {
 type WorkApprovalState string
 
 const (
-	WorkApprovalStateNone                WorkApprovalState = "none"
-	WorkApprovalStatePendingVerification WorkApprovalState = "pending_verification"
-	WorkApprovalStateVerified            WorkApprovalState = "verified"
-	WorkApprovalStateRejected            WorkApprovalState = "rejected"
+	WorkApprovalStateNone     WorkApprovalState = "none"
+	WorkApprovalStatePending  WorkApprovalState = "pending"
+	WorkApprovalStateVerified WorkApprovalState = "verified"
+	WorkApprovalStateRejected WorkApprovalState = "rejected"
 )
 
+type WorkLockState string
+
+const (
+	WorkLockStateUnlocked    WorkLockState = "unlocked"
+	WorkLockStateHumanLocked WorkLockState = "human_locked"
+)
+
+type RequiredAttestation struct {
+	VerifierKind string         `json:"verifier_kind,omitempty"`
+	Method       string         `json:"method,omitempty"`
+	Blocking     bool           `json:"blocking,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
 type WorkItemRecord struct {
-	WorkID               string             `json:"work_id"`
-	Title                string             `json:"title"`
-	Objective            string             `json:"objective"`
-	Kind                 string             `json:"kind"`
-	ExecutionState       WorkExecutionState `json:"execution_state"`
-	ApprovalState        WorkApprovalState  `json:"approval_state"`
-	Phase                string             `json:"phase,omitempty"`
-	Priority             int                `json:"priority,omitempty"`
-	RequiredCapabilities []string           `json:"required_capabilities,omitempty"`
-	RequiredModelTraits  []string           `json:"required_model_traits,omitempty"`
-	PreferredAdapters    []string           `json:"preferred_adapters,omitempty"`
-	ForbiddenAdapters    []string           `json:"forbidden_adapters,omitempty"`
-	PreferredModels      []string           `json:"preferred_models,omitempty"`
-	AvoidModels          []string           `json:"avoid_models,omitempty"`
-	Acceptance           map[string]any     `json:"acceptance,omitempty"`
-	Metadata             map[string]any     `json:"metadata,omitempty"`
-	CurrentJobID         string             `json:"current_job_id,omitempty"`
-	CurrentSessionID     string             `json:"current_session_id,omitempty"`
-	ClaimedBy            string             `json:"claimed_by,omitempty"`
-	ClaimedUntil         *time.Time         `json:"claimed_until,omitempty"`
-	CreatedAt            time.Time          `json:"created_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	WorkID               string                `json:"work_id"`
+	Title                string                `json:"title"`
+	Objective            string                `json:"objective"`
+	Kind                 string                `json:"kind"`
+	ExecutionState       WorkExecutionState    `json:"execution_state"`
+	ApprovalState        WorkApprovalState     `json:"approval_state"`
+	LockState            WorkLockState         `json:"lock_state"`
+	Phase                string                `json:"phase,omitempty"`
+	Priority             int                   `json:"priority,omitempty"`
+	RequiredCapabilities []string              `json:"required_capabilities,omitempty"`
+	RequiredModelTraits  []string              `json:"required_model_traits,omitempty"`
+	PreferredAdapters    []string              `json:"preferred_adapters,omitempty"`
+	ForbiddenAdapters    []string              `json:"forbidden_adapters,omitempty"`
+	PreferredModels      []string              `json:"preferred_models,omitempty"`
+	AvoidModels          []string              `json:"avoid_models,omitempty"`
+	RequiredAttestations []RequiredAttestation `json:"required_attestations,omitempty"`
+	Acceptance           map[string]any        `json:"acceptance,omitempty"`
+	Metadata             map[string]any        `json:"metadata,omitempty"`
+	HeadCommitOID        string                `json:"head_commit_oid,omitempty"`
+	CurrentJobID         string                `json:"current_job_id,omitempty"`
+	CurrentSessionID     string                `json:"current_session_id,omitempty"`
+	ClaimedBy            string                `json:"claimed_by,omitempty"`
+	ClaimedUntil         *time.Time            `json:"claimed_until,omitempty"`
+	CreatedAt            time.Time             `json:"created_at"`
+	UpdatedAt            time.Time             `json:"updated_at"`
 }
 
 type WorkEdgeRecord struct {
@@ -389,16 +406,48 @@ type WorkProposalRecord struct {
 	ReviewedAt    *time.Time     `json:"reviewed_at,omitempty"`
 }
 
-type VerificationRecord struct {
-	VerificationID string         `json:"verification_id"`
-	TargetKind     string         `json:"target_kind"`
-	TargetID       string         `json:"target_id"`
-	Result         string         `json:"result"`
-	Summary        string         `json:"summary,omitempty"`
-	ArtifactID     string         `json:"artifact_id,omitempty"`
-	JobID          string         `json:"job_id,omitempty"`
-	SessionID      string         `json:"session_id,omitempty"`
-	Metadata       map[string]any `json:"metadata,omitempty"`
-	CreatedBy      string         `json:"created_by,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
+type AttestationRecord struct {
+	AttestationID           string         `json:"attestation_id"`
+	SubjectKind             string         `json:"subject_kind"`
+	SubjectID               string         `json:"subject_id"`
+	Result                  string         `json:"result"`
+	Summary                 string         `json:"summary,omitempty"`
+	ArtifactID              string         `json:"artifact_id,omitempty"`
+	JobID                   string         `json:"job_id,omitempty"`
+	SessionID               string         `json:"session_id,omitempty"`
+	Method                  string         `json:"method,omitempty"`
+	VerifierKind            string         `json:"verifier_kind,omitempty"`
+	VerifierIdentity        string         `json:"verifier_identity,omitempty"`
+	Confidence              float64        `json:"confidence,omitempty"`
+	Blocking                bool           `json:"blocking,omitempty"`
+	SupersedesAttestationID string         `json:"supersedes_attestation_id,omitempty"`
+	Metadata                map[string]any `json:"metadata,omitempty"`
+	CreatedBy               string         `json:"created_by,omitempty"`
+	CreatedAt               time.Time      `json:"created_at"`
+}
+
+type ApprovalRecord struct {
+	ApprovalID           string         `json:"approval_id"`
+	WorkID               string         `json:"work_id"`
+	ApprovedCommitOID    string         `json:"approved_commit_oid,omitempty"`
+	ApprovedRef          string         `json:"approved_ref,omitempty"`
+	AttestationIDs       []string       `json:"attestation_ids,omitempty"`
+	Status               string         `json:"status"`
+	SupersedesApprovalID string         `json:"supersedes_approval_id,omitempty"`
+	ApprovedBy           string         `json:"approved_by,omitempty"`
+	ApprovedAt           time.Time      `json:"approved_at"`
+	Metadata             map[string]any `json:"metadata,omitempty"`
+}
+
+type PromotionRecord struct {
+	PromotionID       string         `json:"promotion_id"`
+	WorkID            string         `json:"work_id"`
+	ApprovalID        string         `json:"approval_id,omitempty"`
+	Environment       string         `json:"environment"`
+	PromotedCommitOID string         `json:"promoted_commit_oid,omitempty"`
+	TargetRef         string         `json:"target_ref,omitempty"`
+	Status            string         `json:"status"`
+	PromotedBy        string         `json:"promoted_by,omitempty"`
+	PromotedAt        time.Time      `json:"promoted_at"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
 }

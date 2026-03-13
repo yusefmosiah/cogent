@@ -184,7 +184,7 @@
       "required": [
         "latest_updates",
         "latest_notes",
-        "latest_verifications",
+        "latest_attestations",
         "artifacts",
         "recent_jobs",
         "history_matches"
@@ -198,9 +198,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/noteRef" }
         },
-        "latest_verifications": {
+        "latest_attestations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/verificationRef" }
+          "items": { "$ref": "#/$defs/attestationRef" }
         },
         "artifacts": {
           "type": "array",
@@ -313,19 +313,21 @@
         "body": { "type": "string" }
       }
     },
-    "verificationRef": {
+    "attestationRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["verification_id", "created_at", "result"],
+      "required": ["attestation_id", "created_at", "result"],
       "properties": {
-        "verification_id": { "type": "string" },
+        "attestation_id": { "type": "string" },
         "created_at": {
           "type": "string",
           "format": "date-time"
         },
         "result": { "type": "string" },
         "summary": { "type": "string" },
-        "artifact_id": { "type": "string" }
+        "artifact_id": { "type": "string" },
+        "verifier_kind": { "type": "string" },
+        "method": { "type": "string" }
       }
     },
     "artifactRef": {
