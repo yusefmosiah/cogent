@@ -28,6 +28,44 @@ func ResolvePaths() (Paths, error) {
 	return ResolvePathsFromEnv(home, os.Getenv)
 }
 
+// ResolveRepoStatDir finds the git repo root from cwd and returns
+// <repo-root>/.cagent as the state dir. Returns "" if not in a git repo.
+func ResolveRepoStateDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
+			return filepath.Join(dir, ".cagent")
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// ResolvePathsForRepo resolves paths scoped to the current git repo.
+// If in a git repo, uses <repo-root>/.cagent/ for state.
+// Otherwise falls back to global XDG paths.
+func ResolvePathsForRepo() (Paths, error) {
+	// Explicit override always wins
+	if os.Getenv("CAGENT_STATE_DIR") != "" {
+		return ResolvePaths()
+	}
+	repoState := ResolveRepoStateDir()
+	if repoState == "" {
+		return ResolvePaths()
+	}
+	paths, err := ResolvePaths()
+	if err != nil {
+		return paths, err
+	}
+	return paths.WithStateDir(repoState), nil
+}
+
 func ResolvePathsFromEnv(home string, getenv func(string) string) (Paths, error) {
 	if home == "" {
 		return Paths{}, fmt.Errorf("home directory is required")

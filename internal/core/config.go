@@ -96,7 +96,7 @@ func (c AdaptersConfig) ByName(name string) (AdapterConfig, bool) {
 }
 
 func LoadConfig(path string) (Config, error) {
-	paths, err := ResolvePaths()
+	paths, err := ResolvePathsForRepo()
 	if err != nil {
 		return Config{}, err
 	}

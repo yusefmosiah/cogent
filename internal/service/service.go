@@ -399,7 +399,7 @@ type continuationRequest struct {
 }
 
 func Open(ctx context.Context, configPath string) (*Service, error) {
-	paths, err := core.ResolvePaths()
+	paths, err := core.ResolvePathsForRepo()
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime paths: %w", err)
 	}
