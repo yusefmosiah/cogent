@@ -49,6 +49,50 @@ async function loadData() {
   return null; // signals: use mock or show empty state
 }
 
+// ── Detail Loading ──────────────────────────────────────────
+
+let detailCache = {}; // work_id → { data, fetchedAt }
+let currentDetail = null; // the currently displayed detail
+
+async function loadDetail(workId) {
+  // Return cached if fresh (< 30s)
+  const cached = detailCache[workId];
+  if (cached && Date.now() - cached.fetchedAt < 30000) return cached.data;
+
+  try {
+    const [showRes, hydrateRes] = await Promise.all([
+      fetch(`/api/work/${workId}`, { signal: AbortSignal.timeout(3000) }),
+      fetch(`/api/work/${workId}/hydrate?mode=thin`, { signal: AbortSignal.timeout(5000) }).catch(() => null),
+    ]);
+
+    const detail = {};
+    if (showRes.ok) {
+      const showData = await showRes.json();
+      const w = showData.work || showData;
+      detail.objective = w.objective || "";
+      detail.kind = w.kind || "";
+      detail.state = w.execution_state || "";
+      detail.approval = w.approval_state || "";
+      detail.notes = (showData.notes || []).slice(0, 5);
+      detail.updates = (showData.updates || []).slice(0, 5);
+      detail.attestations = (showData.attestations || []).slice(0, 5);
+      detail.children = (showData.children || []).slice(0, 10);
+    }
+
+    if (hydrateRes && hydrateRes.ok) {
+      const hydration = await hydrateRes.json();
+      detail.openQuestions = hydration.open_questions || [];
+      detail.nextActions = hydration.next_actions || hydration.recommended_next_actions || [];
+      detail.summary = hydration.hydration_summary || hydration.summary || "";
+    }
+
+    detailCache[workId] = { data: detail, fetchedAt: Date.now() };
+    return detail;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ── Poincaré Disk Math ──────────────────────────────────────
 
 function dot(a, b) { return a[0]*b[0] + a[1]*b[1]; }
@@ -270,7 +314,15 @@ function updateFocus() {
 
 function setFocus(id) {
   focusId = id || null;
-  if (!id) focusTarget = [0, 0];
+  if (!id) {
+    focusTarget = [0, 0];
+    currentDetail = null;
+  } else {
+    // Fetch detail asynchronously
+    loadDetail(id).then(detail => {
+      if (focusId === id) currentDetail = detail;
+    });
+  }
   updateUI();
 }
 
@@ -455,7 +507,121 @@ function draw() {
     }
   });
 
+  // Draw detail content for focused node
+  if (focusId && currentDetail) {
+    const w = byId[focusId];
+    if (w) {
+      const [sx, sy] = screenPos[w.id];
+      const sz = textSizeForNode(w);
+      if (sz >= 16) {
+        drawDetail(ctx, sx, sy, sz, currentDetail, W_px);
+      }
+    }
+  }
+
   requestAnimationFrame(draw);
+}
+
+function drawDetail(ctx, cx, cy, titleSize, detail, canvasWidth) {
+  const startY = cy + titleSize * 0.55 + 28;
+  const maxWidth = Math.min(500, canvasWidth * 0.6);
+  const leftX = cx - maxWidth / 2;
+  let y = startY;
+
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+
+  // Objective
+  if (detail.objective) {
+    ctx.font = "400 13px 'SF Pro Display', 'Helvetica Neue', system-ui, sans-serif";
+    ctx.fillStyle = "#a09888";
+    ctx.globalAlpha = 0.8;
+    y = wrapText(ctx, detail.objective, leftX, y, maxWidth, 17);
+    y += 12;
+  }
+
+  // Hydration summary
+  if (detail.summary) {
+    ctx.font = "italic 12px 'SF Pro Display', system-ui, sans-serif";
+    ctx.fillStyle = "#808878";
+    ctx.globalAlpha = 0.7;
+    y = wrapText(ctx, detail.summary, leftX, y, maxWidth, 16);
+    y += 10;
+  }
+
+  // Open questions
+  if (detail.openQuestions && detail.openQuestions.length > 0) {
+    ctx.font = "500 10px 'SF Mono', monospace";
+    ctx.fillStyle = "#c4a060";
+    ctx.globalAlpha = 0.6;
+    ctx.fillText("OPEN QUESTIONS", leftX, y);
+    y += 14;
+    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
+    ctx.fillStyle = "#998870";
+    ctx.globalAlpha = 0.65;
+    for (const q of detail.openQuestions.slice(0, 3)) {
+      y = wrapText(ctx, "? " + q, leftX, y, maxWidth, 15);
+      y += 4;
+    }
+    y += 8;
+  }
+
+  // Next actions
+  if (detail.nextActions && detail.nextActions.length > 0) {
+    ctx.font = "500 10px 'SF Mono', monospace";
+    ctx.fillStyle = "#50b888";
+    ctx.globalAlpha = 0.6;
+    ctx.fillText("NEXT ACTIONS", leftX, y);
+    y += 14;
+    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
+    ctx.fillStyle = "#70a080";
+    ctx.globalAlpha = 0.65;
+    for (const a of detail.nextActions.slice(0, 3)) {
+      y = wrapText(ctx, "→ " + a, leftX, y, maxWidth, 15);
+      y += 4;
+    }
+    y += 8;
+  }
+
+  // Notes
+  if (detail.notes && detail.notes.length > 0) {
+    ctx.font = "500 10px 'SF Mono', monospace";
+    ctx.fillStyle = "#888";
+    ctx.globalAlpha = 0.5;
+    ctx.fillText("NOTES", leftX, y);
+    y += 14;
+    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
+    ctx.fillStyle = "#777";
+    ctx.globalAlpha = 0.55;
+    for (const note of detail.notes.slice(0, 3)) {
+      const text = note.text || note.content || note.body || JSON.stringify(note).slice(0, 200);
+      y = wrapText(ctx, text, leftX, y, maxWidth, 15);
+      y += 6;
+    }
+  }
+
+  ctx.restore();
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(/\s+/);
+  let line = "";
+  for (const word of words) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      y += lineHeight;
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) {
+    ctx.fillText(line, x, y);
+    y += lineHeight;
+  }
+  return y;
 }
 
 // ── Interaction ─────────────────────────────────────────────
