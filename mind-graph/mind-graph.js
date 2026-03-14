@@ -314,13 +314,36 @@ function updateFocus() {
 
 function setFocus(id) {
   focusId = id || null;
+  const panel = document.getElementById("detail-panel");
+  const canvasWrap = document.getElementById("canvas-wrap");
+
   if (!id) {
     focusTarget = [0, 0];
     currentDetail = null;
+    panel.classList.remove("open");
+    canvasWrap.classList.remove("has-detail");
+    resize();
   } else {
-    // Fetch detail asynchronously
+    panel.classList.add("open");
+    canvasWrap.classList.add("has-detail");
+    resize();
+    // Show title immediately
+    const w = byId[id];
+    if (w) {
+      document.getElementById("detail-kind").textContent = w.k;
+      document.getElementById("detail-title").textContent = w.t;
+      document.getElementById("detail-meta").innerHTML =
+        `<span class="state state-${w.s}">${w.s}</span>` +
+        (w.approval !== "none" ? `<span class="state">${w.approval}</span>` : "") +
+        `<span style="color:#555">${w.att[1]}/${w.att[0]} attested</span>`;
+      document.getElementById("detail-body").innerHTML = '<div style="color:#555;padding:20px 0">loading...</div>';
+    }
+    // Fetch full detail
     loadDetail(id).then(detail => {
-      if (focusId === id) currentDetail = detail;
+      if (focusId === id && detail) {
+        currentDetail = detail;
+        renderDetailPanel(detail, byId[id]);
+      }
     });
   }
   updateUI();
@@ -507,121 +530,7 @@ function draw() {
     }
   });
 
-  // Draw detail content for focused node
-  if (focusId && currentDetail) {
-    const w = byId[focusId];
-    if (w) {
-      const [sx, sy] = screenPos[w.id];
-      const sz = textSizeForNode(w);
-      if (sz >= 16) {
-        drawDetail(ctx, sx, sy, sz, currentDetail, W_px);
-      }
-    }
-  }
-
   requestAnimationFrame(draw);
-}
-
-function drawDetail(ctx, cx, cy, titleSize, detail, canvasWidth) {
-  const startY = cy + titleSize * 0.55 + 28;
-  const maxWidth = Math.min(500, canvasWidth * 0.6);
-  const leftX = cx - maxWidth / 2;
-  let y = startY;
-
-  ctx.save();
-  ctx.textAlign = "left";
-  ctx.textBaseline = "top";
-
-  // Objective
-  if (detail.objective) {
-    ctx.font = "400 13px 'SF Pro Display', 'Helvetica Neue', system-ui, sans-serif";
-    ctx.fillStyle = "#a09888";
-    ctx.globalAlpha = 0.8;
-    y = wrapText(ctx, detail.objective, leftX, y, maxWidth, 17);
-    y += 12;
-  }
-
-  // Hydration summary
-  if (detail.summary) {
-    ctx.font = "italic 12px 'SF Pro Display', system-ui, sans-serif";
-    ctx.fillStyle = "#808878";
-    ctx.globalAlpha = 0.7;
-    y = wrapText(ctx, detail.summary, leftX, y, maxWidth, 16);
-    y += 10;
-  }
-
-  // Open questions
-  if (detail.openQuestions && detail.openQuestions.length > 0) {
-    ctx.font = "500 10px 'SF Mono', monospace";
-    ctx.fillStyle = "#c4a060";
-    ctx.globalAlpha = 0.6;
-    ctx.fillText("OPEN QUESTIONS", leftX, y);
-    y += 14;
-    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
-    ctx.fillStyle = "#998870";
-    ctx.globalAlpha = 0.65;
-    for (const q of detail.openQuestions.slice(0, 3)) {
-      y = wrapText(ctx, "? " + q, leftX, y, maxWidth, 15);
-      y += 4;
-    }
-    y += 8;
-  }
-
-  // Next actions
-  if (detail.nextActions && detail.nextActions.length > 0) {
-    ctx.font = "500 10px 'SF Mono', monospace";
-    ctx.fillStyle = "#50b888";
-    ctx.globalAlpha = 0.6;
-    ctx.fillText("NEXT ACTIONS", leftX, y);
-    y += 14;
-    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
-    ctx.fillStyle = "#70a080";
-    ctx.globalAlpha = 0.65;
-    for (const a of detail.nextActions.slice(0, 3)) {
-      y = wrapText(ctx, "→ " + a, leftX, y, maxWidth, 15);
-      y += 4;
-    }
-    y += 8;
-  }
-
-  // Notes
-  if (detail.notes && detail.notes.length > 0) {
-    ctx.font = "500 10px 'SF Mono', monospace";
-    ctx.fillStyle = "#888";
-    ctx.globalAlpha = 0.5;
-    ctx.fillText("NOTES", leftX, y);
-    y += 14;
-    ctx.font = "400 11px 'SF Pro Display', system-ui, sans-serif";
-    ctx.fillStyle = "#777";
-    ctx.globalAlpha = 0.55;
-    for (const note of detail.notes.slice(0, 3)) {
-      const text = note.text || note.content || note.body || JSON.stringify(note).slice(0, 200);
-      y = wrapText(ctx, text, leftX, y, maxWidth, 15);
-      y += 6;
-    }
-  }
-
-  ctx.restore();
-}
-
-function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-  const words = text.split(/\s+/);
-  let line = "";
-  for (const word of words) {
-    const test = line ? line + " " + word : word;
-    if (ctx.measureText(test).width > maxWidth && line) {
-      ctx.fillText(line, x, y);
-      y += lineHeight;
-      line = word;
-    } else {
-      line = test;
-    }
-  }
-  if (line) {
-    ctx.fillText(line, x, y);
-    y += lineHeight;
-  }
-  return y;
 }
 
 // ── Interaction ─────────────────────────────────────────────
@@ -663,6 +572,159 @@ cv.addEventListener("touchstart", ev => {
   if (h) setFocus(focusId === h ? (byId[h].p || null) : h);
 }, { passive: false });
 
+// ── Detail Panel Rendering ──────────────────────────────────
+
+function renderDetailPanel(detail, w) {
+  const body = document.getElementById("detail-body");
+  let html = "";
+
+  // Objective
+  if (detail.objective) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Objective</div>
+      <div class="detail-content">${renderMarkdown(detail.objective)}</div>
+    </div>`;
+  }
+
+  // Hydration summary
+  if (detail.summary) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Summary</div>
+      <div class="detail-content">${renderMarkdown(detail.summary)}</div>
+    </div>`;
+  }
+
+  // Open questions
+  if (detail.openQuestions && detail.openQuestions.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Open Questions</div>`;
+    for (const q of detail.openQuestions) {
+      html += `<div class="detail-list-item"><span class="item-prefix">?</span>${escapeHtml(q)}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Next actions
+  if (detail.nextActions && detail.nextActions.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Next Actions</div>`;
+    for (const a of detail.nextActions) {
+      html += `<div class="detail-list-item"><span class="item-prefix-green">→</span>${escapeHtml(a)}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Notes
+  if (detail.notes && detail.notes.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Notes</div>`;
+    for (const note of detail.notes) {
+      const text = note.text || note.content || note.body || "";
+      const type = note.note_type || note.type || "";
+      html += `<div class="detail-list-item">`;
+      if (type) html += `<span style="color:#555;font-family:'SF Mono',monospace;font-size:10px;margin-right:6px">${type}</span>`;
+      html += `<div class="detail-content" style="margin-top:4px">${renderMarkdown(text)}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Updates
+  if (detail.updates && detail.updates.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Updates</div>`;
+    for (const u of detail.updates) {
+      const msg = u.message || u.text || "";
+      const by = u.created_by || "";
+      html += `<div class="detail-list-item">`;
+      if (by) html += `<span style="color:#555;font-size:11px">${escapeHtml(by)}</span> `;
+      html += `${escapeHtml(msg)}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Attestations
+  if (detail.attestations && detail.attestations.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Attestations</div>`;
+    for (const a of detail.attestations) {
+      const result = a.result || "?";
+      const kind = a.verifier_kind || "";
+      const summary = a.summary || "";
+      const color = result === "passed" ? "#408868" : result === "failed" ? "#d06060" : "#888";
+      html += `<div class="detail-list-item">
+        <span style="color:${color};font-weight:500">${escapeHtml(result)}</span>
+        <span style="color:#666;margin:0 6px">·</span>
+        <span style="color:#888">${escapeHtml(kind)}</span>
+        ${summary ? `<div style="color:#777;font-size:12px;margin-top:2px">${escapeHtml(summary)}</div>` : ""}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Children
+  if (detail.children && detail.children.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Children</div>`;
+    for (const c of detail.children) {
+      const title = c.title || c.work_id || "";
+      const state = c.execution_state || "";
+      html += `<div class="detail-list-item">
+        <span class="state state-${state}" style="font-size:10px;padding:1px 6px;margin-right:6px">${state}</span>
+        ${escapeHtml(title)}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  if (!html) {
+    html = '<div style="color:#555;padding:20px 0">No details available yet.</div>';
+  }
+
+  body.innerHTML = html;
+}
+
+// Simple markdown → HTML (no dependencies)
+function renderMarkdown(text) {
+  if (!text) return "";
+  let html = escapeHtml(text);
+
+  // Code blocks (``` ... ```)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Blockquotes
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // Unordered lists
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  // Ordered lists
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  // Paragraphs (double newlines)
+  html = html.replace(/\n\n+/g, '</p><p>');
+  // Single newlines within paragraphs
+  html = html.replace(/\n/g, '<br>');
+
+  return `<p>${html}</p>`;
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // ── UI + Init ───────────────────────────────────────────────
 
 function updateUI() {
@@ -700,7 +762,7 @@ async function boot() {
   }
   document.getElementById("loading").style.display = "none";
   document.getElementById("top").style.display = "flex";
-  document.getElementById("canvas-wrap").style.display = "flex";
+  document.getElementById("main").style.display = "flex";
   document.getElementById("bottom").style.display = "flex";
   window.addEventListener("resize", resize);
   resize();
