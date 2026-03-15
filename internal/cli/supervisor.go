@@ -460,43 +460,72 @@ func sleepOrStop(ctx context.Context, d time.Duration, sigCh chan os.Signal, sto
 }
 
 // bootstrapRepo creates a root "bootstrap" work item from repo metadata.
-// The objective includes enough context for an agent to analyze the repo
-// and create child work items.
+// It deeply walks the doc tree, reads index files and frontmatter, and
+// generates an objective that teaches the agent to mirror the project's
+// own documentation ontology as the work graph.
 func bootstrapRepo(ctx context.Context, svc *service.Service, cwd string) error {
 	repoName := filepath.Base(cwd)
 
-	// Gather repo context
-	var context strings.Builder
-	context.WriteString(fmt.Sprintf("Repository: %s\nPath: %s\n", repoName, cwd))
+	var buf strings.Builder
+	buf.WriteString(fmt.Sprintf("Repository: %s\nPath: %s\n", repoName, cwd))
 
-	// Read README if present
-	for _, name := range []string{"README.md", "README", "README.txt", "readme.md"} {
-		readmePath := filepath.Join(cwd, name)
-		data, err := os.ReadFile(readmePath)
+	// Read README
+	for _, name := range []string{"README.md", "README", "readme.md"} {
+		data, err := os.ReadFile(filepath.Join(cwd, name))
 		if err == nil {
 			excerpt := string(data)
-			if len(excerpt) > 2000 {
-				excerpt = excerpt[:2000] + "\n...(truncated)"
+			if len(excerpt) > 3000 {
+				excerpt = excerpt[:3000] + "\n...(truncated)"
 			}
-			context.WriteString(fmt.Sprintf("\n## %s\n%s\n", name, excerpt))
+			buf.WriteString(fmt.Sprintf("\n## %s\n%s\n", name, excerpt))
 			break
 		}
 	}
 
-	// List docs/ if present
-	docsDir := filepath.Join(cwd, "docs")
-	if entries, err := os.ReadDir(docsDir); err == nil {
-		context.WriteString("\n## docs/\n")
-		for _, e := range entries {
-			if !e.IsDir() {
-				context.WriteString(fmt.Sprintf("- %s\n", e.Name()))
+	// Read doc indexes (ATLAS.md, NARRATIVE_INDEX.md, etc.)
+	for _, idx := range []string{
+		"docs/ATLAS.md", "docs/README.md", "docs/INDEX.md",
+		"docs/architecture/NARRATIVE_INDEX.md", "ARCHITECTURE.md",
+	} {
+		data, err := os.ReadFile(filepath.Join(cwd, idx))
+		if err == nil {
+			excerpt := string(data)
+			if len(excerpt) > 3000 {
+				excerpt = excerpt[:3000] + "\n...(truncated)"
 			}
+			buf.WriteString(fmt.Sprintf("\n## %s\n%s\n", idx, excerpt))
 		}
 	}
 
-	// List top-level structure
+	// Deep walk docs/ tree — list all docs with their paths
+	docsDir := filepath.Join(cwd, "docs")
+	if _, err := os.Stat(docsDir); err == nil {
+		buf.WriteString("\n## Full docs/ tree\n")
+		docCount := 0
+		_ = filepath.Walk(docsDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".md") {
+				return nil
+			}
+			rel, _ := filepath.Rel(cwd, path)
+			// Read first 3 lines for frontmatter/title
+			header := readFileHeader(path, 5)
+			buf.WriteString(fmt.Sprintf("- %s", rel))
+			if header != "" {
+				buf.WriteString(fmt.Sprintf("  [%s]", header))
+			}
+			buf.WriteString("\n")
+			docCount++
+			return nil
+		})
+		buf.WriteString(fmt.Sprintf("\n(%d docs total)\n", docCount))
+	}
+
+	// Top-level code structure
 	if entries, err := os.ReadDir(cwd); err == nil {
-		context.WriteString("\n## Top-level files/dirs\n")
+		buf.WriteString("\n## Top-level structure\n")
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), ".") {
 				continue
@@ -505,27 +534,49 @@ func bootstrapRepo(ctx context.Context, svc *service.Service, cwd string) error 
 			if e.IsDir() {
 				marker = "/"
 			}
-			context.WriteString(fmt.Sprintf("- %s%s\n", e.Name(), marker))
+			buf.WriteString(fmt.Sprintf("- %s%s\n", e.Name(), marker))
 		}
 	}
 
-	objective := fmt.Sprintf(`Bootstrap the %s repository into the cagent work graph.
+	objective := fmt.Sprintf(`Bootstrap the %s repository into the cagent work graph by ingesting its documentation.
 
-Analyze the codebase, documentation, and project structure. Then:
-1. Create root work items for major components or features
-2. Create child work items for actionable tasks
-3. Set up blocking edges where dependencies exist
-4. Add required attestation policies where appropriate
-5. Record notes with key findings about the codebase
+## Approach
 
-Use cagent CLI commands to create the work graph:
-- cagent work create --title "..." --objective "..." --kind <kind>
-- cagent work discover <parent-id> --title "..." --objective "..."
-- cagent work note-add <id> --type finding --text "..."
-- cagent work update <id> --message "..."
+1. DISCOVER THE DOC ONTOLOGY: Read the doc index files (ATLAS.md, README, etc.) to understand how this project organizes its documentation. Look for categories, taxonomies, and hierarchies that the project itself defines. Do NOT impose an external structure — mirror the project's own organization.
 
-Context:
-%s`, repoName, context.String())
+2. CREATE WORK ITEMS FROM DOCS: Each significant document (ADR, design doc, spec, guide) should become a work item. The work item's state should reflect the document's status:
+   - Documents in "theory" or "proposed" or "draft" directories → kind=plan, state=ready
+   - Documents in "practice" or "accepted" or "implemented" directories → kind=implement, state=done
+   - Test reports, audits, load tests → these are attestation evidence, not work items. Record them as attestations on the relevant work item using: cagent work attest <work-id> --result passed --summary "..." --verifier-kind deterministic --method test
+   - Guides and runbooks → attach as notes on the relevant work item
+   - Archived/deprecated docs → skip (historical context, not active work)
+
+3. CREATE EDGES FROM DEPENDENCIES: If documents reference each other (e.g., "Requires: ADR-0014" or "Dependencies: ..."), create blocking edges between the corresponding work items.
+
+4. READ KEY DOCUMENTS: For each work item you create, read the actual document content and set the objective to a meaningful summary of what the document describes. Include the document path in the objective so it can be found.
+
+5. RECORD ATTESTATION EVIDENCE: Test reports and validation results should be recorded as attestations on the work items they validate. Use the report's findings as the attestation summary.
+
+## Commands
+
+Create work items:
+  cagent work create --title "ADR-0014: Per-User VM Lifecycle" --objective "..." --kind plan --priority 2
+
+Record attestations (for test reports):
+  cagent work attest <work-id> --result passed --summary "Load test: 62 concurrent VMs, KSM saving 1.7GB" --verifier-kind deterministic --method test
+
+Add notes (for guides, snapshots, findings):
+  cagent work note-add <work-id> --type finding --text "Implementation guide at docs/theory/guides/adr-0014-implementation.md"
+
+Update state for implemented items:
+  cagent work complete <work-id> --message "Implemented and operational per practice/decisions/"
+
+Create dependency edges between work items:
+  cagent work proposal create --type add_edge --target <blocked-work-id> --rationale "ADR-0024 requires ADR-0014" --patch '{"edge_type":"blocks","source_work_id":"<blocker-work-id>"}'
+
+## Repository Context
+
+%s`, repoName, buf.String())
 
 	_, err := svc.CreateWork(ctx, service.WorkCreateRequest{
 		Title:     fmt.Sprintf("Bootstrap %s", repoName),
@@ -534,4 +585,36 @@ Context:
 		Priority:  1,
 	})
 	return err
+}
+
+// readFileHeader reads the first N lines of a file and returns a compact summary.
+func readFileHeader(path string, maxLines int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.SplitN(string(data), "\n", maxLines+1)
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+	// Extract title or frontmatter hints
+	var parts []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "---" {
+			continue
+		}
+		// Frontmatter fields
+		if strings.HasPrefix(line, "Date:") || strings.HasPrefix(line, "Status:") ||
+			strings.HasPrefix(line, "Kind:") || strings.HasPrefix(line, "Priority:") {
+			parts = append(parts, line)
+			continue
+		}
+		// Markdown title
+		if strings.HasPrefix(line, "# ") {
+			parts = append(parts, line[2:])
+			continue
+		}
+	}
+	return strings.Join(parts, " | ")
 }
