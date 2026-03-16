@@ -68,7 +68,8 @@ cagent work update <work-id> --message "Started implementation"
 cagent work complete <work-id> --message "Done"
 cagent work note-add <work-id> --type finding --text "..."
 cagent work private-note <work-id> --text "SSH creds..." --type credential  # gitignored DB
-cagent work doc-set <work-id> --file docs/adr-001.md --title "ADR-001"     # store doc content
+cagent work doc-set --file docs/adr-001.md                                 # auto-creates work item from doc
+cagent work doc-set <work-id> --file docs/adr-001.md --title "ADR-001"     # attach doc to existing work item
 cagent work attest <work-id> --result passed --summary "Tests pass" --verifier-kind deterministic --method test
 cagent work claim <work-id> --claimant worker-a
 cagent work release <work-id> --claimant worker-a
@@ -100,10 +101,13 @@ Split databases:
 - `.cagent/cagent.db` — public work graph (tracked in git)
 - `.cagent/cagent-private.db` — private notes, credentials (gitignored, never committed)
 
-Doc content storage:
-- `work doc-set` stores full markdown doc bodies in the work graph DB
+Doc-work coupling (IMPORTANT):
+- Every doc MUST have a corresponding work item. Use `work doc-set` to guarantee this.
+- `work doc-set --file <path>` without a work-id auto-creates a work item from the doc
+- `work doc-set <work-id> --file <path>` attaches to an existing work item
 - `work show` returns docs in the response
 - The mind-graph UI renders docs in the detail panel
+- Principle: documentation commits before execution commits (ADR-0002)
 
 Child-work policy:
 - create child work directly only for:
