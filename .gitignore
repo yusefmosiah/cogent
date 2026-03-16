@@ -23,3 +23,6 @@ work_seed/
 .cagent/debriefs/
 .cagent/cagent.db-shm
 .cagent/cagent.db-wal
+.cagent/cagent-private.db
+.cagent/cagent-private.db-shm
+.cagent/cagent-private.db-wal
