@@ -14,10 +14,7 @@ const repoRoot = path.resolve(webRoot, '..')
 const targetRepo = globalThis.process.env.CAGENT_TARGET_REPO || repoRoot
 
 function cagentExecutable() {
-  // Prefer /tmp/cagent if it exists (freshly built), then bin/cagent, then go run
-  if (fs.existsSync('/tmp/cagent')) {
-    return { command: '/tmp/cagent', args: [] }
-  }
+  // Prefer bin/cagent (freshly built), then go run
   const binaryPath = path.join(repoRoot, 'bin', 'cagent')
   if (fs.existsSync(binaryPath)) {
     return { command: binaryPath, args: [] }
