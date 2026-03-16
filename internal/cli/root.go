@@ -1332,6 +1332,55 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	privateNoteCmd.Flags().StringVar(&noteOpts.text, "text", "", "note body")
 	_ = privateNoteCmd.MarkFlagRequired("text")
 
+	docSetCmd := &cobra.Command{
+		Use:   "doc-set <work-id>",
+		Short: "Store or update doc content for a work item",
+		Long:  "Associates a document (from file or stdin) with a work item. The doc body is stored in the work graph DB.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+
+			docPath, _ := cmd.Flags().GetString("path")
+			docTitle, _ := cmd.Flags().GetString("title")
+			docFile, _ := cmd.Flags().GetString("file")
+			docFormat, _ := cmd.Flags().GetString("format")
+
+			var body string
+			if docFile != "" {
+				data, err := os.ReadFile(docFile)
+				if err != nil {
+					return fmt.Errorf("read file: %w", err)
+				}
+				body = string(data)
+				if docPath == "" {
+					docPath = docFile
+				}
+			} else {
+				bodyFlag, _ := cmd.Flags().GetString("body")
+				body = bodyFlag
+			}
+
+			doc, err := svc.SetDocContent(context.Background(), args[0], docPath, docTitle, body, docFormat)
+			if err != nil {
+				return mapServiceError(err)
+			}
+			if root.jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), doc)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "doc %s stored (%d bytes, path=%s)\n", doc.DocID, len(body), docPath)
+			return nil
+		},
+	}
+	docSetCmd.Flags().String("path", "", "document path (e.g., docs/adr-0014.md)")
+	docSetCmd.Flags().String("title", "", "document title")
+	docSetCmd.Flags().String("file", "", "read body from file")
+	docSetCmd.Flags().String("body", "", "document body (inline)")
+	docSetCmd.Flags().String("format", "markdown", "document format")
+
 	childrenCmd := &cobra.Command{
 		Use:   "children <work-id>",
 		Short: "List child work items",
@@ -1713,7 +1762,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	projectionStatusCmd.Flags().StringVar(&projectionOpts.format, "format", "markdown", "projection format")
 
 	projectionCmd.AddCommand(projectionChecklistCmd, projectionStatusCmd)
-	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd)
+	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd)
 	return cmd
 }
 

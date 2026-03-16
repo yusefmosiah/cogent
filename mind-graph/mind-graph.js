@@ -86,6 +86,12 @@ async function loadDetail(workId) {
       detail.summary = hydration.hydration_summary || hydration.summary || "";
     }
 
+    // Fetch doc content if available
+    if (showRes.ok) {
+      const showData2 = showData.work || showData;
+      detail.docs = showData2.doc_content || showData2.docs || [];
+    }
+
     detailCache[workId] = { data: detail, fetchedAt: Date.now() };
     return detail;
   } catch (e) {
@@ -704,6 +710,18 @@ function renderDetailPanel(detail, w) {
       </div>`;
     }
     html += `</div>`;
+  }
+
+  // Doc content (full documents stored in the work graph)
+  if (detail.docs && detail.docs.length > 0) {
+    for (const doc of detail.docs) {
+      const docTitle = doc.title || doc.path || "Document";
+      const docPath = doc.path || "";
+      html += `<div class="detail-section">
+        <div class="detail-section-label">${escapeHtml(docTitle)}${docPath ? ` <span style="opacity:0.4;font-weight:400">${escapeHtml(docPath)}</span>` : ""}</div>
+        <div class="detail-content">${renderMarkdown(doc.body || "")}</div>
+      </div>`;
+    }
   }
 
   if (!html) {

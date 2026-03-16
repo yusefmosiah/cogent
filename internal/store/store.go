@@ -3708,7 +3708,77 @@ CREATE INDEX IF NOT EXISTS idx_work_proposals_target_state_created_at ON work_pr
 CREATE INDEX IF NOT EXISTS idx_attestation_records_subject_created_at ON attestation_records(subject_kind, subject_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approval_records_work_id_approved_at ON approval_records(work_id, approved_at DESC);
 CREATE INDEX IF NOT EXISTS idx_promotion_records_work_id_promoted_at ON promotion_records(work_id, promoted_at DESC);
+
+CREATE TABLE IF NOT EXISTS doc_content (
+    doc_id      TEXT PRIMARY KEY,
+    work_id     TEXT NOT NULL REFERENCES work_items(work_id) ON DELETE CASCADE,
+    path        TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    format      TEXT NOT NULL DEFAULT 'markdown',
+    version     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE(work_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_content_work_id ON doc_content(work_id);
 `
+
+// ── Doc Content ─────────────────────────────────────────────
+
+func (s *Store) UpsertDocContent(ctx context.Context, rec core.DocContentRecord) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO doc_content (doc_id, work_id, path, title, body, format, version, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(work_id, path) DO UPDATE SET
+		   title = excluded.title,
+		   body = excluded.body,
+		   format = excluded.format,
+		   version = version + 1,
+		   updated_at = excluded.updated_at`,
+		rec.DocID, rec.WorkID, rec.Path, rec.Title, rec.Body, rec.Format, 1, now, now)
+	return err
+}
+
+func (s *Store) GetDocContent(ctx context.Context, workID string) ([]core.DocContentRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT doc_id, work_id, path, title, body, format, version, created_at, updated_at
+		   FROM doc_content WHERE work_id = ? ORDER BY path`, workID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var docs []core.DocContentRecord
+	for rows.Next() {
+		var d core.DocContentRecord
+		var createdAt, updatedAt string
+		if err := rows.Scan(&d.DocID, &d.WorkID, &d.Path, &d.Title, &d.Body, &d.Format, &d.Version, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
+func (s *Store) GetDocContentByPath(ctx context.Context, path string) (*core.DocContentRecord, error) {
+	var d core.DocContentRecord
+	var createdAt, updatedAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT doc_id, work_id, path, title, body, format, version, created_at, updated_at
+		   FROM doc_content WHERE path = ?`, path).
+		Scan(&d.DocID, &d.WorkID, &d.Path, &d.Title, &d.Body, &d.Format, &d.Version, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	d.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	return &d, nil
+}
 
 // ── Private DB ──────────────────────────────────────────────
 

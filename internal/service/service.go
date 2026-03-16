@@ -331,6 +331,7 @@ type WorkShowResult struct {
 	Approvals    []core.ApprovalRecord     `json:"approvals,omitempty"`
 	Promotions   []core.PromotionRecord    `json:"promotions,omitempty"`
 	Artifacts    []core.ArtifactRecord     `json:"artifacts,omitempty"`
+	Docs         []core.DocContentRecord   `json:"docs,omitempty"`
 }
 
 type WorkClaimRequest struct {
@@ -1236,6 +1237,8 @@ func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, err
 	if err != nil {
 		return nil, err
 	}
+	docs, _ := s.store.GetDocContent(ctx, workID)
+
 	return &WorkShowResult{
 		Work:         work,
 		Children:     children,
@@ -1247,6 +1250,7 @@ func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, err
 		Approvals:    approvals,
 		Promotions:   promotions,
 		Artifacts:    artifacts,
+		Docs:         docs,
 	}, nil
 }
 
@@ -1981,6 +1985,31 @@ func (s *Service) AddPrivateNote(ctx context.Context, workID, noteType, text, cr
 
 func (s *Service) ListPrivateNotes(ctx context.Context, workID string) ([]core.WorkNoteRecord, error) {
 	return s.store.ListPrivateNotes(ctx, workID, 50)
+}
+
+func (s *Service) SetDocContent(ctx context.Context, workID, path, title, body, format string) (*core.DocContentRecord, error) {
+	if _, err := s.store.GetWorkItem(ctx, workID); err != nil {
+		return nil, normalizeStoreError("work", workID, err)
+	}
+	if format == "" {
+		format = "markdown"
+	}
+	rec := core.DocContentRecord{
+		DocID:  core.GenerateID("doc"),
+		WorkID: workID,
+		Path:   path,
+		Title:  title,
+		Body:   body,
+		Format: format,
+	}
+	if err := s.store.UpsertDocContent(ctx, rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+func (s *Service) GetDocContent(ctx context.Context, workID string) ([]core.DocContentRecord, error) {
+	return s.store.GetDocContent(ctx, workID)
 }
 
 func (s *Service) DiscoverWork(ctx context.Context, sourceWorkID, title, objective, kind, rationale string) (*core.WorkProposalRecord, error) {

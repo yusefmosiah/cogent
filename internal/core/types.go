@@ -391,6 +391,18 @@ type WorkNoteRecord struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
+type DocContentRecord struct {
+	DocID     string    `json:"doc_id"`
+	WorkID    string    `json:"work_id"`
+	Path      string    `json:"path"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Format    string    `json:"format"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type WorkProposalRecord struct {
 	ProposalID    string         `json:"proposal_id"`
 	ProposalType  string         `json:"proposal_type"`

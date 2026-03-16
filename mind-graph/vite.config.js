@@ -82,6 +82,14 @@ function cagentApiPlugin() {
           return
         }
 
+        if (req.method === 'GET' && parts[3] === 'docs') {
+          // Fetch doc content stored in the work graph
+          const payload = await runCagent(['work', 'show', workId])
+          // doc_content comes from the work show response or a separate query
+          writeJSON(res, 200, payload)
+          return
+        }
+
         if (req.method === 'GET' && parts[3] === 'hydrate') {
           const mode = url.searchParams.get('mode') ?? 'standard'
           const payload = await runCagent(['work', 'hydrate', workId, '--mode', mode])
