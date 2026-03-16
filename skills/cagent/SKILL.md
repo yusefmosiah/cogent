@@ -59,19 +59,51 @@ cagent artifacts list --json --job <job-id>
 For work-runtime usage:
 
 ```bash
-cagent work show <work-id>
-cagent work create --title "Implement parser" --objective "Build the parser" --kind implement --parent <parent-work-id>
-cagent work ready --json
-cagent work children <work-id> --json
-cagent work update <work-id> --phase implementation --message "Started implementation"
-cagent work note-add <work-id> --type finding --text "Need a verifier child work item."
-cagent work discover <work-id> --title "Add E2E coverage" --objective "Create browser verification work" --kind verify --rationale "UI changes need browser coverage"
-cagent work proposal create --type add_edge --target <work-id> --rationale "Verifier should block approval" --patch '{"edge_type":"verifies","source_work_id":"<verify-work-id>"}'
-cagent work attest <work-id> --result passed --summary "Playwright passed" --verifier-kind deterministic --method test
+cagent work list --json                    # list all work items
+cagent work show <work-id>                 # show details + docs + attestations
+cagent work ready --json                   # list actionable work
+cagent work create --title "..." --objective "..." --kind implement
+cagent inbox "quick idea"                  # shorthand for work create --kind idea
+cagent work update <work-id> --message "Started implementation"
+cagent work complete <work-id> --message "Done"
+cagent work note-add <work-id> --type finding --text "..."
+cagent work private-note <work-id> --text "SSH creds..." --type credential  # gitignored DB
+cagent work doc-set <work-id> --file docs/adr-001.md --title "ADR-001"     # store doc content
+cagent work attest <work-id> --result passed --summary "Tests pass" --verifier-kind deterministic --method test
 cagent work claim <work-id> --claimant worker-a
 cagent work release <work-id> --claimant worker-a
+cagent work renew-lease <work-id> --claimant worker-a --lease 15m          # heartbeat
+cagent work children <work-id> --json
+cagent work discover <work-id> --title "..." --objective "..." --kind verify --rationale "..."
+cagent work proposal create --type add_edge --target <work-id> --rationale "..." --patch '{"edge_type":"blocks","source_work_id":"<id>"}'
+cagent work approve <work-id> --message "Approved"
+cagent work reject <work-id> --message "Needs rework"
+cagent work lock <work-id>                 # human lock (prevents agent claim)
+cagent work unlock <work-id>
+cagent reconcile --json                    # release orphaned work with expired leases
 cagent artifacts attach --work <work-id> --path ./report.md --kind report
 ```
+
+Supervisor (autonomous dispatch loop):
+
+```bash
+cagent supervisor --default-adapter codex --max-concurrent 1  # run forever, dispatch work
+cagent supervisor --dry-run --json                            # show what would dispatch
+cagent supervisor --cwd /path/to/repo                        # target a specific repo
+```
+
+The supervisor auto-bootstraps empty repos: if no work exists, it creates a bootstrap
+work item from the repo's docs/README, dispatches an agent to analyze and create the
+work graph. Each repo gets its own `.cagent/` directory (per-repo state isolation).
+
+Split databases:
+- `.cagent/cagent.db` — public work graph (tracked in git)
+- `.cagent/cagent-private.db` — private notes, credentials (gitignored, never committed)
+
+Doc content storage:
+- `work doc-set` stores full markdown doc bodies in the work graph DB
+- `work show` returns docs in the response
+- The mind-graph UI renders docs in the detail panel
 
 Child-work policy:
 - create child work directly only for:
