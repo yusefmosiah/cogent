@@ -282,6 +282,7 @@ func NewRootCommand() *cobra.Command {
 		newReconcileCommand(opts),
 		newSupervisorCommand(opts),
 		newDashboardCommand(opts),
+		newServeCommand(opts),
 		newVersionCommand(),
 	)
 
