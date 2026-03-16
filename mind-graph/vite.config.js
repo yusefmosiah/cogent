@@ -64,6 +64,33 @@ function cagentApiPlugin() {
     const parts = url.pathname.split('/').filter(Boolean)
 
     try {
+      // Supervisor state + live diff
+      if (req.method === 'GET' && url.pathname === '/api/supervisor/status') {
+        try {
+          const supPath = path.join(targetRepo, '.cagent', 'supervisor.json')
+          const supData = fs.existsSync(supPath) ? JSON.parse(fs.readFileSync(supPath, 'utf-8')) : null
+          const { stdout: diff } = await execFileAsync('git', ['diff', '--stat'], {
+            cwd: targetRepo, maxBuffer: 1024 * 1024,
+          }).catch(() => ({ stdout: '' }))
+          writeJSON(res, 200, { supervisor: supData, diff_stat: diff })
+        } catch (e) {
+          writeJSON(res, 200, { supervisor: null, diff_stat: '' })
+        }
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/api/diff') {
+        try {
+          const { stdout } = await execFileAsync('git', ['diff', '--patch'], {
+            cwd: targetRepo, maxBuffer: 4 * 1024 * 1024,
+          })
+          writeJSON(res, 200, { diff: stdout })
+        } catch (e) {
+          writeJSON(res, 200, { diff: '' })
+        }
+        return
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/work/items') {
         const payload = await runCagent(['work', 'list', '--limit', '500'])
         writeJSON(res, 200, payload)
@@ -80,10 +107,22 @@ function cagentApiPlugin() {
         }
 
         if (req.method === 'GET' && parts[3] === 'docs') {
-          // Fetch doc content stored in the work graph
           const payload = await runCagent(['work', 'show', workId])
-          // doc_content comes from the work show response or a separate query
           writeJSON(res, 200, payload)
+          return
+        }
+
+        if (req.method === 'GET' && parts[3] === 'diff') {
+          // Return git diff for the target repo
+          try {
+            const { stdout } = await execFileAsync('git', ['diff', '--stat', '--patch'], {
+              cwd: targetRepo,
+              maxBuffer: 4 * 1024 * 1024,
+            })
+            writeJSON(res, 200, { diff: stdout, repo: targetRepo })
+          } catch (e) {
+            writeJSON(res, 200, { diff: '', repo: targetRepo })
+          }
           return
         }
 

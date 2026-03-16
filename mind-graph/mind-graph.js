@@ -368,11 +368,19 @@ function setFocus(id) {
         `<span style="color:#555">${w.att[1]}/${w.att[0]} attested</span>`;
       document.getElementById("detail-body").innerHTML = '<div style="color:#555;padding:20px 0">loading...</div>';
     }
-    // Fetch full detail
-    loadDetail(id).then(detail => {
+    // Fetch full detail + live diff
+    loadDetail(id).then(async detail => {
       if (focusId === id && detail) {
         currentDetail = detail;
         renderDetailPanel(detail, byId[id]);
+        // Append live diff if available
+        try {
+          const diffRes = await fetch("/api/diff", { signal: AbortSignal.timeout(3000) });
+          if (diffRes.ok) {
+            const { diff } = await diffRes.json();
+            if (diff && focusId === id) appendDiffToPanel(diff);
+          }
+        } catch (e) { /* diff is optional */ }
       }
     });
   }
@@ -809,6 +817,72 @@ function renderSidebar() {
 document.getElementById("sidebar-toggle")?.addEventListener("click", () => {
   document.getElementById("sidebar")?.classList.toggle("mobile-open");
 });
+
+// ── Diff Rendering ──────────────────────────────────────────
+
+function appendDiffToPanel(diff) {
+  if (!diff.trim()) return;
+  const body = document.getElementById("detail-body");
+  if (!body) return;
+
+  // Syntax-highlight the diff
+  const lines = diff.split('\n');
+  let html = '<div class="detail-section"><div class="detail-section-label">LIVE DIFF (uncommitted)</div>';
+  html += '<pre style="font-size:11px;line-height:1.4;overflow-x:auto;background:rgba(0,0,0,0.3);padding:12px;border-radius:6px;border:1px solid #1a1a1e;">';
+  for (const line of lines) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      html += `<span style="color:#888">${escapeHtml(line)}</span>\n`;
+    } else if (line.startsWith('+')) {
+      html += `<span style="color:#50b888">${escapeHtml(line)}</span>\n`;
+    } else if (line.startsWith('-')) {
+      html += `<span style="color:#d06060">${escapeHtml(line)}</span>\n`;
+    } else if (line.startsWith('@@')) {
+      html += `<span style="color:#c4a060">${escapeHtml(line)}</span>\n`;
+    } else if (line.startsWith('diff ')) {
+      html += `<span style="color:#7aa2f7;font-weight:500">${escapeHtml(line)}</span>\n`;
+    } else {
+      html += `<span style="color:#555">${escapeHtml(line)}</span>\n`;
+    }
+  }
+  html += '</pre></div>';
+  body.insertAdjacentHTML('beforeend', html);
+}
+
+// ── Diff + Supervisor Polling ────────────────────────────────
+
+let supervisorData = null;
+let currentDiff = "";
+
+async function pollSupervisor() {
+  try {
+    const res = await fetch("/api/supervisor/status", { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      const data = await res.json();
+      supervisorData = data.supervisor;
+      // Update header with supervisor info
+      const statsEl = document.getElementById("stats");
+      if (statsEl && supervisorData) {
+        const inf = supervisorData.in_flight || [];
+        const parts = [];
+        if (inf.length > 0) parts.push(`${inf.length} in-flight`);
+        parts.push(`cycle ${supervisorData.cycle}`);
+        parts.push(supervisorData.uptime);
+        if (data.diff_stat) {
+          const lines = data.diff_stat.trim().split('\n');
+          if (lines.length > 0 && lines[lines.length-1].includes('changed')) {
+            parts.push(lines[lines.length-1].trim());
+          }
+        }
+        // Append to existing stats
+        const workStats = statsEl.textContent.split(' · ').filter(s => !s.includes('cycle') && !s.includes('flight') && !s.includes('changed') && !s.includes('uptime'));
+        statsEl.textContent = [...workStats, ...parts].join(' · ');
+      }
+    }
+  } catch (e) { /* optional */ }
+}
+
+// Poll supervisor every 5s
+setInterval(pollSupervisor, 5000);
 
 // ── Filters ─────────────────────────────────────────────────
 
