@@ -155,16 +155,46 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 		if stopping {
 			mu.Lock()
 			remaining := len(inFlight)
-			mu.Unlock()
-			if remaining == 0 {
+			// On graceful shutdown, cancel all in-flight jobs rather than
+			// waiting indefinitely. Each `cagent run` spawns a detached
+			// background worker (via service.spawnDetachedWorker with
+			// Setpgid: true), so the worker survives `cagent run` exiting.
+			// We must explicitly cancel via the service layer, which sends
+			// escalating signals (SIGINT → SIGTERM → SIGKILL) to the
+			// worker's process group.
+			if remaining > 0 {
 				if !jsonOutput {
-					_, _ = fmt.Fprintln(cmd.OutOrStdout(), "supervisor: shutdown complete")
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: stopping, cancelling %d in-flight job(s)\n", remaining)
 				}
-				return nil
+				shutdownSvc, svcErr := service.Open(ctx, root.configPath)
+				if svcErr == nil {
+					for workID, flight := range inFlight {
+						if !jsonOutput {
+							_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: cancelling job %s (work %s)\n", flight.jobID, workID)
+						}
+						if _, cancelErr := shutdownSvc.Cancel(ctx, flight.jobID); cancelErr != nil {
+							if !jsonOutput {
+								_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to cancel job %s: %v\n", flight.jobID, cancelErr)
+							}
+						}
+						// Mark the work item as failed so it can be retried later
+						_, _ = shutdownSvc.UpdateWork(ctx, service.WorkUpdateRequest{
+							WorkID:         workID,
+							ExecutionState: core.WorkExecutionStateFailed,
+							Message:        fmt.Sprintf("supervisor: job %s cancelled during shutdown", flight.jobID),
+							CreatedBy:      "supervisor",
+						})
+					}
+					_ = shutdownSvc.Close()
+				} else if !jsonOutput {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to open service for shutdown cleanup: %v\n", svcErr)
+				}
 			}
+			mu.Unlock()
 			if !jsonOutput {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: stopping, waiting for %d in-flight job(s)\n", remaining)
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "supervisor: shutdown complete")
 			}
+			return nil
 		}
 
 		report := supervisorCycleReport{
@@ -398,6 +428,29 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 
 // spawnRun launches `cagent run --json` and extracts the real job_id from the output.
 // The run command queues background work and returns immediately with job metadata.
+//
+// Process hierarchy and orphan prevention:
+//
+//	supervisor (this process)
+//	  └─ cagent run --json   (short-lived, returns job ID and exits)
+//	       └─ __run-job       (detached worker, Setpgid=true, survives parent)
+//
+// The `cagent run` subprocess is synchronous (we wait for its output). It spawns
+// a detached background worker via service.spawnDetachedWorker which sets
+// Setpgid: true, placing the worker in its own process group. This means:
+//
+//  1. The worker intentionally survives `cagent run` exiting.
+//  2. If the supervisor is killed (SIGKILL), workers will NOT be automatically
+//     cleaned up because they are in separate process groups. This is by design
+//     for crash resilience — workers can finish their work even if the supervisor
+//     dies. On restart, the supervisor reconciles via lease expiry.
+//  3. On graceful shutdown (SIGINT/SIGTERM), the supervisor explicitly cancels
+//     each in-flight job via svc.Cancel(), which sends escalating signals
+//     (SIGINT → SIGTERM → SIGKILL) to the worker's process group.
+//
+// We still set Setpgid on the `cagent run` command itself so it doesn't receive
+// signals meant for the supervisor's terminal session (e.g., Ctrl+C) before we
+// get a chance to do orderly cleanup.
 func spawnRun(bin, configPath, adapter, cwd, prompt string) (string, error) {
 	args := []string{"run", "--json", "--adapter", adapter, "--cwd", cwd, "--prompt", prompt}
 	if configPath != "" {
@@ -407,6 +460,7 @@ func spawnRun(bin, configPath, adapter, cwd, prompt string) (string, error) {
 	runCmd := exec.Command(bin, args...)
 	runCmd.Dir = cwd // ensure cagent resolves .cagent/ from the target repo
 	runCmd.Stderr = nil
+	runCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := runCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("cagent run failed: %w", err)
