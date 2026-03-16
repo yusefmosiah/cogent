@@ -60,12 +60,10 @@ async function loadDetail(workId) {
   if (cached && Date.now() - cached.fetchedAt < 30000) return cached.data;
 
   try {
-    const [showRes, hydrateRes] = await Promise.all([
-      fetch(`/api/work/${workId}`, { signal: AbortSignal.timeout(3000) }),
-      fetch(`/api/work/${workId}/hydrate?mode=thin`, { signal: AbortSignal.timeout(5000) }).catch(() => null),
-    ]);
-
     const detail = {};
+
+    // Fetch work item details
+    const showRes = await fetch(`/api/work/${workId}`, { signal: AbortSignal.timeout(3000) });
     if (showRes.ok) {
       const showData = await showRes.json();
       const w = showData.work || showData;
@@ -77,20 +75,19 @@ async function loadDetail(workId) {
       detail.updates = (showData.updates || []).slice(0, 5);
       detail.attestations = (showData.attestations || []).slice(0, 5);
       detail.children = (showData.children || []).slice(0, 10);
+      detail.docs = showData.docs || [];
     }
 
-    if (hydrateRes && hydrateRes.ok) {
-      const hydration = await hydrateRes.json();
-      detail.openQuestions = hydration.open_questions || [];
-      detail.nextActions = hydration.next_actions || hydration.recommended_next_actions || [];
-      detail.summary = hydration.hydration_summary || hydration.summary || "";
-    }
-
-    // Fetch doc content if available
-    if (showRes.ok) {
-      const showData2 = showData.work || showData;
-      detail.docs = showData2.doc_content || showData2.docs || [];
-    }
+    // Fetch hydration (optional, may fail)
+    try {
+      const hydrateRes = await fetch(`/api/work/${workId}/hydrate?mode=thin`, { signal: AbortSignal.timeout(5000) });
+      if (hydrateRes.ok) {
+        const hydration = await hydrateRes.json();
+        detail.openQuestions = hydration.open_questions || [];
+        detail.nextActions = hydration.next_actions || hydration.recommended_next_actions || [];
+        detail.summary = hydration.hydration_summary || hydration.summary || "";
+      }
+    } catch (e) { /* hydration is optional */ }
 
     detailCache[workId] = { data: detail, fetchedAt: Date.now() };
     return detail;
