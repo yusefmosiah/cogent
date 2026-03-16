@@ -204,17 +204,18 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 			}
 		}
 
-		// 2. Check in-flight jobs by polling their real job status
+		// 2. Check in-flight jobs by querying job status directly (no subprocess)
 		mu.Lock()
 		var completed []completedEntry
 		for workID, flight := range inFlight {
-			jobState, pollErr := pollJobStatus(ctx, selfBin, root.configPath, flight.jobID, cwd)
+			statusResult, pollErr := svc.Status(ctx, flight.jobID)
 			if pollErr != nil {
 				if !jsonOutput {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to poll job %s: %v\n", flight.jobID, pollErr)
 				}
 				continue
 			}
+			jobState := string(statusResult.Job.State)
 
 			if isTerminal(jobState) {
 				status := "done"
@@ -238,6 +239,23 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 					WorkID: workID,
 					JobID:  flight.jobID,
 					Status: status,
+				})
+				delete(inFlight, workID)
+			} else if time.Since(flight.started) > 30*time.Minute {
+				// Job timeout — force fail if running too long
+				_, updateErr := svc.UpdateWork(ctx, service.WorkUpdateRequest{
+					WorkID:         workID,
+					ExecutionState: core.WorkExecutionStateFailed,
+					Message:        fmt.Sprintf("supervisor: job %s timed out after %s", flight.jobID, time.Since(flight.started).Truncate(time.Second)),
+					CreatedBy:      "supervisor",
+				})
+				if updateErr != nil && !jsonOutput {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to timeout work %s: %v\n", workID, updateErr)
+				}
+				completed = append(completed, completedEntry{
+					WorkID: workID,
+					JobID:  flight.jobID,
+					Status: "timeout",
 				})
 				delete(inFlight, workID)
 			} else {
