@@ -320,6 +320,146 @@ func writeJSONHTTP(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+// handleJobCompletion decides whether to mark work done or dispatch verification.
+// The verification loop:
+//  1. Worker completes → check required attestations
+//  2. If attestations unsatisfied → dispatch verifier (different adapter/model)
+//  3. Verifier reviews: diff, test output, attestation artifacts
+//  4. Verifier attests: passed or failed
+//  5. If failed → re-dispatch worker with feedback (iterate)
+//  6. If passed → mark work done, set approval_state to pending
+func handleJobCompletion(ctx context.Context, svc *service.Service, selfBin, configPath, cwd, workID string, flight *inFlightJob, defaultAdapter string) {
+	// Get work item with its required attestations
+	workResult, err := svc.Work(ctx, workID)
+	if err != nil {
+		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+			WorkID:         workID,
+			ExecutionState: core.WorkExecutionStateDone,
+			Message:        fmt.Sprintf("supervisor: job %s completed (could not check attestations: %v)", flight.jobID, err),
+			CreatedBy:      "supervisor",
+		})
+		return
+	}
+
+	work := workResult.Work
+	attestations := workResult.Attestations
+
+	// If no required attestations, mark done immediately (backward compatible)
+	if len(work.RequiredAttestations) == 0 {
+		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+			WorkID:         workID,
+			ExecutionState: core.WorkExecutionStateDone,
+			Message:        fmt.Sprintf("supervisor: job %s completed (no attestation policy)", flight.jobID),
+			CreatedBy:      "supervisor",
+		})
+		return
+	}
+
+	// Check which attestation slots are unsatisfied
+	unsatisfied := findUnsatisfiedAttestations(work.RequiredAttestations, attestations)
+	if len(unsatisfied) == 0 {
+		// All attestations satisfied — done, pending approval
+		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+			WorkID:         workID,
+			ExecutionState: core.WorkExecutionStateDone,
+			Message:        fmt.Sprintf("supervisor: job %s completed, all %d attestations satisfied", flight.jobID, len(work.RequiredAttestations)),
+			CreatedBy:      "supervisor",
+		})
+		// TODO: set approval_state to pending when the service supports it in UpdateWork
+		return
+	}
+
+	// Attestations unsatisfied — dispatch verification job
+	// Use a different adapter than the worker for independent review
+	verifierAdapter := pickVerifierAdapter(flight.adapter, defaultAdapter)
+
+	verifyPrompt := fmt.Sprintf(`You are a verification agent reviewing work on: %s
+
+The implementation agent completed its work. Your job is to verify the results
+and record attestations. Review:
+1. The git diff (run: git diff)
+2. Any test output or artifacts
+3. The work item's objective and acceptance criteria
+
+For each required attestation that is not yet satisfied, either:
+- Record a passing attestation if the work meets the requirement:
+  cagent work attest %s --result passed --summary "..." --verifier-kind <kind> --method third_party_review
+- Record a failing attestation with specific feedback:
+  cagent work attest %s --result failed --summary "..." --verifier-kind <kind> --method third_party_review
+
+Required attestations still needed: %s
+
+Work objective: %s`,
+		work.Title, workID, workID,
+		formatUnsatisfied(unsatisfied),
+		work.Objective)
+
+	// Dispatch verification job
+	_, spawnErr := spawnRun(selfBin, configPath, verifierAdapter, cwd, verifyPrompt)
+	if spawnErr != nil {
+		// Can't dispatch verifier — mark done anyway
+		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+			WorkID:         workID,
+			ExecutionState: core.WorkExecutionStateDone,
+			Message:        fmt.Sprintf("supervisor: job %s completed, verification dispatch failed: %v", flight.jobID, spawnErr),
+			CreatedBy:      "supervisor",
+		})
+		return
+	}
+
+	// Mark as still in progress — the verification job will update attestations
+	// The next supervisor cycle will re-check this work item
+	_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+		WorkID:  workID,
+		Message: fmt.Sprintf("supervisor: dispatched verification to %s (%d attestations unsatisfied)", verifierAdapter, len(unsatisfied)),
+		CreatedBy: "supervisor",
+	})
+}
+
+func findUnsatisfiedAttestations(required []core.RequiredAttestation, actual []core.AttestationRecord) []core.RequiredAttestation {
+	var unsatisfied []core.RequiredAttestation
+	for _, req := range required {
+		if !req.Blocking {
+			continue
+		}
+		satisfied := false
+		for _, att := range actual {
+			if att.VerifierKind == req.VerifierKind && att.Result == "passed" {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			unsatisfied = append(unsatisfied, req)
+		}
+	}
+	return unsatisfied
+}
+
+func formatUnsatisfied(reqs []core.RequiredAttestation) string {
+	var parts []string
+	for _, r := range reqs {
+		parts = append(parts, r.VerifierKind)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func pickVerifierAdapter(workerAdapter, defaultAdapter string) string {
+	// Use a different adapter than the worker for independent review
+	// If worker used codex, verify with claude (and vice versa)
+	switch workerAdapter {
+	case "codex":
+		return "claude"
+	case "claude":
+		return "codex"
+	default:
+		if defaultAdapter != workerAdapter {
+			return defaultAdapter
+		}
+		return "claude"
+	}
+}
+
 // runInProcessSupervisor runs the supervisor loop using the shared Service instance.
 // Unlike the subprocess-based supervisor, this doesn't shell out for status checks.
 func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd string, root *rootOptions, maxConcurrent int, defaultAdapter string) {
@@ -376,16 +516,17 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 			jobState := string(statusResult.Job.State)
 
 			if isTerminal(jobState) {
-				newState := core.WorkExecutionStateDone
 				if jobState == "failed" || jobState == "cancelled" {
-					newState = core.WorkExecutionStateFailed
+					_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+						WorkID:         workID,
+						ExecutionState: core.WorkExecutionStateFailed,
+						Message:        fmt.Sprintf("supervisor: job %s %s", flight.jobID, jobState),
+						CreatedBy:      "supervisor",
+					})
+				} else {
+					// Job completed — check if verification is needed
+					handleJobCompletion(ctx, svc, selfBin, root.configPath, cwd, workID, flight, defaultAdapter)
 				}
-				_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
-					WorkID:         workID,
-					ExecutionState: newState,
-					Message:        fmt.Sprintf("supervisor: job %s %s", flight.jobID, jobState),
-					CreatedBy:      "supervisor",
-				})
 				delete(inFlight, workID)
 			} else if time.Since(flight.started) > 30*time.Minute {
 				_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
