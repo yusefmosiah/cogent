@@ -178,9 +178,17 @@
     #sidebar { display: none; }
     #sidebar.mobile-open { display: block; position: absolute; top: 36px; left: 0; bottom: 40px; z-index: 20; background: #0a0a0c; width: 240px; border-right: 1px solid #1a1a1e; }
     #sidebar-toggle { display: block; }
-    #main { flex-direction: column; }
-    #canvas-wrap.has-detail { flex: 0 0 40%; }
-    #detail-panel { flex: 1; border-left: none; border-top: 1px solid #1a1a1e; padding: 16px; }
+    #main { position: relative; }
+    #canvas-wrap.has-detail { flex: 1; } /* graph stays full size */
+    #detail-panel {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 15;
+      border-left: none;
+      padding: 16px;
+      background: rgba(10, 10, 12, 0.95);
+      flex: none;
+    }
   }
 </style>
   <script type="module" crossorigin src="/assets/index-XKnFLykm.js"></script>
