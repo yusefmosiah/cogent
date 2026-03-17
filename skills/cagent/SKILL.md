@@ -145,6 +145,7 @@ cagent transfer run --json --transfer <transfer-id-or-path> --adapter gemini --c
 
 ## Operating rules
 
+- NEVER use `git add .` or `git add -A`. ALWAYS stage specific files: `git add <file1> <file2>`. Agents that stage the whole working tree risk committing unrelated dirty files (test artifacts, benchmark output, credentials).
 - Prefer `runtime --json` as the machine-facing inventory command.
 - Prefer `catalog show --json` when choosing among providers/models and auth modes.
 - Prefer `catalog probe --json` when listed models may not match actual plan entitlement.
