@@ -4,7 +4,7 @@
 .dogfood*/
 .dogfood/
 bin/
-dist/
+/dist/
 coverage.out
 mind-graph/node_modules/
 mind-graph/dist/

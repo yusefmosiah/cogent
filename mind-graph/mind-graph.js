@@ -397,13 +397,17 @@ function resize() {
   const wrap = document.getElementById("canvas-wrap");
   const rect = wrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const size = Math.min(rect.width, rect.height);
-  W_px = H_px = size;
-  cv.width = size * dpr; cv.height = size * dpr;
-  cv.style.width = size + "px"; cv.style.height = size + "px";
+  // Canvas fills the full viewport rectangle
+  W_px = rect.width;
+  H_px = rect.height;
+  cv.width = W_px * dpr; cv.height = H_px * dpr;
+  cv.style.width = W_px + "px"; cv.style.height = H_px + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  CX = CY = size / 2;
-  R = size / 2 * 0.92;
+  // Center of canvas
+  CX = W_px / 2;
+  CY = H_px / 2;
+  // Disk radius uses the smaller dimension (stays circular)
+  R = Math.min(W_px, H_px) / 2 * 0.85;
 }
 
 function diskToScreen(p) {

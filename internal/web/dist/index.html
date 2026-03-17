@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cagent · mind graph</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0c; color: #c8c0b8; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+  #top { padding: 10px 16px 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+  #top .brand { color: #50b888; font-weight: 600; letter-spacing: 1px; }
+  #top .stats { color: #888; }
+  #top .focus-label { color: #c4a060; }
+  #top button { background: none; border: 1px solid #333; color: #888; padding: 2px 10px; border-radius: 10px; cursor: pointer; font-family: inherit; font-size: 11px; }
+  #top button:hover { border-color: #666; color: #ccc; }
+  #top .spacer { flex: 1; }
+
+  #main { flex: 1; display: flex; overflow: hidden; }
+
+  /* Sidebar list */
+  #sidebar {
+    flex: 0 0 220px;
+    overflow-y: auto;
+    border-right: 1px solid #1a1a1e;
+    padding: 8px 0;
+    font-size: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: #222 transparent;
+  }
+  #sidebar::-webkit-scrollbar { width: 4px; }
+  #sidebar::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+  #sidebar .sidebar-item {
+    padding: 5px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    color: #666;
+    transition: background 0.15s;
+    line-height: 1.3;
+  }
+  #sidebar .sidebar-item:hover { background: rgba(255,255,255,0.03); color: #999; }
+  #sidebar .sidebar-item.active { background: rgba(196,160,96,0.08); color: #c4a060; }
+  #sidebar .sidebar-item.filtered-out { opacity: 0.2; }
+  #sidebar .sidebar-item .item-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 4px;
+  }
+  #sidebar .sidebar-item .item-title {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #sidebar .sidebar-item .item-kind {
+    font-size: 9px; color: #444; text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  #sidebar-toggle {
+    display: none;
+    position: absolute; top: 40px; left: 8px; z-index: 10;
+    background: #1a1a1e; border: 1px solid #333; color: #888;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    font-family: inherit; font-size: 11px;
+  }
+
+  #canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 8px; min-width: 0; transition: flex 0.3s ease; }
+  #canvas-wrap.has-detail { flex: 0 0 35%; }
+  canvas { display: block; }
+
+  #detail-panel {
+    display: none;
+    flex: 0 0 45%;
+    overflow-y: auto;
+    padding: 24px 32px;
+    border-left: 1px solid #1a1a1e;
+    font-family: 'SF Pro Display', 'Helvetica Neue', system-ui, sans-serif;
+    scrollbar-width: thin;
+    scrollbar-color: #333 transparent;
+  }
+  #detail-panel.open { display: block; }
+  #detail-panel::-webkit-scrollbar { width: 6px; }
+  #detail-panel::-webkit-scrollbar-track { background: transparent; }
+  #detail-panel::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+  #detail-panel .detail-header { margin-bottom: 20px; }
+  #detail-panel .detail-kind { font-family: 'SF Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 4px; }
+  #detail-panel .detail-title { font-size: 22px; font-weight: 500; color: #e0d8d0; line-height: 1.3; }
+  #detail-panel .detail-meta { display: flex; gap: 12px; margin-top: 8px; font-size: 11px; font-family: 'SF Mono', monospace; }
+  #detail-panel .detail-meta .state { padding: 2px 8px; border-radius: 3px; }
+  #detail-panel .detail-meta .state-ready { background: rgba(196,160,96,0.15); color: #c4a060; }
+  #detail-panel .detail-meta .state-running { background: rgba(80,184,136,0.15); color: #50b888; }
+  #detail-panel .detail-meta .state-done, #detail-panel .detail-meta .state-completed { background: rgba(64,136,104,0.15); color: #408868; }
+  #detail-panel .detail-meta .state-blocked { background: rgba(208,96,96,0.15); color: #d06060; }
+  #detail-panel .detail-meta .state-draft { background: rgba(90,106,122,0.15); color: #5a6a7a; }
+  #detail-panel .detail-meta .state-failed { background: rgba(128,48,48,0.15); color: #803030; }
+  #detail-panel .detail-meta .state-claimed { background: rgba(80,184,136,0.15); color: #50b888; }
+
+  #detail-panel .detail-section { margin-top: 20px; }
+  #detail-panel .detail-section-label {
+    font-family: 'SF Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #555;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #1a1a1e;
+  }
+
+  #detail-panel .detail-content {
+    font-size: 14px;
+    line-height: 1.65;
+    color: #a09888;
+  }
+  #detail-panel .detail-content p { margin-bottom: 10px; }
+  #detail-panel .detail-content h1, #detail-panel .detail-content h2, #detail-panel .detail-content h3 {
+    color: #c8c0b8;
+    margin: 16px 0 8px;
+    font-weight: 500;
+  }
+  #detail-panel .detail-content h1 { font-size: 18px; }
+  #detail-panel .detail-content h2 { font-size: 16px; }
+  #detail-panel .detail-content h3 { font-size: 14px; }
+  #detail-panel .detail-content ul, #detail-panel .detail-content ol { padding-left: 20px; margin-bottom: 10px; }
+  #detail-panel .detail-content li { margin-bottom: 4px; }
+  #detail-panel .detail-content code {
+    font-family: 'SF Mono', monospace;
+    font-size: 12px;
+    background: rgba(255,255,255,0.05);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #c4a060;
+  }
+  #detail-panel .detail-content pre {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid #1a1a1e;
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+    margin-bottom: 10px;
+  }
+  #detail-panel .detail-content pre code { background: none; padding: 0; }
+  #detail-panel .detail-content blockquote {
+    border-left: 3px solid #333;
+    padding-left: 12px;
+    color: #777;
+    margin-bottom: 10px;
+  }
+  #detail-panel .detail-content strong { color: #c8c0b8; font-weight: 500; }
+  #detail-panel .detail-content em { color: #908878; }
+  #detail-panel .detail-content a { color: #50b888; text-decoration: none; }
+  #detail-panel .detail-content a:hover { text-decoration: underline; }
+
+  #detail-panel .detail-list-item {
+    padding: 8px 0;
+    border-bottom: 1px solid #111;
+    font-size: 13px;
+    color: #888;
+  }
+  #detail-panel .detail-list-item:last-child { border-bottom: none; }
+  #detail-panel .detail-list-item .item-prefix { color: #c4a060; margin-right: 6px; }
+  #detail-panel .detail-list-item .item-prefix-green { color: #50b888; margin-right: 6px; }
+
+  #bottom { padding: 6px 16px 10px; display: flex; gap: 8px; align-items: center; font-size: 11px; color: #555; flex-wrap: wrap; }
+  .filter-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 10px; border-radius: 12px;
+    background: none; border: 1px solid transparent;
+    color: #555; cursor: pointer; font-family: inherit; font-size: 11px;
+    transition: all 0.2s;
+  }
+  .filter-btn:hover { border-color: #444; color: #999; }
+  .filter-btn.active { border-color: currentColor; color: inherit; font-weight: 500; }
+  .filter-btn .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .filter-btn .count { opacity: 0.5; margin-left: 2px; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #555; font-size: 14px; }
+
+  @media (max-width: 900px) {
+    #sidebar { display: none; }
+    #sidebar.mobile-open { display: block; position: absolute; top: 36px; left: 0; bottom: 40px; z-index: 20; background: #0a0a0c; width: 240px; border-right: 1px solid #1a1a1e; }
+    #sidebar-toggle { display: block; }
+    #main { flex-direction: column; }
+    #canvas-wrap.has-detail { flex: 0 0 40%; }
+    #detail-panel { flex: 1; border-left: none; border-top: 1px solid #1a1a1e; padding: 16px; }
+  }
+</style>
+  <script type="module" crossorigin src="/assets/index-XKnFLykm.js"></script>
+</head>
+<body>
+<div id="loading">loading work graph...</div>
+<div id="top" style="display:none">
+  <span class="brand">CAGENT</span>
+  <span class="stats" id="stats"></span>
+  <span class="focus-label" id="focus-label"></span>
+  <span class="spacer"></span>
+  <button id="btn-diff" style="font-size:11px;color:#50b888">diff</button>
+  <button id="btn-bash" style="font-size:11px;color:#c4a060">bash log</button>
+  <button id="btn-back" style="display:none">&larr; overview</button>
+</div>
+<button id="sidebar-toggle">&#9776; list</button>
+<div id="main" style="display:none">
+  <div id="sidebar"></div>
+  <div id="canvas-wrap">
+    <canvas id="cv"></canvas>
+  </div>
+  <div id="detail-panel">
+    <div class="detail-header">
+      <div class="detail-kind" id="detail-kind"></div>
+      <div class="detail-title" id="detail-title"></div>
+      <div class="detail-meta" id="detail-meta"></div>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+</div>
+<div id="bottom" style="display:none">
+  <button class="filter-btn active" data-filter="all"><span class="dot" style="background:#888"></span>all <span class="count" id="count-all"></span></button>
+  <button class="filter-btn" data-filter="ready"><span class="dot" style="background:#c4a060"></span>ready <span class="count" id="count-ready"></span></button>
+  <button class="filter-btn" data-filter="running"><span class="dot" style="background:#50b888"></span>running <span class="count" id="count-running"></span></button>
+  <button class="filter-btn" data-filter="blocked"><span class="dot" style="background:#d06060"></span>blocked <span class="count" id="count-blocked"></span></button>
+  <button class="filter-btn" data-filter="done"><span class="dot" style="background:#408868"></span>done <span class="count" id="count-done"></span></button>
+  <button class="filter-btn" data-filter="draft"><span class="dot" style="background:#5a6a7a"></span>draft <span class="count" id="count-draft"></span></button>
+  <span style="margin-left:auto;color:#444">click to focus &middot; esc to ascend</span>
+</div>
+</body>
+</html>
