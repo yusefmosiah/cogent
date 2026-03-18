@@ -18,7 +18,7 @@ function normalizeItem(raw) {
     pr: raw.priority || 3,
     ch: raw.children || [],
     bb: raw.blocked_by || [],
-    att: [Math.max(reqAtt.length, 1), attRecs.length],
+    att: reqAtt.length > 0 ? [reqAtt.length, attRecs.length] : [attRecs.length, attRecs.length],
     obj: raw.objective || "",
     cr: new Date(raw.created_at).getTime(),
     up: new Date(raw.updated_at).getTime(),
@@ -539,7 +539,7 @@ function refreshData(items) {
 function preferredRho(w) {
   const n = nodes[w.id];
   const stale = Math.min(1, Math.max(0, (Date.now() - w.up) / (14 * 86400000)));
-  const attDef = w.att ? 1 - w.att[1] / Math.max(w.att[0], 1) : 0;
+  const attDef = w.att && w.att[0] > 0 ? 1 - w.att[1] / w.att[0] : 0;
   const stateRho = (RHO_STATE[w.s] || 1.5);
   if (n.dagDepth !== undefined && n.dagMaxDepth > 0) {
     // Has DAG structure: depth drives radial position
