@@ -415,6 +415,10 @@ func (s *Store) ListSessions(ctx context.Context, limit int, adapter, status str
 }
 
 func (s *Store) CreateWorkItem(ctx context.Context, rec core.WorkItemRecord) error {
+	return s.insertWorkItem(ctx, s.db, rec)
+}
+
+func (s *Store) insertWorkItem(ctx context.Context, db execer, rec core.WorkItemRecord) error {
 	required, err := marshalJSON(rec.RequiredCapabilities)
 	if err != nil {
 		return fmt.Errorf("marshal work required capabilities: %w", err)
@@ -452,7 +456,7 @@ func (s *Store) CreateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		return fmt.Errorf("marshal work metadata: %w", err)
 	}
 
-	_, err = s.db.ExecContext(
+	_, err = db.ExecContext(
 		ctx,
 		`INSERT INTO work_items (
 			work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
@@ -610,10 +614,13 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 	return nil
 }
 
-// NextWorkPosition returns MAX(position)+1 for use when auto-assigning position to a new work item.
 func (s *Store) NextWorkPosition(ctx context.Context) (int, error) {
+	return s.nextWorkPosition(ctx, s.db)
+}
+
+func (s *Store) nextWorkPosition(ctx context.Context, db execer) (int, error) {
 	var maxPos sql.NullInt64
-	row := s.db.QueryRowContext(ctx, `SELECT MAX(position) FROM work_items`)
+	row := db.QueryRowContext(ctx, `SELECT MAX(position) FROM work_items`)
 	if err := row.Scan(&maxPos); err != nil {
 		return 0, fmt.Errorf("query max work position: %w", err)
 	}
@@ -625,7 +632,11 @@ func (s *Store) NextWorkPosition(ctx context.Context) (int, error) {
 
 // ShiftWorkPositions adds delta to position for all work items whose position is in [fromPos, toPos].
 func (s *Store) ShiftWorkPositions(ctx context.Context, fromPos, toPos, delta int) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.shiftWorkPositions(ctx, s.db, fromPos, toPos, delta)
+}
+
+func (s *Store) shiftWorkPositions(ctx context.Context, db execer, fromPos, toPos, delta int) error {
+	_, err := db.ExecContext(ctx,
 		`UPDATE work_items SET position = position + ? WHERE position >= ? AND position <= ?`,
 		delta, fromPos, toPos,
 	)
@@ -637,7 +648,11 @@ func (s *Store) ShiftWorkPositions(ctx context.Context, fromPos, toPos, delta in
 
 // SetWorkPosition sets the position field for a single work item without touching other fields.
 func (s *Store) SetWorkPosition(ctx context.Context, workID string, position int) error {
-	result, err := s.db.ExecContext(ctx,
+	return s.setWorkPosition(ctx, s.db, workID, position)
+}
+
+func (s *Store) setWorkPosition(ctx context.Context, db execer, workID string, position int) error {
+	result, err := db.ExecContext(ctx,
 		`UPDATE work_items SET position = ? WHERE work_id = ?`,
 		position, workID,
 	)
@@ -654,8 +669,89 @@ func (s *Store) SetWorkPosition(ctx context.Context, workID string, position int
 	return nil
 }
 
+func (s *Store) CreateWorkItemWithAutoPosition(ctx context.Context, rec core.WorkItemRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction for work item create: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	pos, err := s.nextWorkPosition(ctx, tx)
+	if err != nil {
+		return err
+	}
+	rec.Position = pos
+
+	if err := s.insertWorkItem(ctx, tx, rec); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit work item create: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MoveWorkPosition(ctx context.Context, workID string, newPosition int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction for work position move: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	work, err := s.getWorkItem(ctx, tx, workID)
+	if err != nil {
+		return err
+	}
+	cur := work.Position
+	if cur == newPosition {
+		return nil
+	}
+	if cur > newPosition {
+		if err := s.shiftWorkPositions(ctx, tx, newPosition, cur-1, 1); err != nil {
+			return err
+		}
+	} else {
+		if err := s.shiftWorkPositions(ctx, tx, cur+1, newPosition, -1); err != nil {
+			return err
+		}
+	}
+	if err := s.setWorkPosition(ctx, tx, workID, newPosition); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit work position move: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ReorderWorkPositions(ctx context.Context, workIDs []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction for work reorder: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for i, wid := range workIDs {
+		pos := i + 1
+		if err := s.setWorkPosition(ctx, tx, wid, pos); err != nil {
+			return fmt.Errorf("reorder queue at index %d (%s): %w", i, wid, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit work reorder: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetWorkItem(ctx context.Context, workID string) (core.WorkItemRecord, error) {
-	row := s.db.QueryRowContext(
+	return s.getWorkItem(ctx, s.db, workID)
+}
+
+func (s *Store) getWorkItem(ctx context.Context, db execer, workID string) (core.WorkItemRecord, error) {
+	row := db.QueryRowContext(
 		ctx,
 		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,

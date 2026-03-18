@@ -1203,15 +1203,13 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 	work.RequiredAttestations = defaultRequiredAttestations(work, req.RequiredAttestations, s.Config)
 	if req.Position > 0 {
 		work.Position = req.Position
-	} else {
-		pos, err := s.store.NextWorkPosition(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("assign work position: %w", err)
+		if err := s.store.CreateWorkItem(ctx, work); err != nil {
+			return nil, err
 		}
-		work.Position = pos
-	}
-	if err := s.store.CreateWorkItem(ctx, work); err != nil {
-		return nil, err
+	} else {
+		if err := s.store.CreateWorkItemWithAutoPosition(ctx, work); err != nil {
+			return nil, err
+		}
 	}
 	if req.ParentWorkID != "" {
 		if _, err := s.store.GetWorkItem(ctx, req.ParentWorkID); err != nil {
@@ -1234,22 +1232,10 @@ func (s *Service) MoveWork(ctx context.Context, workID string, newPosition int) 
 	if err != nil {
 		return nil, normalizeStoreError("work", workID, err)
 	}
-	cur := work.Position
-	if cur == newPosition {
+	if work.Position == newPosition {
 		return &work, nil
 	}
-	if cur > newPosition {
-		// Moving up: shift items in [newPosition, cur-1] down by 1.
-		if err := s.store.ShiftWorkPositions(ctx, newPosition, cur-1, 1); err != nil {
-			return nil, err
-		}
-	} else {
-		// Moving down: shift items in [cur+1, newPosition] up by -1.
-		if err := s.store.ShiftWorkPositions(ctx, cur+1, newPosition, -1); err != nil {
-			return nil, err
-		}
-	}
-	if err := s.store.SetWorkPosition(ctx, workID, newPosition); err != nil {
+	if err := s.store.MoveWorkPosition(ctx, workID, newPosition); err != nil {
 		return nil, err
 	}
 	work.Position = newPosition
@@ -1273,13 +1259,7 @@ func (s *Service) MoveToFront(ctx context.Context, workID string) (*core.WorkIte
 // ReorderQueue assigns sequential positions 1..N to the given work IDs in order.
 // Any work items not in the list retain their existing positions (shifted to follow the reordered items).
 func (s *Service) ReorderQueue(ctx context.Context, workIDs []string) error {
-	for i, wid := range workIDs {
-		pos := i + 1
-		if err := s.store.SetWorkPosition(ctx, wid, pos); err != nil {
-			return fmt.Errorf("reorder queue at index %d (%s): %w", i, wid, err)
-		}
-	}
-	return nil
+	return s.store.ReorderWorkPositions(ctx, workIDs)
 }
 
 func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, error) {
