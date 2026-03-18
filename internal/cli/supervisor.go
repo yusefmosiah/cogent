@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -147,6 +148,7 @@ type supervisorCycleReport struct {
 	Dispatched []dispatchEntry  `json:"dispatched,omitempty"`
 	Completed  []completedEntry `json:"completed,omitempty"`
 	DryRun     bool             `json:"dry_run,omitempty"`
+	Paused     bool             `json:"paused,omitempty"`
 }
 
 type dispatchEntry struct {
@@ -194,7 +196,85 @@ The core loop:
 	cmd.Flags().StringVar(&opts.cwd, "cwd", ".", "working directory for spawned jobs")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "show what would be dispatched without doing it")
 
+	cmd.AddCommand(
+		newSupervisorPauseCommand(root),
+		newSupervisorResumeCommand(root),
+	)
+
 	return cmd
+}
+
+// supervisorServeURL reads .cagent/serve.json to discover the running serve API port.
+func supervisorServeURL(root *rootOptions) (string, error) {
+	svc, err := service.Open(context.Background(), root.configPath)
+	if err != nil {
+		return "", fmt.Errorf("open service: %w", err)
+	}
+	_ = svc.Close()
+
+	data, err := os.ReadFile(filepath.Join(svc.Paths.StateDir, "serve.json"))
+	if err != nil {
+		return "", fmt.Errorf("serve is not running (no serve.json found): %w", err)
+	}
+	var info struct {
+		Port int    `json:"port"`
+		Host string `json:"host,omitempty"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil || info.Port == 0 {
+		return "", fmt.Errorf("invalid serve.json")
+	}
+	host := "localhost"
+	return fmt.Sprintf("http://%s:%d", host, info.Port), nil
+}
+
+func newSupervisorPauseCommand(root *rootOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pause",
+		Short: "Pause dispatch in the running supervisor (in-flight jobs continue)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			base, err := supervisorServeURL(root)
+			if err != nil {
+				return err
+			}
+			resp, err := http.Post(base+"/api/supervisor/pause", "application/json", nil) //nolint:noctx
+			if err != nil {
+				return fmt.Errorf("pause request failed: %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				var body map[string]string
+				_ = json.NewDecoder(resp.Body).Decode(&body)
+				return fmt.Errorf("pause failed (%d): %s", resp.StatusCode, body["error"])
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "supervisor: dispatch paused")
+			return nil
+		},
+	}
+}
+
+func newSupervisorResumeCommand(root *rootOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume",
+		Short: "Resume dispatch in the running supervisor",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			base, err := supervisorServeURL(root)
+			if err != nil {
+				return err
+			}
+			resp, err := http.Post(base+"/api/supervisor/resume", "application/json", nil) //nolint:noctx
+			if err != nil {
+				return fmt.Errorf("resume request failed: %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				var body map[string]string
+				_ = json.NewDecoder(resp.Body).Decode(&body)
+				return fmt.Errorf("resume failed (%d): %s", resp.StatusCode, body["error"])
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "supervisor: dispatch resumed")
+			return nil
+		},
+	}
 }
 
 func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOptions) error {
@@ -312,7 +392,7 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 		_ = svc.Close()
 
 		emit(report)
-		writeSupState(cwd, report.Cycle, loop.snapshotInFlight(), report)
+		writeSupState(cwd, report.Cycle, loop.IsPaused(), loop.snapshotInFlight(), report)
 
 		if opts.dryRun {
 			return nil
@@ -447,6 +527,7 @@ type supervisorState struct {
 	Cycle     int                   `json:"cycle"`
 	Timestamp string                `json:"timestamp"`
 	Uptime    string                `json:"uptime,omitempty"`
+	Paused    bool                  `json:"paused,omitempty"`
 	InFlight  []inFlightState       `json:"in_flight"`
 	Ready     int                   `json:"ready"`
 	Report    supervisorCycleReport `json:"last_report"`
@@ -461,7 +542,7 @@ type inFlightState struct {
 
 var supervisorStart = time.Now()
 
-func writeSupState(cwd string, cycle int, inFlight map[string]*inFlightJob, report supervisorCycleReport) {
+func writeSupState(cwd string, cycle int, paused bool, inFlight map[string]*inFlightJob, report supervisorCycleReport) {
 	stateDir := filepath.Join(cwd, ".cagent")
 	_ = os.MkdirAll(stateDir, 0o755)
 
@@ -480,6 +561,7 @@ func writeSupState(cwd string, cycle int, inFlight map[string]*inFlightJob, repo
 		Cycle:     cycle,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Uptime:    time.Since(supervisorStart).Truncate(time.Second).String(),
+		Paused:    paused,
 		InFlight:  flights,
 		Ready:     report.Ready,
 		Report:    report,

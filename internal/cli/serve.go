@@ -259,9 +259,10 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// WebSocket hub — shared across all goroutines
 	hub := newWSHub()
 
-	// Set up HTTP handlers
+	// Set up HTTP handlers (supervisor loop is nil until --auto starts it)
+	var supLoop *supervisorLoop
 	mux := http.NewServeMux()
-	registerAPIHandlers(mux, svc, cwd, hub)
+	registerAPIHandlers(mux, svc, cwd, hub, &supLoop)
 
 	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +311,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runInProcessSupervisor(ctx, svc, cwd, root, maxConcurrent, hub)
+			runInProcessSupervisor(ctx, svc, cwd, root, maxConcurrent, hub, &supLoop)
 		}()
 	}
 
@@ -495,7 +496,7 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub) {
 	}
 }
 
-func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, hub *wsHub) {
+func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, hub *wsHub, supLoopPtr **supervisorLoop) {
 	// Work items list
 	mux.HandleFunc("/api/work/items", func(w http.ResponseWriter, r *http.Request) {
 		includeArchived := r.URL.Query().Get("include_archived") == "1" || strings.EqualFold(r.URL.Query().Get("include_archived"), "true")
@@ -613,6 +614,37 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			"supervisor": sup,
 			"diff_stat":  diffStat,
 		})
+	})
+
+	// Supervisor pause / resume
+	mux.HandleFunc("/api/supervisor/pause", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		loop := *supLoopPtr
+		if loop == nil {
+			writeJSONHTTP(w, 409, map[string]string{"error": "supervisor not running (start with --auto)"})
+			return
+		}
+		loop.Pause()
+		hub.broadcast("supervisor_paused", map[string]bool{"paused": true})
+		writeJSONHTTP(w, 200, map[string]any{"paused": true})
+	})
+
+	mux.HandleFunc("/api/supervisor/resume", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		loop := *supLoopPtr
+		if loop == nil {
+			writeJSONHTTP(w, 409, map[string]string{"error": "supervisor not running (start with --auto)"})
+			return
+		}
+		loop.Resume()
+		hub.broadcast("supervisor_resumed", map[string]bool{"paused": false})
+		writeJSONHTTP(w, 200, map[string]any{"paused": false})
 	})
 
 	// Full diff
@@ -1395,7 +1427,8 @@ func truncateText(text string, limit int) string {
 
 // runInProcessSupervisor runs the autonomous dispatch loop using the shared Service instance.
 // Only active when --auto is set. Delegates to supervisorLoop for the core 5-step algorithm.
-func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd string, root *rootOptions, maxConcurrent int, hub *wsHub) {
+// loopOut is set to the loop pointer before the first cycle so HTTP handlers can call Pause/Resume.
+func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd string, root *rootOptions, maxConcurrent int, hub *wsHub, loopOut **supervisorLoop) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		selfBin = "cagent"
@@ -1408,6 +1441,9 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 	}
 
 	loop := newSupervisorLoop(maxConcurrent, cwd, selfBin, root.configPath)
+	if loopOut != nil {
+		*loopOut = loop
+	}
 	loop.budget = newDailyUsage(filepath.Join(cwd, ".cagent"))
 	loop.limits = buildLimitsMap(cfg)
 	loop.onJobStarted = func(workID, jobID, adapter string) {
@@ -1434,7 +1470,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 		}
 
 		report := loop.runOneCycle(ctx, svc)
-		writeSupState(cwd, report.Cycle, loop.snapshotInFlight(), report)
+		writeSupState(cwd, report.Cycle, loop.IsPaused(), loop.snapshotInFlight(), report)
 
 		select {
 		case <-ctx.Done():

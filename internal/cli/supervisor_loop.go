@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yusefmosiah/cagent/internal/core"
@@ -33,11 +34,24 @@ type supervisorLoop struct {
 	onJobStarted   func(workID, jobID, adapter string) // called after successful dispatch
 	onJobCompleted func(workID, jobID, state string)   // called when job reaches terminal state
 
+	// paused prevents dispatch (step 5) while still allowing monitoring,
+	// lease renewal, and completion detection (steps 2-4).
+	paused atomic.Bool
+
 	// Internal state — guarded by mu.
 	mu       sync.Mutex
 	inFlight map[string]*inFlightJob
 	cycle    int
 }
+
+// Pause stops new work dispatch. In-flight jobs continue to be monitored.
+func (l *supervisorLoop) Pause() { l.paused.Store(true) }
+
+// Resume re-enables work dispatch.
+func (l *supervisorLoop) Resume() { l.paused.Store(false) }
+
+// IsPaused reports whether dispatch is currently paused.
+func (l *supervisorLoop) IsPaused() bool { return l.paused.Load() }
 
 func newSupervisorLoop(maxConcurrent int, cwd, selfBin, configPath string) *supervisorLoop {
 	return &supervisorLoop{
@@ -144,11 +158,15 @@ func (l *supervisorLoop) runOneCycle(ctx context.Context, svc *service.Service) 
 	report.Ready = len(readyItems)
 
 	// Step 5: Dispatch ready work to available capacity.
-	// Skip dispatch if context is already cancelled (graceful shutdown in progress).
+	// Skip dispatch if context is cancelled (graceful shutdown) or paused.
 	select {
 	case <-ctx.Done():
 		return report
 	default:
+	}
+	if l.paused.Load() {
+		report.Paused = true
+		return report
 	}
 
 	for _, item := range readyItems {

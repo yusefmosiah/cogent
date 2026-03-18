@@ -286,7 +286,7 @@ func NewRootCommand() *cobra.Command {
 		newInternalRunJobCommand(opts),
 		newInboxCommand(opts),
 		newReconcileCommand(opts),
-		// supervisor is now integrated into serve (use --auto)
+		newSupervisorCommand(opts),
 		newDashboardCommand(opts),
 		newServeCommand(opts),
 		newDispatchCommand(opts),
