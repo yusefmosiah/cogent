@@ -266,7 +266,8 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
 func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
 	// Work items list
 	mux.HandleFunc("/api/work/items", func(w http.ResponseWriter, r *http.Request) {
-		items, err := svc.ListWork(r.Context(), service.WorkListRequest{Limit: 500})
+		includeArchived := r.URL.Query().Get("include_archived") == "1" || strings.EqualFold(r.URL.Query().Get("include_archived"), "true")
+		items, err := svc.ListWork(r.Context(), service.WorkListRequest{Limit: 500, IncludeArchived: includeArchived})
 		if err != nil {
 			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
 			return
@@ -353,77 +354,10 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
 	// Bash log
 	mux.HandleFunc("/api/bash-log", func(w http.ResponseWriter, r *http.Request) {
 		rawDir := filepath.Join(cwd, ".cagent", "raw", "stdout")
-		dirs, _ := os.ReadDir(rawDir)
-
-		// Find latest job
-		var latestDir string
-		for i := len(dirs) - 1; i >= 0; i-- {
-			if strings.HasPrefix(dirs[i].Name(), "job_") {
-				latestDir = filepath.Join(rawDir, dirs[i].Name())
-				break
-			}
-		}
-
-		if latestDir == "" {
-			writeJSONHTTP(w, 200, map[string]any{"commands": []any{}, "job_id": ""})
-			return
-		}
-
-		files, _ := os.ReadDir(latestDir)
-		var commands []map[string]any
-		for _, f := range files {
-			if !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
-			}
-			data, _ := os.ReadFile(filepath.Join(latestDir, f.Name()))
-			for _, line := range strings.Split(string(data), "\n") {
-				if line == "" {
-					continue
-				}
-				var ev map[string]any
-				if json.Unmarshal([]byte(line), &ev) != nil {
-					continue
-				}
-				if ev["type"] == "item.completed" {
-					item, _ := ev["item"].(map[string]any)
-					if item == nil {
-						continue
-					}
-					if item["type"] == "command_execution" {
-						cmd, _ := item["command"].(string)
-						if strings.HasPrefix(cmd, "/bin/zsh -lc ") {
-							cmd = cmd[13:]
-							if (strings.HasPrefix(cmd, "'") && strings.HasSuffix(cmd, "'")) ||
-								(strings.HasPrefix(cmd, "\"") && strings.HasSuffix(cmd, "\"")) {
-								cmd = cmd[1 : len(cmd)-1]
-							}
-						}
-						exitCode, _ := item["exit_code"].(float64)
-						output, _ := item["aggregated_output"].(string)
-						if len(output) > 500 {
-							output = output[:500]
-						}
-						commands = append(commands, map[string]any{
-							"command":        cmd,
-							"exit_code":      int(exitCode),
-							"output_preview": output,
-						})
-					} else if item["type"] == "agent_message" {
-						text, _ := item["text"].(string)
-						if len(text) > 300 {
-							text = text[:300]
-						}
-						if text != "" {
-							commands = append(commands, map[string]any{"comment": text})
-						}
-					}
-				}
-			}
-		}
-
+		commands, jobID := collectBashLogCommands(rawDir)
 		writeJSONHTTP(w, 200, map[string]any{
 			"commands": commands,
-			"job_id":   filepath.Base(latestDir),
+			"job_id":   jobID,
 		})
 	})
 }
@@ -432,6 +366,420 @@ func writeJSONHTTP(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+type bashLogCommand struct {
+	Command       string `json:"command,omitempty"`
+	ExitCode      int    `json:"exit_code,omitempty"`
+	OutputPreview string `json:"output_preview,omitempty"`
+	Comment       string `json:"comment,omitempty"`
+}
+
+type bashLogState struct {
+	commands []bashLogCommand
+	pending  map[string]int
+}
+
+func collectBashLogCommands(rawDir string) ([]bashLogCommand, string) {
+	dirs, err := os.ReadDir(rawDir)
+	if err != nil {
+		return []bashLogCommand{}, ""
+	}
+
+	// Find the newest job directory by sorted ReadDir order.
+	var latestDir string
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if strings.HasPrefix(dirs[i].Name(), "job_") {
+			latestDir = filepath.Join(rawDir, dirs[i].Name())
+			break
+		}
+	}
+	if latestDir == "" {
+		return []bashLogCommand{}, ""
+	}
+
+	state := &bashLogState{
+		pending: map[string]int{},
+	}
+
+	files, err := os.ReadDir(latestDir)
+	if err != nil {
+		return []bashLogCommand{}, filepath.Base(latestDir)
+	}
+
+	for _, f := range files {
+		if !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(latestDir, f.Name()))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				continue
+			}
+			state.ingest(ev)
+		}
+	}
+
+	return state.commands, filepath.Base(latestDir)
+}
+
+func (s *bashLogState) ingest(ev map[string]any) {
+	if ev == nil {
+		return
+	}
+
+	if isBashResultEvent(ev) {
+		s.updateFromResult(ev)
+		return
+	}
+
+	if command, id, exitCode, output, ok := extractBashCommand(ev); ok {
+		s.addCommand(id, command, exitCode, output)
+		return
+	}
+
+	if comment := extractBashComment(ev); comment != "" {
+		s.addComment(comment)
+	}
+}
+
+func (s *bashLogState) addComment(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if len(text) > 300 {
+		text = text[:300]
+	}
+	s.commands = append(s.commands, bashLogCommand{Comment: text})
+}
+
+func (s *bashLogState) addCommand(id, command string, exitCode *int, output string) {
+	command = normalizeBashCommand(command)
+	if command == "" {
+		return
+	}
+
+	entry := bashLogCommand{Command: command}
+	if exitCode != nil {
+		entry.ExitCode = *exitCode
+	}
+	if output != "" {
+		entry.OutputPreview = truncateText(output, 500)
+	}
+
+	index := len(s.commands)
+	s.commands = append(s.commands, entry)
+	if id != "" {
+		s.pending[id] = index
+	}
+}
+
+func (s *bashLogState) updateFromResult(ev map[string]any) {
+	id := firstString(ev, "tool_use_id", "toolUseId", "id", "call_id")
+	if part, ok := ev["part"].(map[string]any); ok && id == "" {
+		id = firstString(part, "tool_use_id", "toolUseId", "id", "call_id")
+	}
+
+	exitCode, hasExitCode := extractIntField(ev, "exit_code")
+	if !hasExitCode {
+		if part, ok := ev["part"].(map[string]any); ok {
+			exitCode, hasExitCode = extractIntField(part, "exit_code")
+		}
+	}
+
+	output := extractBashOutput(ev)
+	if output == "" {
+		if part, ok := ev["part"].(map[string]any); ok {
+			output = extractBashOutput(part)
+		}
+	}
+
+	index := -1
+	if id != "" {
+		if pendingIndex, ok := s.pending[id]; ok {
+			index = pendingIndex
+		}
+	}
+	if index < 0 {
+		for i := len(s.commands) - 1; i >= 0; i-- {
+			if s.commands[i].Command != "" {
+				index = i
+				break
+			}
+		}
+	}
+	if index < 0 {
+		return
+	}
+
+	if hasExitCode {
+		s.commands[index].ExitCode = exitCode
+	}
+	if output != "" {
+		s.commands[index].OutputPreview = truncateText(output, 500)
+	}
+}
+
+func isBashResultEvent(ev map[string]any) bool {
+	eventType := strings.ToLower(firstString(ev, "type", "event"))
+	if strings.Contains(eventType, "tool_result") || strings.Contains(eventType, "command_execution_result") {
+		return true
+	}
+	if part, ok := ev["part"].(map[string]any); ok {
+		partType := strings.ToLower(firstString(part, "type"))
+		return strings.Contains(partType, "tool_result") || strings.Contains(partType, "command_execution_result")
+	}
+	return false
+}
+
+func extractBashCommand(ev map[string]any) (command, id string, exitCode *int, output string, ok bool) {
+	for _, candidate := range bashLogCandidateMaps(ev) {
+		if candidate == nil {
+			continue
+		}
+
+		if id == "" {
+			id = firstString(candidate, "tool_use_id", "toolUseId", "id", "call_id")
+		}
+
+		if command == "" {
+			command = extractCommandString(candidate)
+		}
+		if command == "" {
+			continue
+		}
+
+		if code, hasCode := extractIntField(candidate, "exit_code"); hasCode {
+			exitCode = &code
+		}
+		if output == "" {
+			output = extractBashOutput(candidate)
+		}
+		ok = true
+		break
+	}
+	return
+}
+
+func bashLogCandidateMaps(ev map[string]any) []map[string]any {
+	maps := []map[string]any{ev}
+	for _, key := range []string{"item", "part", "message", "completion", "result"} {
+		if nested, ok := ev[key].(map[string]any); ok {
+			maps = append(maps, nested)
+		}
+	}
+	return maps
+}
+
+func extractCommandString(m map[string]any) string {
+	if command := firstString(m, "command", "cmd", "shell", "script"); command != "" {
+		return command
+	}
+
+	if input, ok := m["input"].(map[string]any); ok {
+		if command := firstString(input, "command", "cmd", "shell", "script", "text"); command != "" {
+			return command
+		}
+		if args, ok := input["args"].([]any); ok {
+			var parts []string
+			for _, arg := range args {
+				if text, ok := arg.(string); ok && text != "" {
+					parts = append(parts, text)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, " ")
+			}
+		}
+	}
+
+	if args, ok := m["args"].([]any); ok {
+		var parts []string
+		for _, arg := range args {
+			if text, ok := arg.(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	}
+
+	return ""
+}
+
+func extractBashComment(ev map[string]any) string {
+	for _, candidate := range bashLogCandidateMaps(ev) {
+		if candidate == nil {
+			continue
+		}
+
+		if strings.ToLower(firstString(candidate, "type")) == "agent_message" {
+			if text := extractText(candidate["text"], candidate["content"], candidate["message"]); text != "" {
+				return text
+			}
+		}
+
+		if role := strings.ToLower(firstString(candidate, "role")); role == "assistant" {
+			if text := extractText(candidate["content"], candidate["text"], candidate["message"]); text != "" {
+				return text
+			}
+		}
+
+		if strings.Contains(strings.ToLower(firstString(candidate, "type")), "assistant") {
+			if text := extractText(candidate["content"], candidate["text"], candidate["message"]); text != "" {
+				return text
+			}
+		}
+
+		if strings.ToLower(firstString(candidate, "type")) == "text" {
+			if text := extractText(candidate["part"], candidate["text"], candidate["content"]); text != "" {
+				return text
+			}
+		}
+
+		if text := extractText(candidate["finalText"], candidate["final_text"], candidate["result"]); text != "" {
+			if strings.ToLower(firstString(candidate, "type")) == "completion" {
+				return text
+			}
+		}
+	}
+
+	return ""
+}
+
+func extractBashOutput(m map[string]any) string {
+	if output := extractText(
+		m["aggregated_output"],
+		m["stdout"],
+		m["output"],
+		m["content"],
+		m["text"],
+	); output != "" {
+		return output
+	}
+
+	if result, ok := m["result"].(map[string]any); ok {
+		if output := extractText(result["content"], result["stdout"], result["output"], result["text"]); output != "" {
+			return output
+		}
+	}
+
+	if part, ok := m["part"].(map[string]any); ok {
+		if output := extractText(part["content"], part["stdout"], part["output"], part["text"]); output != "" {
+			return output
+		}
+	}
+
+	return ""
+}
+
+func extractText(values ...any) string {
+	var parts []string
+	for _, value := range values {
+		text := extractTextValue(value)
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func extractTextValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		for _, key := range []string{"text", "content", "message", "finalText", "final_text", "stdout", "output", "result"} {
+			if text := extractTextValue(typed[key]); text != "" {
+				return text
+			}
+		}
+		return ""
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			if text := extractTextValue(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	default:
+		return ""
+	}
+}
+
+func firstString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := payload[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func intValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		return parsed, err == nil
+	case string:
+		var parsed int64
+		_, err := fmt.Sscan(strings.TrimSpace(typed), &parsed)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func extractIntField(m map[string]any, key string) (int, bool) {
+	value, ok := intValue(m[key])
+	return int(value), ok
+}
+
+func normalizeBashCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+
+	for _, prefix := range []string{"/bin/zsh -lc ", "/bin/bash -lc ", "zsh -lc ", "bash -lc "} {
+		if strings.HasPrefix(command, prefix) {
+			command = strings.TrimSpace(command[len(prefix):])
+			break
+		}
+	}
+
+	if len(command) >= 2 {
+		if (strings.HasPrefix(command, "'") && strings.HasSuffix(command, "'")) ||
+			(strings.HasPrefix(command, "\"") && strings.HasSuffix(command, "\"")) {
+			command = command[1 : len(command)-1]
+		}
+	}
+
+	return strings.TrimSpace(command)
+}
+
+func truncateText(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	return text[:limit]
 }
 
 // handleJobCompletion dispatches an attestation run after a worker completes.
@@ -458,6 +806,19 @@ func handleJobCompletion(ctx context.Context, svc *service.Service, selfBin, con
 	}
 
 	work := workResult.Work
+
+	// Generate attestation nonce — this didn't exist while the worker was running,
+	// so the worker cannot have used it. The attestor receives it in the prompt.
+	nonce := core.GenerateID("nonce")
+	if work.Metadata == nil {
+		work.Metadata = map[string]any{}
+	}
+	work.Metadata["attestation_nonce"] = nonce
+	_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+		WorkID:    workID,
+		Metadata:  work.Metadata,
+		CreatedBy: "attestation",
+	})
 
 	// Collect worker's verification findings (notes) for the attestor
 	var workerFindings string
@@ -486,7 +847,7 @@ Worker job: %s
 1. Run: git diff --stat
 2. If NO files changed (only .cagent/cagent.db or nothing):
    The worker failed silently. Attest failure:
-   cagent work attest %s --result failed --summary "no code changes produced by worker" --verifier-kind attestation --method automated_review
+   cagent work attest %s --nonce %s --result failed --summary "no code changes produced by worker" --verifier-kind attestation --method automated_review
    Stop.
 
 3. If files changed, review the diff:
@@ -496,20 +857,20 @@ Worker job: %s
    - Check for obvious errors or regressions
 
 4. If the work is correct and complete:
-   cagent work attest %s --result passed --summary "N files changed, builds clean, changes match objective" --verifier-kind attestation --method automated_review
+   cagent work attest %s --nonce %s --result passed --summary "N files changed, builds clean, changes match objective" --verifier-kind attestation --method automated_review
    Stop.
 
 5. If the work is incorrect or incomplete:
-   cagent work attest %s --result failed --summary "<specific reason>" --verifier-kind attestation --method automated_review
+   cagent work attest %s --nonce %s --result failed --summary "<specific reason>" --verifier-kind attestation --method automated_review
    Stop.
 
 IMPORTANT: You MUST run exactly one cagent work attest command. This is the attestation contract —
 the attest command atomically records your finding AND transitions the work item state.
-Do not use cagent work complete or cagent work fail. Only cagent work attest.
+Do not use cagent work complete or cagent work fail. Only cagent work attest with the nonce provided above.
 Be thorough but concise.`,
 		workID, work.Title, work.Objective, flight.adapter, flight.jobID,
 		workerFindings,
-		workID, workID, workID)
+		workID, nonce, workID, nonce, workID, nonce)
 
 	// Dispatch attestation via a different model than the worker (rotation offset +1).
 	attestAdapter, attestModel := attestAdapterModel(flight.adapter)
@@ -547,7 +908,7 @@ Be thorough but concise.`,
 		attestJobID = result.Job.JobID
 	}
 
-	// Don't mark done — the attestor will do it via cagent work complete/fail
+	// Don't mark done — the attestor will do it via cagent work attest
 	_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
 		WorkID:    workID,
 		Message:   fmt.Sprintf("attestation: dispatched %s via %s/%s", attestJobID, attestAdapter, attestModel),
@@ -592,7 +953,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 
 		// Auto-init
 		if cycle == 1 {
-			readyWork, _ := svc.ReadyWork(ctx, 1)
+			readyWork, _ := svc.ReadyWork(ctx, 1, false)
 			if len(readyWork) == 0 {
 				_ = bootstrapRepo(ctx, svc, cwd)
 			}
@@ -644,7 +1005,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 
 		// Dispatch
 		if inFlightCount < maxConcurrent {
-			readyItems, _ := svc.ReadyWork(ctx, maxConcurrent*2)
+			readyItems, _ := svc.ReadyWork(ctx, maxConcurrent*2, false)
 			for _, item := range readyItems {
 				mu.Lock()
 				if len(inFlight) >= maxConcurrent {

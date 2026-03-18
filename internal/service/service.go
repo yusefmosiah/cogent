@@ -258,10 +258,11 @@ type WorkCreateRequest struct {
 }
 
 type WorkListRequest struct {
-	Limit          int
-	Kind           string
-	ExecutionState string
-	ApprovalState  string
+	Limit           int
+	Kind            string
+	ExecutionState  string
+	ApprovalState   string
+	IncludeArchived bool
 }
 
 type WorkUpdateRequest struct {
@@ -318,6 +319,7 @@ type WorkAttestRequest struct {
 	SupersedesAttestationID string
 	Metadata                map[string]any
 	CreatedBy               string
+	Nonce                   string // required for automated attestation — generated post-job-completion
 }
 
 type WorkShowResult struct {
@@ -1423,16 +1425,20 @@ func (s *Service) HydrateWork(ctx context.Context, req WorkHydrateRequest) (Work
 			"write_commands": []string{
 				"cagent work update <work-id>",
 				"cagent work note-add <work-id>",
-				"cagent work attest <work-id>",
 				"cagent work proposal create",
 			},
+			"forbidden_commands": []string{
+				"cagent work complete",
+				"cagent work fail",
+				"cagent work attest",
+			},
 			"rules": []string{
-				"Publish structured updates as work progresses.",
+				"Do the work, add updates and notes as you go, then EXIT. Do not mark work complete or attest your own work.",
+				"An independent attestation agent will verify your work after you exit. You must NOT call cagent work complete, cagent work fail, or cagent work attest.",
 				"Record notes for findings, risks, and open questions.",
-				"Use attestations for evidence; do not silently treat verification as approval.",
+				"Run verification (tests, builds) and report results as notes, but do not transition work item state.",
 				"Create child work directly only for unexpected work, fanout work, or sequential context isolation with a bounded result and a clear verifier or attestation target.",
 				"If a possible child cannot be verified cheaply or clearly, create a proposal instead of creating the child directly.",
-				"Do not create child work just to offload thinking; the parent should remain able to judge success from bounded results.",
 			},
 		},
 		"hydration": map[string]any{
@@ -1474,11 +1480,11 @@ func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
 }
 
 func (s *Service) ListWork(ctx context.Context, req WorkListRequest) ([]core.WorkItemRecord, error) {
-	return s.store.ListWorkItems(ctx, req.Limit, req.Kind, req.ExecutionState, req.ApprovalState)
+	return s.store.ListWorkItems(ctx, req.Limit, req.Kind, req.ExecutionState, req.ApprovalState, req.IncludeArchived)
 }
 
-func (s *Service) ReadyWork(ctx context.Context, limit int) ([]core.WorkItemRecord, error) {
-	items, err := s.store.ListReadyWork(ctx, limit*4)
+func (s *Service) ReadyWork(ctx context.Context, limit int, includeArchived bool) ([]core.WorkItemRecord, error) {
+	items, err := s.store.ListReadyWork(ctx, limit*4, includeArchived)
 	if err != nil {
 		return nil, err
 	}
@@ -1545,7 +1551,7 @@ func (s *Service) ClaimNextWork(ctx context.Context, req WorkClaimNextRequest) (
 	if searchLimit <= 0 {
 		searchLimit = 25
 	}
-	candidates, err := s.ReadyWork(ctx, searchLimit)
+	candidates, err := s.ReadyWork(ctx, searchLimit, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1663,7 +1669,8 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 		req.ExecutionState == core.WorkExecutionStateBlocked ||
 		req.ExecutionState == core.WorkExecutionStateDone ||
 		req.ExecutionState == core.WorkExecutionStateFailed ||
-		req.ExecutionState == core.WorkExecutionStateCancelled {
+		req.ExecutionState == core.WorkExecutionStateCancelled ||
+		req.ExecutionState == core.WorkExecutionStateArchived {
 		work.ClaimedBy = ""
 		work.ClaimedUntil = nil
 	}
@@ -1672,6 +1679,14 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	if req.SessionID != "" {
 		work.CurrentSessionID = req.SessionID
+	}
+	if req.Metadata != nil {
+		if work.Metadata == nil {
+			work.Metadata = map[string]any{}
+		}
+		for k, v := range req.Metadata {
+			work.Metadata[k] = v
+		}
 	}
 	if req.LockState == core.WorkLockStateHumanLocked {
 		work.ClaimedBy = ""
@@ -1897,6 +1912,14 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 	work, err := s.store.GetWorkItem(ctx, req.WorkID)
 	if err != nil {
 		return nil, nil, normalizeStoreError("work", req.WorkID, err)
+	}
+	// Nonce validation: if the work item has an attestation nonce,
+	// the caller must provide it. The nonce is generated after the worker
+	// exits, so workers cannot attest their own work.
+	if storedNonce, ok := work.Metadata["attestation_nonce"].(string); ok && storedNonce != "" {
+		if req.Nonce == "" || req.Nonce != storedNonce {
+			return nil, nil, fmt.Errorf("attestation nonce mismatch: work item requires valid nonce (generated post-completion)")
+		}
 	}
 	now := time.Now().UTC()
 	metadata := cloneMap(req.Metadata)

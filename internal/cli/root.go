@@ -70,10 +70,11 @@ type workCreateOptions struct {
 }
 
 type workListOptions struct {
-	limit          int
-	kind           string
-	executionState string
-	approvalState  string
+	limit           int
+	kind            string
+	executionState  string
+	approvalState   string
+	includeArchived bool
 }
 
 type workUpdateOptions struct {
@@ -97,7 +98,8 @@ type workShowOptions struct {
 }
 
 type workReadyOptions struct {
-	limit int
+	limit           int
+	includeArchived bool
 }
 
 type workClaimOptions struct {
@@ -141,6 +143,7 @@ type workAttestOptions struct {
 	blocking                bool
 	supersedesAttestationID string
 	metadata                string
+	nonce                   string
 }
 
 type workProjectionOptions struct {
@@ -1021,10 +1024,11 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			defer func() { _ = svc.Close() }()
 
 			items, err := svc.ListWork(context.Background(), service.WorkListRequest{
-				Limit:          listOpts.limit,
-				Kind:           listOpts.kind,
-				ExecutionState: listOpts.executionState,
-				ApprovalState:  listOpts.approvalState,
+				Limit:           listOpts.limit,
+				Kind:            listOpts.kind,
+				ExecutionState:  listOpts.executionState,
+				ApprovalState:   listOpts.approvalState,
+				IncludeArchived: listOpts.includeArchived,
 			})
 			if err != nil {
 				return mapServiceError(err)
@@ -1036,6 +1040,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	listCmd.Flags().StringVar(&listOpts.kind, "kind", "", "filter by work kind")
 	listCmd.Flags().StringVar(&listOpts.executionState, "execution-state", "", "filter by execution state")
 	listCmd.Flags().StringVar(&listOpts.approvalState, "approval-state", "", "filter by approval state")
+	listCmd.Flags().BoolVar(&listOpts.includeArchived, "include-archived", false, "include archived work items")
 
 	readyCmd := &cobra.Command{
 		Use:   "ready",
@@ -1050,7 +1055,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			// Self-heal: release orphaned claims before listing ready work.
 			_, _ = svc.ReconcileOnStartup(context.Background())
 
-			items, err := svc.ReadyWork(context.Background(), readyOpts.limit)
+			items, err := svc.ReadyWork(context.Background(), readyOpts.limit, readyOpts.includeArchived)
 			if err != nil {
 				return mapServiceError(err)
 			}
@@ -1058,6 +1063,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		},
 	}
 	readyCmd.Flags().IntVar(&readyOpts.limit, "limit", 50, "maximum number of work items")
+	readyCmd.Flags().BoolVar(&readyOpts.includeArchived, "include-archived", false, "include archived work items")
 
 	claimCmd := &cobra.Command{
 		Use:   "claim <work-id>",
@@ -1270,6 +1276,30 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		},
 	}
 	failCmd.Flags().StringVar(&updateOpts.message, "message", "", "failure message")
+
+	archiveCmd := &cobra.Command{
+		Use:   "archive <work-id>",
+		Short: "Archive work and append an update",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			work, err := svc.UpdateWork(context.Background(), service.WorkUpdateRequest{
+				WorkID:         args[0],
+				ExecutionState: core.WorkExecutionStateArchived,
+				Message:        updateOpts.message,
+				CreatedBy:      "cli",
+			})
+			if err != nil {
+				return mapServiceError(err)
+			}
+			return renderWorkItem(cmd, root.jsonOutput, work)
+		},
+	}
+	archiveCmd.Flags().StringVar(&updateOpts.message, "message", "", "archive message")
 
 	retryCmd := &cobra.Command{
 		Use:   "retry <work-id>",
@@ -1499,6 +1529,7 @@ This guarantees every doc has a corresponding work item.`,
 				SupersedesAttestationID: attestOpts.supersedesAttestationID,
 				Metadata:                metadata,
 				CreatedBy:               "cli",
+				Nonce:                   attestOpts.nonce,
 			})
 			if err != nil {
 				return mapServiceError(err)
@@ -1518,6 +1549,7 @@ This guarantees every doc has a corresponding work item.`,
 	attestCmd.Flags().BoolVar(&attestOpts.blocking, "blocking", false, "mark this attestation as blocking evidence")
 	attestCmd.Flags().StringVar(&attestOpts.supersedesAttestationID, "supersedes", "", "prior attestation id this record supersedes")
 	attestCmd.Flags().StringVar(&attestOpts.metadata, "metadata", "", "JSON object with attestation metadata")
+	attestCmd.Flags().StringVar(&attestOpts.nonce, "nonce", "", "attestation nonce (generated post-job-completion, required for automated attestation)")
 	_ = attestCmd.MarkFlagRequired("result")
 
 	lockCmd := &cobra.Command{
@@ -1909,7 +1941,7 @@ This guarantees every doc has a corresponding work item.`,
 
 	edgeCmd.AddCommand(edgeAddCmd, edgeRmCmd, edgeLsCmd)
 
-	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd)
+	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, archiveCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd)
 	return cmd
 }
 
@@ -2239,7 +2271,7 @@ func newReconcileCommand(root *rootOptions) *cobra.Command {
 			if root.jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), map[string]any{
 					"reconciled_work_ids": ids,
-					"count":              len(ids),
+					"count":               len(ids),
 				})
 			}
 			if len(ids) == 0 {
@@ -2299,10 +2331,10 @@ func newDashboardCommand(root *rootOptions) *cobra.Command {
 			// Human-readable output
 			if len(supData) > 0 {
 				var sup struct {
-					PID     int    `json:"pid"`
-					Cycle   int    `json:"cycle"`
-					Uptime  string `json:"uptime"`
-					Ready   int    `json:"ready"`
+					PID      int    `json:"pid"`
+					Cycle    int    `json:"cycle"`
+					Uptime   string `json:"uptime"`
+					Ready    int    `json:"ready"`
 					InFlight []struct {
 						WorkID  string `json:"work_id"`
 						JobID   string `json:"job_id"`
@@ -2345,7 +2377,7 @@ func newDashboardCommand(root *rootOptions) *cobra.Command {
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "WORK: %d total", len(allWork))
-			for _, s := range []string{"ready", "claimed", "running", "blocked", "done", "completed", "failed"} {
+			for _, s := range []string{"ready", "claimed", "running", "blocked", "done", "completed", "failed", "archived"} {
 				if c, ok := states[s]; ok && c > 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), ", %d %s", c, s)
 				}

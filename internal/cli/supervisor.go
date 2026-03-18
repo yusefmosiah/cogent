@@ -298,7 +298,7 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 
 		// 0. Auto-init: if no active work on first cycle, bootstrap
 		if cycle == 1 {
-			readyWork, listErr := svc.ReadyWork(ctx, 1)
+			readyWork, listErr := svc.ReadyWork(ctx, 1, false)
 			if listErr == nil && len(readyWork) == 0 {
 				if !jsonOutput {
 					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: empty work graph, bootstrapping %s\n", cwd)
@@ -394,7 +394,7 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 		report.InFlight = inFlightCount
 
 		// 4. List ready work
-		readyItems, err := svc.ReadyWork(ctx, opts.maxConcurrent*2)
+		readyItems, err := svc.ReadyWork(ctx, opts.maxConcurrent*2, false)
 		if err != nil {
 			if !jsonOutput {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to list ready work: %v\n", err)
@@ -421,11 +421,11 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 				}
 
 				// Look up job history to inform rotation-based adapter selection.
-			var jobHistory []core.JobRecord
-			if workDetail, wErr := svc.Work(ctx, item.WorkID); wErr == nil {
-				jobHistory = workDetail.Jobs
-			}
-			adapter, model := pickAdapterModel(item, jobHistory, opts.defaultAdapter)
+				var jobHistory []core.JobRecord
+				if workDetail, wErr := svc.Work(ctx, item.WorkID); wErr == nil {
+					jobHistory = workDetail.Jobs
+				}
+				adapter, model := pickAdapterModel(item, jobHistory, opts.defaultAdapter)
 
 				if opts.dryRun {
 					report.Dispatched = append(report.Dispatched, dispatchEntry{
@@ -636,15 +636,14 @@ func isJobStalled(jobRawDir string, threshold time.Duration) bool {
 	return time.Since(newest) > threshold
 }
 
-
 type supervisorState struct {
-	PID       int                      `json:"pid"`
-	Cycle     int                      `json:"cycle"`
-	Timestamp string                   `json:"timestamp"`
-	Uptime    string                   `json:"uptime,omitempty"`
-	InFlight  []inFlightState          `json:"in_flight"`
-	Ready     int                      `json:"ready"`
-	Report    supervisorCycleReport    `json:"last_report"`
+	PID       int                   `json:"pid"`
+	Cycle     int                   `json:"cycle"`
+	Timestamp string                `json:"timestamp"`
+	Uptime    string                `json:"uptime,omitempty"`
+	InFlight  []inFlightState       `json:"in_flight"`
+	Ready     int                   `json:"ready"`
+	Report    supervisorCycleReport `json:"last_report"`
 }
 
 type inFlightState struct {
@@ -827,7 +826,7 @@ Record attestations (for test reports):
 Add notes (for guides, snapshots, findings):
   cagent work note-add <work-id> --type finding --text "Implementation guide at docs/theory/guides/adr-0014-implementation.md"
 
-Update state for implemented items:
+Mark implemented items as done (bootstrap only — normal workers must NOT call this):
   cagent work complete <work-id> --message "Implemented and operational per practice/decisions/"
 
 Create dependency edges between work items:
