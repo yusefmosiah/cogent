@@ -19,13 +19,14 @@ const (
 )
 
 // capabilityEnforcementMode reads CAGENT_CAPABILITY_ENFORCEMENT and returns the mode.
-// Defaults to enforce (Phase 1+). Set to "audit" explicitly for legacy/transitional use.
+// Defaults to audit so interactive operator commands work without a token.
+// Set to "enforce" explicitly when the supervisor issues tokens to workers.
 func capabilityEnforcementMode() core.CapabilityEnforcementMode {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvCapabilityEnforcement)))
-	if v == string(core.CapabilityEnforcementAudit) {
-		return core.CapabilityEnforcementAudit
+	if v == string(core.CapabilityEnforcementEnforce) {
+		return core.CapabilityEnforcementEnforce
 	}
-	return core.CapabilityEnforcementEnforce
+	return core.CapabilityEnforcementAudit
 }
 
 func allCapabilities() []string {
