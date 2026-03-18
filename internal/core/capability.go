@@ -398,6 +398,50 @@ func VerifyJSONSignature(v any, sig string, pubKey ed25519.PublicKey) bool {
 	return ed25519.Verify(pubKey, payload, sigBytes)
 }
 
+// AttestationSignable is the canonical payload signed for attestation records.
+// It excludes Signature, SignerPubkey, and Metadata (map types are non-deterministic
+// per ADR-0035 §Security Considerations).
+type AttestationSignable struct {
+	AttestationID           string  `json:"attestation_id"`
+	SubjectKind             string  `json:"subject_kind"`
+	SubjectID               string  `json:"subject_id"`
+	Result                  string  `json:"result"`
+	Summary                 string  `json:"summary,omitempty"`
+	ArtifactID              string  `json:"artifact_id,omitempty"`
+	JobID                   string  `json:"job_id,omitempty"`
+	SessionID               string  `json:"session_id,omitempty"`
+	Method                  string  `json:"method,omitempty"`
+	VerifierKind            string  `json:"verifier_kind,omitempty"`
+	VerifierIdentity        string  `json:"verifier_identity,omitempty"`
+	Confidence              float64 `json:"confidence,omitempty"`
+	Blocking                bool    `json:"blocking,omitempty"`
+	SupersedesAttestationID string  `json:"supersedes_attestation_id,omitempty"`
+	CreatedBy               string  `json:"created_by,omitempty"`
+	CreatedAt               string  `json:"created_at"`
+}
+
+// Signable returns the canonical signable payload for an attestation record.
+func (r *AttestationRecord) Signable() AttestationSignable {
+	return AttestationSignable{
+		AttestationID:           r.AttestationID,
+		SubjectKind:             r.SubjectKind,
+		SubjectID:               r.SubjectID,
+		Result:                  r.Result,
+		Summary:                 r.Summary,
+		ArtifactID:              r.ArtifactID,
+		JobID:                   r.JobID,
+		SessionID:               r.SessionID,
+		Method:                  r.Method,
+		VerifierKind:            r.VerifierKind,
+		VerifierIdentity:        r.VerifierIdentity,
+		Confidence:              r.Confidence,
+		Blocking:                r.Blocking,
+		SupersedesAttestationID: r.SupersedesAttestationID,
+		CreatedBy:               r.CreatedBy,
+		CreatedAt:               r.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
 // SweepStaleTokenFiles removes token files in stateDir/tokens/ older than maxAge.
 func SweepStaleTokenFiles(stateDir string, maxAge time.Duration) {
 	tokensDir := filepath.Join(stateDir, "tokens")

@@ -128,7 +128,7 @@ type supervisorOptions struct {
 	dryRun         bool
 }
 
-// inFlightJob tracks a dispatched job by its real cagent job ID, not a process PID.
+// inFlightJob tracks a dispatched job by its real cagent job ID.
 type inFlightJob struct {
 	workID       string
 	jobID        string // real cagent job_id from `run --json` output
@@ -136,9 +136,12 @@ type inFlightJob struct {
 	model        string // model used for this job (for attestation offset)
 	started      time.Time
 	leaseNext    time.Time // when to renew the lease
+	workerPID    int       // OS PID of the detached __run-job worker (0 if unknown)
 	worktreePath string    // absolute path to git worktree (empty if not using worktrees)
 	branchName   string    // git branch name for this job's worktree
 	tokenPath    string    // path to the issued capability token file
+	sshKeyPath   string    // path to the ephemeral SSH signing key (Phase 2)
+	agentEmail   string    // email identity in allowed_signers (Phase 2)
 }
 
 type supervisorCycleReport struct {
@@ -533,6 +536,13 @@ func isJobStalled(jobRawDir string, threshold time.Duration) bool {
 		return false // no files yet, job might just be starting
 	}
 	return time.Since(newest) > threshold
+}
+
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	return syscall.Kill(pid, 0) == nil
 }
 
 type supervisorState struct {

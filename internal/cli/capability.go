@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,13 +19,13 @@ const (
 )
 
 // capabilityEnforcementMode reads CAGENT_CAPABILITY_ENFORCEMENT and returns the mode.
-// Defaults to audit.
+// Defaults to enforce (Phase 1+). Set to "audit" explicitly for legacy/transitional use.
 func capabilityEnforcementMode() core.CapabilityEnforcementMode {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvCapabilityEnforcement)))
-	if v == string(core.CapabilityEnforcementEnforce) {
-		return core.CapabilityEnforcementEnforce
+	if v == string(core.CapabilityEnforcementAudit) {
+		return core.CapabilityEnforcementAudit
 	}
-	return core.CapabilityEnforcementAudit
+	return core.CapabilityEnforcementEnforce
 }
 
 func allCapabilities() []string {
@@ -55,6 +57,41 @@ func loadAgentToken() (*core.CapabilityToken, error) {
 		return nil, fmt.Errorf("parse agent credential file %s: %w", path, err)
 	}
 	return &cred.Token, nil
+}
+
+// loadAgentCredential reads the credential file at CAGENT_AGENT_TOKEN and returns
+// the full credential including the agent's Ed25519 private key. Used by the attest
+// command to sign attestation records (Phase 3).
+func loadAgentCredential() (*core.AgentCredential, ed25519.PrivateKey, error) {
+	path := strings.TrimSpace(os.Getenv(core.EnvAgentToken))
+	if path == "" {
+		return nil, nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read agent credential file %s: %w", path, err)
+	}
+	var cred core.AgentCredential
+	if err := json.Unmarshal(data, &cred); err != nil {
+		return nil, nil, fmt.Errorf("parse agent credential file %s: %w", path, err)
+	}
+	if cred.PrivateKey == "" {
+		return &cred, nil, nil
+	}
+	privBytes, err := base64.StdEncoding.DecodeString(cred.PrivateKey)
+	if err != nil {
+		return &cred, nil, fmt.Errorf("decode agent private key: %w", err)
+	}
+	// The stored key may be a seed (32 bytes) or full private key (64 bytes).
+	var privKey ed25519.PrivateKey
+	if len(privBytes) == ed25519.SeedSize {
+		privKey = ed25519.NewKeyFromSeed(privBytes)
+	} else if len(privBytes) == ed25519.PrivateKeySize {
+		privKey = ed25519.PrivateKey(privBytes)
+	} else {
+		return &cred, nil, fmt.Errorf("agent private key unexpected size: %d", len(privBytes))
+	}
+	return &cred, privKey, nil
 }
 
 // capabilityViolationEvent is the structured log event emitted for audit violations.

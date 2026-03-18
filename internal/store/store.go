@@ -1468,6 +1468,22 @@ func (s *Store) CreateAttestationRecord(ctx context.Context, rec core.Attestatio
 	return nil
 }
 
+// UpdateAttestationSignature sets the signature on an existing attestation record.
+func (s *Store) UpdateAttestationSignature(ctx context.Context, attestationID, signature string) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE attestation_records SET signature = ? WHERE attestation_id = ?`,
+		signature, attestationID,
+	)
+	if err != nil {
+		return fmt.Errorf("update attestation signature: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("attestation record %s not found", attestationID)
+	}
+	return nil
+}
+
 func (s *Store) ListAttestationRecords(ctx context.Context, subjectKind, subjectID string, limit int) ([]core.AttestationRecord, error) {
 	if limit <= 0 {
 		limit = 50

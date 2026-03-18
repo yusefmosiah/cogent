@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -156,6 +158,7 @@ func (s *Service) VerifyWork(ctx context.Context, workID string) (*WorkVerifyRes
 
 	sawSignatureData := false
 	sawMissingSignature := false
+	allSigsValid := true
 	for _, attestation := range attestations {
 		item := WorkVerifyAttestationResult{
 			AttestationID:   attestation.AttestationID,
@@ -166,18 +169,44 @@ func (s *Service) VerifyWork(ctx context.Context, workID string) (*WorkVerifyRes
 			SignatureStatus: "missing",
 			SignerStatus:    "missing",
 		}
-		if strings.TrimSpace(attestation.SignerPubkey) != "" {
+
+		hasPubkey := strings.TrimSpace(attestation.SignerPubkey) != ""
+		hasSig := strings.TrimSpace(attestation.Signature) != ""
+
+		if hasPubkey {
 			item.SignerStatus = "present"
 		}
-		if strings.TrimSpace(attestation.Signature) != "" {
+		if hasSig {
 			item.SignatureStatus = "present"
 		}
-		if item.SignerStatus == "present" || item.SignatureStatus == "present" {
+
+		if hasPubkey || hasSig {
 			sawSignatureData = true
 		}
-		if item.SignerStatus != "present" || item.SignatureStatus != "present" {
+
+		if !hasPubkey || !hasSig {
 			sawMissingSignature = true
 			report.Issues = append(report.Issues, fmt.Sprintf("attestation %s: signature fields incomplete", attestation.AttestationID))
+			allSigsValid = false
+		} else {
+			// Both pubkey and signature present — verify cryptographically.
+			signable := attestation.Signable()
+			pubKeyBytes, decErr := base64.StdEncoding.DecodeString(attestation.SignerPubkey)
+			if decErr != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+				item.SignatureStatus = "invalid"
+				item.MetadataStatus = "signer pubkey decode error"
+				report.Issues = append(report.Issues, fmt.Sprintf("attestation %s: invalid signer pubkey", attestation.AttestationID))
+				allSigsValid = false
+			} else {
+				pubKey := ed25519.PublicKey(pubKeyBytes)
+				if core.VerifyJSONSignature(signable, attestation.Signature, pubKey) {
+					item.SignatureStatus = "verified"
+				} else {
+					item.SignatureStatus = "invalid"
+					report.Issues = append(report.Issues, fmt.Sprintf("attestation %s: signature verification failed", attestation.AttestationID))
+					allSigsValid = false
+				}
+			}
 		}
 		report.Attestations = append(report.Attestations, item)
 	}
@@ -185,7 +214,9 @@ func (s *Service) VerifyWork(ctx context.Context, workID string) (*WorkVerifyRes
 	switch {
 	case report.Commit.Status == "invalid":
 		report.Verdict = "unverified"
-	case sawSignatureData && !sawMissingSignature && report.Commit.Status == "valid":
+	case sawSignatureData && !sawMissingSignature && allSigsValid && report.Commit.Status == "valid":
+		report.Verdict = "verified"
+	case sawSignatureData && allSigsValid && len(report.Issues) == 0:
 		report.Verdict = "verified"
 	case len(report.Issues) == 0:
 		report.Verdict = "legacy"

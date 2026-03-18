@@ -1148,7 +1148,7 @@ func runCagent(t *testing.T, binary, configPath string, args ...string) string {
 	t.Helper()
 
 	cmd := exec.Command(binary, append([]string{"--config", configPath}, args...)...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "CAGENT_CAPABILITY_ENFORCEMENT=audit")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run cagent %v: %v\n%s", args, err, output)
@@ -1160,7 +1160,7 @@ func runCagentExpectError(t *testing.T, binary, configPath string, args ...strin
 	t.Helper()
 
 	cmd := exec.Command(binary, append([]string{"--config", configPath}, args...)...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "CAGENT_CAPABILITY_ENFORCEMENT=audit")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected cagent command to fail: %v\n%s", args, output)

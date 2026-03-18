@@ -232,3 +232,99 @@ func TestCapabilitiesForRole(t *testing.T) {
 		t.Fatalf("unknown role caps = %v, want nil", caps)
 	}
 }
+
+func TestAttestationSignable(t *testing.T) {
+	now := time.Now().UTC()
+	rec := AttestationRecord{
+		AttestationID: "att_001",
+		SubjectKind:   "work",
+		SubjectID:     "work_01ABC",
+		Result:        "pass",
+		Summary:       "all checks green",
+		JobID:         "job_01XYZ",
+		Method:        "automated",
+		CreatedBy:     "agent-worker",
+		CreatedAt:     now,
+	}
+
+	sig := rec.Signable()
+
+	if sig.AttestationID != rec.AttestationID {
+		t.Fatalf("AttestationID = %q, want %q", sig.AttestationID, rec.AttestationID)
+	}
+	if sig.SubjectKind != rec.SubjectKind {
+		t.Fatalf("SubjectKind = %q, want %q", sig.SubjectKind, rec.SubjectKind)
+	}
+	if sig.SubjectID != rec.SubjectID {
+		t.Fatalf("SubjectID = %q, want %q", sig.SubjectID, rec.SubjectID)
+	}
+	if sig.Result != rec.Result {
+		t.Fatalf("Result = %q, want %q", sig.Result, rec.Result)
+	}
+	if sig.Summary != rec.Summary {
+		t.Fatalf("Summary = %q, want %q", sig.Summary, rec.Summary)
+	}
+	if sig.JobID != rec.JobID {
+		t.Fatalf("JobID = %q, want %q", sig.JobID, rec.JobID)
+	}
+	if sig.Method != rec.Method {
+		t.Fatalf("Method = %q, want %q", sig.Method, rec.Method)
+	}
+	if sig.CreatedBy != rec.CreatedBy {
+		t.Fatalf("CreatedBy = %q, want %q", sig.CreatedBy, rec.CreatedBy)
+	}
+
+	// CreatedAt must be RFC3339 formatted.
+	parsed, err := time.Parse(time.RFC3339, sig.CreatedAt)
+	if err != nil {
+		t.Fatalf("CreatedAt %q is not valid RFC3339: %v", sig.CreatedAt, err)
+	}
+	if !parsed.Equal(now.Truncate(time.Second)) {
+		t.Fatalf("CreatedAt parsed = %v, want %v", parsed, now.Truncate(time.Second))
+	}
+}
+
+func TestSignAndVerifyAttestationRecord(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	rec := AttestationRecord{
+		AttestationID: "att_002",
+		SubjectKind:   "work",
+		SubjectID:     "work_02DEF",
+		Result:        "fail",
+		Summary:       "lint errors found",
+		CreatedAt:     time.Now().UTC(),
+	}
+
+	signable := rec.Signable()
+	sig, err := SignJSON(signable, priv)
+	if err != nil {
+		t.Fatalf("SignJSON: %v", err)
+	}
+	if sig == "" {
+		t.Fatal("SignJSON returned empty signature")
+	}
+
+	if !VerifyJSONSignature(signable, sig, pub) {
+		t.Fatal("VerifyJSONSignature failed for valid signature")
+	}
+
+	// Tamper with signable and verify it fails.
+	tampered := signable
+	tampered.Result = "pass"
+	if VerifyJSONSignature(tampered, sig, pub) {
+		t.Fatal("VerifyJSONSignature should fail for tampered payload")
+	}
+
+	// Wrong key should also fail.
+	otherPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
+	if VerifyJSONSignature(signable, sig, otherPub) {
+		t.Fatal("VerifyJSONSignature should fail for wrong public key")
+	}
+}

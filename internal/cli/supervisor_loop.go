@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,6 +119,16 @@ func (l *supervisorLoop) runOneCycle(ctx context.Context, svc *service.Service) 
 			completed = append(completed, completedJob{workID, flight, jobState})
 			delete(l.inFlight, workID)
 
+		case !isProcessAlive(flight.workerPID):
+			_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+				WorkID:         workID,
+				ExecutionState: core.WorkExecutionStateFailed,
+				Message:        fmt.Sprintf("supervisor: job %s worker process (pid %d) exited unexpectedly", flight.jobID, flight.workerPID),
+				CreatedBy:      "supervisor",
+			})
+			completed = append(completed, completedJob{workID, flight, "process_dead"})
+			delete(l.inFlight, workID)
+
 		case isJobStalled(filepath.Join(l.cwd, ".cagent", "raw", "stdout", flight.jobID), 10*time.Minute):
 			// Mark stalled work as failed so it can be retried.
 			_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
@@ -149,6 +160,10 @@ func (l *supervisorLoop) runOneCycle(ctx context.Context, svc *service.Service) 
 			Status: c.state,
 		})
 		removeCredentialFile(c.flight.tokenPath)
+		removeSSHKeyFile(c.flight.sshKeyPath)
+		if l.ca != nil && c.flight.agentEmail != "" {
+			l.ca.removeAllowedSigner(c.flight.agentEmail)
+		}
 		if l.onJobCompleted != nil {
 			l.onJobCompleted(c.workID, c.flight.jobID, c.state)
 		}
@@ -225,37 +240,62 @@ func (l *supervisorLoop) runOneCycle(ctx context.Context, svc *service.Service) 
 		briefingJSON, _ := json.Marshal(briefing)
 
 		var extraEnv []string
-		var tokenPath string
+		var cred *dispatchCredential
 		if l.ca != nil {
-			tokenPath = l.ca.issueAndWriteCredential(
-				filepath.Join(l.cwd, ".cagent"), "",
-				claimed.WorkID, "worker", adapter, model, 0,
+			cred = l.ca.issueAndWriteCredential(
+				filepath.Join(l.cwd, ".cagent"),
+				claimed.WorkID, "worker", adapter, model,
 			)
-			if tokenPath != "" {
-				extraEnv = []string{core.EnvAgentToken + "=" + tokenPath}
+			if cred != nil && cred.tokenPath != "" {
+				extraEnv = append(extraEnv, core.EnvAgentToken+"="+cred.tokenPath)
+				extraEnv = append(extraEnv, cred.gitEnv...)
 			}
 		}
 
 		jobID, spawnErr := spawnRun(l.selfBin, l.configPath, adapter, model, l.cwd, string(briefingJSON), extraEnv)
 		if spawnErr != nil {
-			removeCredentialFile(tokenPath)
+			if cred != nil {
+				removeCredentialFile(cred.tokenPath)
+				removeSSHKeyFile(cred.sshKeyPath)
+			}
 			_, _ = svc.ReleaseWork(ctx, service.WorkReleaseRequest{WorkID: claimed.WorkID, Claimant: "supervisor"})
 			continue
+		}
+
+		workerPID := 0
+		if runtimeRec, rtErr := svc.GetJobRuntime(ctx, jobID); rtErr == nil && runtimeRec.SupervisorPID > 0 {
+			workerPID = runtimeRec.SupervisorPID
 		}
 
 		if l.budget != nil {
 			l.budget.recordRun(adapter, model)
 		}
 
+		var tokenPath, sshKeyPath, agentEmail string
+		if cred != nil {
+			tokenPath = cred.tokenPath
+			sshKeyPath = cred.sshKeyPath
+			// Extract email from gitEnv for allowed_signers cleanup.
+			for _, env := range cred.gitEnv {
+				if strings.HasPrefix(env, "GIT_COMMITTER_EMAIL=") {
+					agentEmail = strings.TrimPrefix(env, "GIT_COMMITTER_EMAIL=")
+					break
+				}
+			}
+		}
+
 		l.mu.Lock()
 		l.inFlight[claimed.WorkID] = &inFlightJob{
-			workID:    claimed.WorkID,
-			jobID:     jobID,
-			adapter:   adapter,
-			model:     model,
-			started:   time.Now(),
-			leaseNext: time.Now().Add(l.leaseRenewInterval),
-			tokenPath: tokenPath,
+			workID:     claimed.WorkID,
+			jobID:      jobID,
+			adapter:    adapter,
+			model:      model,
+			started:    time.Now(),
+			leaseNext:  time.Now().Add(l.leaseRenewInterval),
+			workerPID:  workerPID,
+			tokenPath:  tokenPath,
+			sshKeyPath: sshKeyPath,
+			agentEmail: agentEmail,
 		}
 		l.mu.Unlock()
 
@@ -288,6 +328,10 @@ func (l *supervisorLoop) cancelInFlight(ctx context.Context, svc *service.Servic
 			CreatedBy:      "supervisor",
 		})
 		removeCredentialFile(flight.tokenPath)
+		removeSSHKeyFile(flight.sshKeyPath)
+		if l.ca != nil && flight.agentEmail != "" {
+			l.ca.removeAllowedSigner(flight.agentEmail)
+		}
 	}
 }
 

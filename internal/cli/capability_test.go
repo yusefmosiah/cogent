@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,8 +13,18 @@ import (
 	"github.com/yusefmosiah/cagent/internal/core"
 )
 
-func TestRequireCapabilitiesDefaultsToAudit(t *testing.T) {
+func TestRequireCapabilitiesDefaultsToEnforce(t *testing.T) {
 	t.Setenv(EnvCapabilityEnforcement, "")
+	t.Setenv(core.EnvAgentToken, "")
+
+	// Phase 1+: default is enforce — missing token is an error.
+	if err := requireCapabilities(core.CapWorkUpdate); err == nil {
+		t.Fatal("requireCapabilities should return error in enforce mode without a token")
+	}
+}
+
+func TestRequireCapabilitiesAuditModeAllowsMissingToken(t *testing.T) {
+	t.Setenv(EnvCapabilityEnforcement, string(core.CapabilityEnforcementAudit))
 	t.Setenv(core.EnvAgentToken, "")
 
 	if err := requireCapabilities(core.CapWorkUpdate); err != nil {
@@ -124,5 +136,100 @@ func TestCapabilityViolationEventsAreJSONFriendly(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"kind":"capability_violation"`) {
 		t.Fatalf("json = %s, want capability_violation", data)
+	}
+}
+
+func TestLoadAgentCredentialWithPrivateKey(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cred.json")
+	cred := core.AgentCredential{
+		Token: core.CapabilityToken{
+			Version:      1,
+			Subject:      core.TokenSubject{WorkID: "w1", Role: "worker"},
+			Capabilities: []string{core.CapWorkUpdate},
+			IssuedAt:     time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			IssuerPubkey: "issuer",
+			AgentPubkey:  base64.StdEncoding.EncodeToString(pub),
+			Signature:    "sig",
+		},
+		PrivateKey: base64.StdEncoding.EncodeToString(priv),
+	}
+	data, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv(core.EnvAgentToken, path)
+
+	loaded, loadedPriv, err := loadAgentCredential()
+	if err != nil {
+		t.Fatalf("loadAgentCredential: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("loadAgentCredential returned nil credential")
+	}
+	if loadedPriv == nil {
+		t.Fatal("loadAgentCredential returned nil private key")
+	}
+	if !loadedPriv.Public().(ed25519.PublicKey).Equal(pub) {
+		t.Fatal("loaded private key does not match original public key")
+	}
+	if loaded.Token.Subject.WorkID != "w1" {
+		t.Fatalf("WorkID = %q, want w1", loaded.Token.Subject.WorkID)
+	}
+}
+
+func TestCheckCapabilityEnforceModeWithValidToken(t *testing.T) {
+	// Create a real signed token so checkCapability can load it.
+	dir := t.TempDir()
+	ca, err := core.EnsureCA(dir)
+	if err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+	agentPub, agentPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	_ = agentPriv
+
+	subject := core.TokenSubject{JobID: "j1", WorkID: "w1", Role: "worker"}
+	token, err := core.IssueToken(ca, agentPub, subject, []string{core.CapWorkUpdate, core.CapWorkNoteAdd}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	cred := core.AgentCredential{
+		Token:      *token,
+		PrivateKey: base64.StdEncoding.EncodeToString(agentPriv),
+	}
+	credData, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	credPath := filepath.Join(dir, "cred.json")
+	if err := os.WriteFile(credPath, credData, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv(core.EnvAgentToken, credPath)
+	t.Setenv(EnvCapabilityEnforcement, string(core.CapabilityEnforcementEnforce))
+
+	// Granted capability should succeed.
+	if err := checkCapability(core.CapWorkUpdate); err != nil {
+		t.Fatalf("checkCapability(work:update) should succeed: %v", err)
+	}
+
+	// Ungranted capability should fail in enforce mode.
+	if err := checkCapability(core.CapWorkAttest); err == nil {
+		t.Fatal("checkCapability(work:attest) should fail for worker token in enforce mode")
 	}
 }

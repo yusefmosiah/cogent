@@ -322,6 +322,7 @@ type WorkAttestRequest struct {
 	Metadata                map[string]any
 	CreatedBy               string
 	Nonce                   string // required for automated attestation — generated post-job-completion
+	SignerPubkey            string // base64 Ed25519 public key of the attestor agent (Phase 3)
 }
 
 type WorkShowResult struct {
@@ -1109,6 +1110,10 @@ func (s *Service) Status(ctx context.Context, jobID string) (*StatusResult, erro
 		VendorCost:     vendorCost,
 		EstimatedCost:  estimatedCost,
 	}, nil
+}
+
+func (s *Service) GetJobRuntime(ctx context.Context, jobID string) (core.JobRuntimeRecord, error) {
+	return s.store.GetJobRuntime(ctx, jobID)
 }
 
 func (s *Service) WaitStatus(ctx context.Context, jobID string, interval, timeout time.Duration) (*StatusResult, error) {
@@ -2047,6 +2052,7 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 		Confidence:              req.Confidence,
 		Blocking:                req.Blocking,
 		SupersedesAttestationID: strings.TrimSpace(req.SupersedesAttestationID),
+		SignerPubkey:            strings.TrimSpace(req.SignerPubkey),
 		Metadata:                metadata,
 		CreatedBy:               req.CreatedBy,
 		CreatedAt:               now,
@@ -2135,6 +2141,11 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 		return nil, nil, err
 	}
 	return &record, &work, nil
+}
+
+// SignAttestationRecord updates an attestation record with a cryptographic signature.
+func (s *Service) SignAttestationRecord(ctx context.Context, attestationID, signature string) error {
+	return s.store.UpdateAttestationSignature(ctx, attestationID, signature)
 }
 
 func (s *Service) AddWorkNote(ctx context.Context, req WorkNoteRequest) (*core.WorkNoteRecord, error) {

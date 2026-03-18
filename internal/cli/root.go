@@ -1496,6 +1496,14 @@ This guarantees every doc has a corresponding work item.`,
 			if err != nil {
 				return exitf(2, "invalid --metadata JSON: %v", err)
 			}
+
+			// Phase 3: load agent credential for attestation signing.
+			var signerPubkey string
+			cred, agentPrivKey, credErr := loadAgentCredential()
+			if credErr == nil && cred != nil {
+				signerPubkey = cred.Token.AgentPubkey
+			}
+
 			record, work, err := svc.AttestWork(context.Background(), service.WorkAttestRequest{
 				WorkID:                  args[0],
 				Result:                  attestOpts.result,
@@ -1512,10 +1520,22 @@ This guarantees every doc has a corresponding work item.`,
 				Metadata:                metadata,
 				CreatedBy:               "cli",
 				Nonce:                   attestOpts.nonce,
+				SignerPubkey:            signerPubkey,
 			})
 			if err != nil {
 				return mapServiceError(err)
 			}
+
+			// Phase 3: sign the attestation record with the agent's private key.
+			if agentPrivKey != nil && record != nil {
+				signable := record.Signable()
+				sig, signErr := core.SignJSON(signable, agentPrivKey)
+				if signErr == nil {
+					_ = svc.SignAttestationRecord(context.Background(), record.AttestationID, sig)
+					record.Signature = sig
+				}
+			}
+
 			return renderAttestation(cmd, root.jsonOutput, record, work)
 		},
 	}
