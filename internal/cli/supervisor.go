@@ -346,8 +346,14 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 			}
 		}
 
-		// 1. Reconcile expired leases
-		if _, reconcileErr := svc.ReconcileOnStartup(ctx); reconcileErr != nil {
+		// 1. Reconcile: full reset on startup, lease expiry every cycle.
+		var reconcileErr error
+		if cycle == 1 {
+			_, reconcileErr = svc.ReconcileOnStartup(ctx)
+		} else {
+			_, reconcileErr = svc.ReconcileExpiredLeases(ctx)
+		}
+		if reconcileErr != nil {
 			if !jsonOutput {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: reconcile: %v\n", reconcileErr)
 			}

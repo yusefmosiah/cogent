@@ -1450,7 +1450,9 @@ func (s *Service) HydrateWork(ctx context.Context, req WorkHydrateRequest) (Work
 	}, nil
 }
 
-func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
+// ReconcileExpiredLeases releases work items whose lease has expired.
+// Safe to call every supervisor cycle.
+func (s *Service) ReconcileExpiredLeases(ctx context.Context) ([]string, error) {
 	released, err := s.store.ReleaseExpiredWorkClaims(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile expired claims: %w", err)
@@ -1463,19 +1465,22 @@ func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
 			UpdateID:       core.GenerateID("wup"),
 			WorkID:         item.WorkID,
 			ExecutionState: core.WorkExecutionStateReady,
-			Message:        "Lease expired — released by startup reconciliation",
+			Message:        "Lease expired — released by reconciliation",
 			CreatedBy:      "reconciler",
 			CreatedAt:      now,
 		})
-		_ = s.store.CreateWorkNote(ctx, core.WorkNoteRecord{
-			NoteID:    core.GenerateID("wnote"),
-			WorkID:    item.WorkID,
-			NoteType:  "reconciliation",
-			Body:      "Lease expired — released by startup reconciliation",
-			CreatedBy: "reconciler",
-			CreatedAt: now,
-		})
 	}
+	return ids, nil
+}
+
+// ReconcileOnStartup does a full reset: expires leases, fails orphan jobs,
+// and releases stale claims. Call ONLY on supervisor startup (cycle 1).
+func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
+	ids, err := s.ReconcileExpiredLeases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
 
 	// Fail orphan jobs: any job still marked "running" has no live supervisor
 	// watching it. The invariant is that all active runs must be tracked in the

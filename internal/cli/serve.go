@@ -372,8 +372,8 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Reconcile expired leases
-			_, _ = svc.ReconcileOnStartup(ctx)
+			// Reconcile expired leases (safe every tick)
+			_, _ = svc.ReconcileExpiredLeases(ctx)
 
 			// Check for stalled jobs and completed jobs needing verification
 			rawDir := filepath.Join(cwd, ".cagent", "raw", "stdout")
@@ -1436,8 +1436,12 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 			}
 		}
 
-		// Reconcile
-		_, _ = svc.ReconcileOnStartup(ctx)
+		// Reconcile: full reset on startup, lease expiry every cycle.
+		if cycle == 1 {
+			_, _ = svc.ReconcileOnStartup(ctx)
+		} else {
+			_, _ = svc.ReconcileExpiredLeases(ctx)
+		}
 
 		// Check in-flight: collect completed/failed jobs, then handle outside the lock
 		mu.Lock()
