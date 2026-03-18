@@ -916,6 +916,81 @@ func TestWorkClaimLifecycleCommands(t *testing.T) {
 	}
 }
 
+func TestWorkArchiveCommands(t *testing.T) {
+	binary := buildCagentBinary(t)
+	configPath := writeFakeCodexConfig(t)
+
+	workOutput := runCagent(t, binary, configPath, "--json", "work", "create", "--title", "Archive me", "--objective", "Validate archived filtering")
+	var work cliWorkItem
+	if err := json.Unmarshal([]byte(workOutput), &work); err != nil {
+		t.Fatalf("unmarshal work create: %v\n%s", err, workOutput)
+	}
+
+	archiveOutput := runCagent(t, binary, configPath, "--json", "work", "archive", work.WorkID, "--message", "created by mistake")
+	if err := json.Unmarshal([]byte(archiveOutput), &work); err != nil {
+		t.Fatalf("unmarshal work archive: %v\n%s", err, archiveOutput)
+	}
+	if work.ExecutionState != "archived" {
+		t.Fatalf("expected archived execution state, got %q", work.ExecutionState)
+	}
+
+	listOutput := runCagent(t, binary, configPath, "--json", "work", "list")
+	var listed []cliWorkItem
+	if err := json.Unmarshal([]byte(listOutput), &listed); err != nil {
+		t.Fatalf("unmarshal work list: %v\n%s", err, listOutput)
+	}
+	for _, item := range listed {
+		if item.WorkID == work.WorkID {
+			t.Fatalf("archived work should not appear in default work list")
+		}
+	}
+
+	listOutput = runCagent(t, binary, configPath, "--json", "work", "list", "--include-archived")
+	if err := json.Unmarshal([]byte(listOutput), &listed); err != nil {
+		t.Fatalf("unmarshal archived work list: %v\n%s", err, listOutput)
+	}
+	foundArchived := false
+	for _, item := range listed {
+		if item.WorkID == work.WorkID {
+			foundArchived = true
+			if item.ExecutionState != "archived" {
+				t.Fatalf("expected archived work state in list, got %+v", item)
+			}
+		}
+	}
+	if !foundArchived {
+		t.Fatalf("expected archived work in include-archived list, got %+v", listed)
+	}
+
+	readyOutput := runCagent(t, binary, configPath, "--json", "work", "ready")
+	var ready []cliWorkItem
+	if err := json.Unmarshal([]byte(readyOutput), &ready); err != nil {
+		t.Fatalf("unmarshal ready work: %v\n%s", err, readyOutput)
+	}
+	for _, item := range ready {
+		if item.WorkID == work.WorkID {
+			t.Fatalf("archived work should not appear in default ready list")
+		}
+	}
+
+	readyOutput = runCagent(t, binary, configPath, "--json", "work", "ready", "--include-archived")
+	if err := json.Unmarshal([]byte(readyOutput), &ready); err != nil {
+		t.Fatalf("unmarshal archived ready work: %v\n%s", err, readyOutput)
+	}
+	foundArchived = false
+	for _, item := range ready {
+		if item.WorkID == work.WorkID {
+			foundArchived = true
+			if item.ExecutionState != "archived" {
+				t.Fatalf("expected archived work state in ready query, got %+v", item)
+			}
+		}
+	}
+	if !foundArchived {
+		t.Fatalf("expected archived work in include-archived ready query, got %+v", ready)
+	}
+}
+
 func buildCagentBinary(t *testing.T) string {
 	t.Helper()
 

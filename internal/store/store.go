@@ -22,9 +22,9 @@ var (
 )
 
 type Store struct {
-	db        *sql.DB
-	path      string
-	privateDB *sql.DB
+	db          *sql.DB
+	path        string
+	privateDB   *sql.DB
 	privatePath string
 }
 
@@ -613,7 +613,7 @@ func (s *Store) GetWorkItem(ctx context.Context, workID string) (core.WorkItemRe
 	return scanWorkItem(row)
 }
 
-func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionState, approvalState string) ([]core.WorkItemRecord, error) {
+func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionState, approvalState string, includeArchived bool) ([]core.WorkItemRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -633,6 +633,9 @@ func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionSta
 	if approvalState != "" {
 		clauses = append(clauses, "approval_state = ?")
 		args = append(args, approvalState)
+	}
+	if !includeArchived {
+		clauses = append(clauses, "execution_state <> 'archived'")
 	}
 
 	query := `SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
@@ -667,21 +670,47 @@ func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionSta
 	return items, nil
 }
 
-func (s *Store) ListReadyWork(ctx context.Context, limit int) ([]core.WorkItemRecord, error) {
+func (s *Store) ListReadyWork(ctx context.Context, limit int, includeArchived bool) ([]core.WorkItemRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	rows, err := s.db.QueryContext(
-		ctx,
-		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
-		        wi.priority, wi.required_capabilities_json, wi.required_model_traits_json,
-		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
-		        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid,
-		        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.created_at, wi.updated_at
-		   FROM work_items wi
-		  WHERE (
+	queryWork := func(where string, args ...any) ([]core.WorkItemRecord, error) {
+		rows, err := s.db.QueryContext(
+			ctx,
+			`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
+			        wi.priority, wi.required_capabilities_json, wi.required_model_traits_json,
+			        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
+			        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid,
+			        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.created_at, wi.updated_at
+			   FROM work_items wi
+			  WHERE `+where+`
+			  ORDER BY wi.priority DESC, wi.updated_at DESC
+			  LIMIT ?`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("query ready work: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		var items []core.WorkItemRecord
+		for rows.Next() {
+			rec, err := scanWorkItem(rows)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, rec)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate ready work: %w", err)
+		}
+		return items, nil
+	}
+
+	readyItems, err := queryWork(
+		`(
 		        wi.execution_state = 'ready'
 		        OR (
 		            wi.execution_state = 'claimed'
@@ -712,30 +741,24 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int) ([]core.WorkItemRe
 		         WHERE we.to_work_id = wi.work_id
 		           AND we.edge_type = 'supersedes'
 		           AND newer.execution_state NOT IN ('failed', 'cancelled')
-		    )
-		  ORDER BY wi.priority DESC, wi.updated_at DESC
-		  LIMIT ?`,
+		    )`,
 		now,
 		now,
 		limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query ready work: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	if !includeArchived || len(readyItems) >= limit {
+		return readyItems, nil
+	}
 
-	var items []core.WorkItemRecord
-	for rows.Next() {
-		rec, err := scanWorkItem(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, rec)
+	archivedItems, err := queryWork(`wi.execution_state = 'archived'`, limit-len(readyItems))
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate ready work: %w", err)
-	}
-	return items, nil
+
+	return append(readyItems, archivedItems...), nil
 }
 
 func (s *Store) ClaimWorkItem(ctx context.Context, workID, claimant string, leaseUntil time.Time) (core.WorkItemRecord, error) {
@@ -751,7 +774,7 @@ func (s *Store) ClaimWorkItem(ctx context.Context, workID, claimant string, leas
 		        END,
 		        updated_at = ?
 		  WHERE work_id = ?
-		    AND execution_state NOT IN ('done', 'failed', 'cancelled')
+		    AND execution_state NOT IN ('done', 'failed', 'cancelled', 'archived')
 		    AND lock_state <> 'human_locked'
 		    AND (
 		        claimed_by IS NULL
@@ -780,7 +803,8 @@ func (s *Store) ClaimWorkItem(ctx context.Context, workID, claimant string, leas
 		}
 		if current.ExecutionState == core.WorkExecutionStateDone ||
 			current.ExecutionState == core.WorkExecutionStateFailed ||
-			current.ExecutionState == core.WorkExecutionStateCancelled {
+			current.ExecutionState == core.WorkExecutionStateCancelled ||
+			current.ExecutionState == core.WorkExecutionStateArchived {
 			return core.WorkItemRecord{}, ErrBusy
 		}
 		if current.ClaimedBy != "" && current.ClaimedBy != claimant {

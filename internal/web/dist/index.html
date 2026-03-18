@@ -13,7 +13,17 @@
   #top .focus-label { color: #c4a060; }
   #top button { background: none; border: 1px solid #333; color: #888; padding: 2px 10px; border-radius: 10px; cursor: pointer; font-family: inherit; font-size: 11px; }
   #top button:hover { border-color: #666; color: #ccc; }
+  #top button.view-btn-active { border-color: #50b888; color: #50b888; }
   #top .spacer { flex: 1; }
+  body.runs-mode #canvas-wrap { display: none; }
+  body.runs-mode #sidebar { flex: 0 0 360px; }
+  body.runs-mode #detail-panel { flex: 1; display: block; }
+  body.runs-mode #bottom { display: none !important; }
+  body.runs-mode #btn-dag-view,
+  body.runs-mode #btn-hyp-view,
+  body.runs-mode #btn-diff,
+  body.runs-mode #btn-bash { display: none; }
+  body.runs-mode #btn-runs-view { border-color: #50b888; color: #50b888; }
 
   #main { flex: 1; display: flex; overflow: hidden; }
 
@@ -53,6 +63,44 @@
   #sidebar .sidebar-item .item-kind {
     font-size: 9px; color: #444; text-transform: uppercase;
     flex-shrink: 0;
+  }
+  #sidebar .run-item {
+    margin: 8px 10px;
+    padding: 10px 12px;
+    border: 1px solid #1b1b20;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.02);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  }
+  #sidebar .run-item:hover { border-color: #333; background: rgba(255,255,255,0.04); transform: translateY(-1px); }
+  #sidebar .run-item.active { border-color: #50b888; background: rgba(80,184,136,0.07); }
+  #sidebar .run-item .run-title {
+    color: #e0d8d0;
+    font-size: 12px;
+    line-height: 1.3;
+    margin-bottom: 4px;
+    font-weight: 500;
+  }
+  #sidebar .run-item .run-subtitle {
+    color: #777;
+    font-size: 10px;
+    font-family: 'SF Mono', monospace;
+    margin-bottom: 6px;
+  }
+  #sidebar .run-item .run-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    color: #777;
+    font-size: 10px;
+    font-family: 'SF Mono', monospace;
+    line-height: 1.4;
+  }
+  #sidebar .run-item .run-meta .state {
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
   }
   #sidebar-toggle {
     display: none;
@@ -191,7 +239,7 @@
     }
   }
 </style>
-  <script type="module" crossorigin src="/assets/index-F8MERw0_.js"></script>
+  <script type="module" crossorigin src="/assets/index-CFgdJicw.js"></script>
 </head>
 <body>
 <div id="loading">loading work graph...</div>
@@ -200,6 +248,9 @@
   <span class="stats" id="stats"></span>
   <span class="focus-label" id="focus-label"></span>
   <span class="spacer"></span>
+  <button id="btn-dag-view" class="view-btn-active">dag</button>
+  <button id="btn-hyp-view">graph</button>
+  <button id="btn-runs-view">runs</button>
   <button id="btn-diff" style="font-size:11px;color:#50b888">diff</button>
   <button id="btn-bash" style="font-size:11px;color:#c4a060">bash log</button>
   <button id="btn-back" style="display:none">&larr; overview</button>
@@ -226,7 +277,7 @@
   <button class="filter-btn" data-filter="blocked"><span class="dot" style="background:#d06060"></span>blocked <span class="count" id="count-blocked"></span></button>
   <button class="filter-btn" data-filter="done"><span class="dot" style="background:#408868"></span>done <span class="count" id="count-done"></span></button>
   <button class="filter-btn" data-filter="failed"><span class="dot" style="background:#803030"></span>failed <span class="count" id="count-failed"></span></button>
-  <span style="margin-left:auto;color:#444">click to focus &middot; esc to ascend</span>
+  <span style="margin-left:auto;color:#444">dag: click to select &middot; scroll to zoom &middot; drag to pan &middot; graph: click to focus &middot; runs: click an entry to open</span>
 </div>
 </body>
 </html>

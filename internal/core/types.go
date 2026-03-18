@@ -294,6 +294,7 @@ const (
 	WorkExecutionStateDone       WorkExecutionState = "done"
 	WorkExecutionStateFailed     WorkExecutionState = "failed"
 	WorkExecutionStateCancelled  WorkExecutionState = "cancelled"
+	WorkExecutionStateArchived   WorkExecutionState = "archived"
 )
 
 func (s WorkExecutionState) Terminal() bool {

@@ -1023,7 +1023,7 @@ func TestReadyWorkUsesCatalogModelTraitsAndModelPreferences(t *testing.T) {
 		t.Fatalf("CreateWork impossible returned error: %v", err)
 	}
 
-	items, err := svc.ReadyWork(context.Background(), 20)
+	items, err := svc.ReadyWork(context.Background(), 20, false)
 	if err != nil {
 		t.Fatalf("ReadyWork returned error: %v", err)
 	}

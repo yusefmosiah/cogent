@@ -107,6 +107,32 @@ async function loadDetail(workId) {
   }
 }
 
+async function loadRuns() {
+  try {
+    const res = await fetch("/api/runs?limit=80", { signal: AbortSignal.timeout(4000) });
+    if (res.ok) {
+      const raw = await res.json();
+      return Array.isArray(raw) ? raw : (raw.items || raw.runs || []);
+    }
+  } catch (e) { /* optional */ }
+  return [];
+}
+
+async function loadRunDetail(jobId) {
+  const cached = runCache[jobId];
+  if (cached && Date.now() - cached.fetchedAt < 30000) return cached.data;
+
+  try {
+    const res = await fetch(`/api/runs/${jobId}`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    runCache[jobId] = { data, fetchedAt: Date.now() };
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ── Poincaré Disk Math ──────────────────────────────────────
 
 function dot(a, b) { return a[0]*b[0] + a[1]*b[1]; }
@@ -363,6 +389,9 @@ const COL = {ready:"#c4a060",claimed:"#50b888",in_progress:"#4db884",blocked:"#d
 let W = [], byId = {}, BLOCKS = [], nodes = {};
 let focusPoint = [0, 0], focusTarget = [0, 0], focusId = null, hoverId = null;
 let activeFilter = "all"; // "all", "ready", "active", "blocked", "done", "failed"
+let appMode = "graph"; // "graph" | "runs"
+let runItems = [], runById = {}, currentRunId = null;
+let runCache = {}; // job_id → { data, fetchedAt }
 
 // ── View Mode ────────────────────────────────────────────────
 let viewMode = "dag"; // "dag" | "hyperbolic"
@@ -658,6 +687,87 @@ function setFocus(id) {
   updateUI();
 }
 
+function setAppMode(mode) {
+  appMode = mode;
+  const body = document.body;
+  const runsMode = appMode === "runs";
+  body.classList.toggle("runs-mode", runsMode);
+
+  const buttons = ["btn-dag-view", "btn-hyp-view", "btn-diff", "btn-bash"];
+  buttons.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = runsMode ? "none" : "";
+  });
+  const runsBtn = document.getElementById("btn-runs-view");
+  if (runsBtn) runsBtn.classList.toggle("view-btn-active", runsMode);
+  const dagBtn = document.getElementById("btn-dag-view");
+  const hypBtn = document.getElementById("btn-hyp-view");
+  if (dagBtn) dagBtn.classList.toggle("view-btn-active", !runsMode && viewMode === "dag");
+  if (hypBtn) hypBtn.classList.toggle("view-btn-active", !runsMode && viewMode === "hyperbolic");
+  document.getElementById("bottom").style.display = runsMode ? "none" : "flex";
+  document.getElementById("btn-back").textContent = runsMode ? "← list" : "← overview";
+
+  if (runsMode) {
+    focusId = null;
+    focusTarget = [0, 0];
+    currentDetail = null;
+    const panel = document.getElementById("detail-panel");
+    const canvasWrap = document.getElementById("canvas-wrap");
+    panel.classList.add("open");
+    canvasWrap.classList.add("has-detail");
+    resize();
+    renderRunSidebar();
+    updateRunStats();
+  } else {
+    const panel = document.getElementById("detail-panel");
+    const canvasWrap = document.getElementById("canvas-wrap");
+    panel.classList.remove("open");
+    canvasWrap.classList.remove("has-detail");
+    currentDetail = null;
+    currentRunId = null;
+    renderSidebar();
+    updateUI();
+    resize();
+  }
+}
+
+function openRun(jobId) {
+  currentRunId = jobId || null;
+  const panel = document.getElementById("detail-panel");
+  const canvasWrap = document.getElementById("canvas-wrap");
+
+  if (!currentRunId) {
+    panel.classList.remove("open");
+    canvasWrap.classList.remove("has-detail");
+    document.getElementById("detail-kind").textContent = "";
+    document.getElementById("detail-title").textContent = "";
+    document.getElementById("detail-meta").innerHTML = "";
+    document.getElementById("detail-body").innerHTML = '<div style="color:#555;padding:20px 0">Select a run to see details.</div>';
+    resize();
+    renderRunSidebar();
+    updateRunStats();
+    return;
+  }
+
+  panel.classList.add("open");
+  canvasWrap.classList.add("has-detail");
+  resize();
+  const item = runById[currentRunId];
+  if (item) {
+    document.getElementById("detail-kind").textContent = "RUN";
+    document.getElementById("detail-title").textContent = item.work_title || item.work_id || item.job_id;
+    document.getElementById("detail-meta").innerHTML = `<span class="state state-${statusClass(item.status)}">${escapeHtml(item.status || item.job_state || "unknown")}</span>` +
+      (item.adapter ? `<span class="state">${escapeHtml(item.adapter)}${item.model ? ` / ${escapeHtml(item.model)}` : ""}</span>` : "") +
+      `<span style="color:#555">${formatDuration(item.duration_ms)}</span>`;
+    document.getElementById("detail-body").innerHTML = '<div style="color:#555;padding:20px 0">loading...</div>';
+  }
+
+  loadRunDetail(currentRunId).then(detail => {
+    if (!detail || currentRunId !== jobId) return;
+    renderRunDetailPanel(detail);
+  });
+}
+
 // ── Rendering ───────────────────────────────────────────────
 
 const cv = document.getElementById("cv");
@@ -715,6 +825,10 @@ function nodeAlpha(w) {
 }
 
 function draw() {
+  if (appMode === "runs") {
+    requestAnimationFrame(draw);
+    return;
+  }
   if (viewMode === "dag") { drawDagView(); requestAnimationFrame(draw); return; }
   if (W.length === 0) { requestAnimationFrame(draw); return; }
   simulate();
@@ -929,10 +1043,21 @@ cv.addEventListener("click", ev => {
 });
 
 document.addEventListener("keydown", ev => {
-  if (ev.key === "Escape" && focusId) setFocus(viewMode === "dag" ? null : (byId[focusId]?.p || null));
+  if (ev.key !== "Escape") return;
+  if (appMode === "runs" && currentRunId) {
+    openRun(null);
+    return;
+  }
+  if (focusId) setFocus(viewMode === "dag" ? null : (byId[focusId]?.p || null));
 });
 
-document.getElementById("btn-back").addEventListener("click", () => setFocus(null));
+document.getElementById("btn-back").addEventListener("click", () => {
+  if (appMode === "runs") {
+    openRun(null);
+  } else {
+    setFocus(null);
+  }
+});
 
 cv.addEventListener("touchstart", ev => {
   ev.preventDefault();
@@ -1069,6 +1194,95 @@ function renderDetailPanel(detail, w) {
   body.innerHTML = html;
 }
 
+function renderRunDetailPanel(detail) {
+  const body = document.getElementById("detail-body");
+  if (!detail) {
+    body.innerHTML = '<div style="color:#d06060;padding:20px 0">Failed to load run details.</div>';
+    return;
+  }
+
+  const work = detail.work || {};
+  let html = "";
+
+  if (detail.objective || work.objective) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Objective</div>
+      <div class="detail-content">${renderMarkdown(detail.objective || work.objective || "")}</div>
+    </div>`;
+  }
+
+  if (detail.updates && detail.updates.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Run Updates</div>`;
+    for (const update of detail.updates) {
+      const msg = update.message || "";
+      const by = update.created_by || "";
+      const at = update.created_at ? formatDateTime(update.created_at) : "";
+      html += `<div class="detail-list-item">`;
+      if (at || by) {
+        html += `<div style="color:#555;font-family:'SF Mono',monospace;font-size:10px;margin-bottom:4px">${escapeHtml([at, by].filter(Boolean).join(" · "))}</div>`;
+      }
+      html += `<div class="detail-content">${renderMarkdown(msg)}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  if (detail.notes && detail.notes.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Run Notes</div>`;
+    for (const note of detail.notes) {
+      const text = note.body || note.text || note.content || "";
+      const type = note.note_type || note.type || "";
+      const by = note.created_by || "";
+      const at = note.created_at ? formatDateTime(note.created_at) : "";
+      html += `<div class="detail-list-item">`;
+      if (type || at || by) {
+        html += `<div style="color:#555;font-family:'SF Mono',monospace;font-size:10px;margin-bottom:4px">${escapeHtml([type, at, by].filter(Boolean).join(" · "))}</div>`;
+      }
+      html += `<div class="detail-content">${renderMarkdown(text)}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  if (detail.attestation) {
+    const att = detail.attestation;
+    const color = att.result === "passed" ? "#408868" : att.result === "failed" ? "#d06060" : "#888";
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Attestation</div>
+      <div class="detail-list-item">
+        <span style="color:${color};font-weight:500">${escapeHtml(att.result || "unknown")}</span>
+        <span style="color:#666;margin:0 6px">·</span>
+        <span style="color:#888">${escapeHtml(att.verifier_kind || "attestation")}</span>
+        ${att.summary ? `<div style="color:#777;font-size:12px;margin-top:2px">${escapeHtml(att.summary)}</div>` : ""}
+      </div>
+    </div>`;
+  }
+
+  if (detail.bash_log && detail.bash_log.length > 0) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">Bash Command Log</div>
+      <div style="font-family:'SF Mono',monospace;font-size:12px;line-height:1.5;">`;
+    for (const entry of detail.bash_log) {
+      if (entry.comment) {
+        html += `<div style="color:#555;padding:4px 0;font-style:italic"># ${escapeHtml(entry.comment)}</div>`;
+      } else {
+        const mark = entry.exit_code === 0 ? '<span style="color:#50b888">✓</span>' : '<span style="color:#d06060">✗</span>';
+        html += `<div style="padding:2px 0">${mark} <span style="color:#c4a060">$</span> <span style="color:#c8c0b8">${escapeHtml(entry.command || "")}</span></div>`;
+        if (entry.output_preview) {
+          html += `<div style="color:#555;padding:0 0 4px 20px;font-size:11px;white-space:pre-wrap;max-height:100px;overflow:hidden">${escapeHtml(entry.output_preview)}</div>`;
+        }
+      }
+    }
+    html += `</div></div>`;
+  }
+
+  if (!html) {
+    html = '<div style="color:#555;padding:20px 0">No run details available yet.</div>';
+  }
+
+  body.innerHTML = html;
+}
+
 // Simple markdown → HTML (no dependencies)
 function renderMarkdown(text) {
   if (!text) return "";
@@ -1111,11 +1325,68 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function statusClass(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "passed") return "done";
+  if (value === "failed") return "failed";
+  if (value === "blocked") return "blocked";
+  if (value === "cancelled") return "failed";
+  if (value === "completed") return "done";
+  if (value === "running" || value === "in_progress" || value === "claimed") return "claimed";
+  return value || "ready";
+}
+
+function updateRunStats() {
+  const counts = { passed: 0, failed: 0, running: 0, other: 0 };
+  runItems.forEach(item => {
+    const status = String(item.status || item.job_state || "").toLowerCase();
+    if (status === "passed") counts.passed++;
+    else if (status === "failed" || status === "cancelled") counts.failed++;
+    else if (status === "running" || status === "claimed" || status === "in_progress" || status === "queued" || status === "starting") counts.running++;
+    else counts.other++;
+  });
+  const parts = [];
+  if (counts.passed) parts.push(`${counts.passed} passed`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  if (counts.running) parts.push(`${counts.running} active`);
+  parts.push(`${runItems.length} runs`);
+  document.getElementById("stats").textContent = parts.join(" · ");
+  document.getElementById("focus-label").textContent = currentRunId ? `→ ${runById[currentRunId]?.work_title || currentRunId}` : "";
+}
+
 // ── Sidebar ─────────────────────────────────────────────────
 
 function renderSidebar() {
   const sidebar = document.getElementById("sidebar");
   if (!sidebar) return;
+
+  if (appMode === "runs") {
+    renderRunSidebar();
+    return;
+  }
 
   // Group by state for ordering
   const stateOrder = ["claimed", "in_progress", "blocked", "ready", "done", "completed", "failed", "cancelled"];
@@ -1141,6 +1412,48 @@ function renderSidebar() {
       setFocus(focusId === id ? null : id);
       renderSidebar(); // update active state
       // Close mobile sidebar
+      sidebar.classList.remove("mobile-open");
+    });
+  });
+}
+
+function renderRunSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  if (!sidebar) return;
+
+  if (!runItems.length) {
+    sidebar.innerHTML = `<div style="padding:12px;color:#555;font-size:12px;line-height:1.5;">
+      <div style="color:#c8c0b8;margin-bottom:6px">Recent runs</div>
+      No runs available yet.
+    </div>`;
+    return;
+  }
+
+  sidebar.innerHTML = runItems.map(item => {
+    const active = item.job_id === currentRunId ? "active" : "";
+    const status = item.status || item.job_state || "unknown";
+    const statClass = statusClass(status);
+    const filesChanged = item.files_changed == null ? "—" : item.files_changed;
+    const loc = item.lines_added == null && item.lines_removed == null
+      ? "—"
+      : `+${item.lines_added ?? 0} / -${item.lines_removed ?? 0}`;
+    return `<div class="run-item ${active}" data-job-id="${escapeHtml(item.job_id)}">
+      <div class="run-title">${escapeHtml(item.work_title || item.job_id)}</div>
+      <div class="run-subtitle">${escapeHtml(item.adapter || "unknown")}${item.model ? ` / ${escapeHtml(item.model)}` : ""}</div>
+      <div class="run-meta">
+        <span>${escapeHtml(formatDuration(item.duration_ms))}</span>
+        <span>${escapeHtml(String(filesChanged))} files</span>
+        <span>${escapeHtml(loc)}</span>
+        <span class="state state-${statClass}">${escapeHtml(status)}</span>
+      </div>
+    </div>`;
+  }).join("");
+
+  sidebar.querySelectorAll(".run-item").forEach(el => {
+    el.addEventListener("click", () => {
+      const jobId = el.dataset.jobId;
+      openRun(currentRunId === jobId ? null : jobId);
+      renderRunSidebar();
       sidebar.classList.remove("mobile-open");
     });
   });
@@ -1395,6 +1708,13 @@ document.querySelectorAll(".filter-btn").forEach(btn => {
 // ── UI + Init ───────────────────────────────────────────────
 
 function updateUI() {
+  if (appMode === "runs") {
+    updateRunStats();
+    const back = document.getElementById("btn-back");
+    if (back) back.style.display = currentRunId ? "inline" : "none";
+    return;
+  }
+
   const counts = {};
   W.forEach(w => { counts[w.s] = (counts[w.s] || 0) + 1; });
   const parts = [];
@@ -1427,6 +1747,24 @@ function updateUI() {
 }
 
 async function refresh() {
+  if (appMode === "runs") {
+    const runs = await loadRuns();
+    if (runs) {
+      runItems = runs;
+      runById = Object.fromEntries(runItems.map(item => [item.job_id, item]));
+      if (currentRunId && !runById[currentRunId]) {
+        currentRunId = null;
+      }
+      renderRunSidebar();
+      updateRunStats();
+      if (currentRunId) {
+        const detail = await loadRunDetail(currentRunId);
+        if (detail) renderRunDetailPanel(detail);
+      }
+    }
+    return;
+  }
+
   const [items] = await Promise.all([loadData(), loadEdges()]);
   if (!items) return;
   dagLayout = null; // edges may have changed
@@ -1461,18 +1799,33 @@ async function boot() {
 
   // View mode toggle
   document.getElementById("btn-dag-view")?.addEventListener("click", () => {
+    if (appMode === "runs") return;
     if (viewMode === "dag") return;
     viewMode = "dag";
     document.getElementById("btn-dag-view").classList.add("view-btn-active");
     document.getElementById("btn-hyp-view").classList.remove("view-btn-active");
   });
   document.getElementById("btn-hyp-view")?.addEventListener("click", () => {
+    if (appMode === "runs") return;
     if (viewMode === "hyperbolic") return;
     viewMode = "hyperbolic";
     document.getElementById("btn-hyp-view").classList.add("view-btn-active");
     document.getElementById("btn-dag-view").classList.remove("view-btn-active");
     if (W.length > 0 && Object.keys(nodes).length === 0) initSimulation(W);
   });
+  document.getElementById("btn-runs-view")?.addEventListener("click", async () => {
+    if (appMode === "runs") return;
+    setAppMode("runs");
+    const runs = await loadRuns();
+    runItems = runs || [];
+    runById = Object.fromEntries(runItems.map(item => [item.job_id, item]));
+    renderRunSidebar();
+    updateRunStats();
+  });
+
+  if (appMode === "runs") {
+    setAppMode("runs");
+  }
 }
 
 boot();

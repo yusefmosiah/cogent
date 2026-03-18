@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -11,6 +14,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +27,156 @@ import (
 	"github.com/yusefmosiah/cagent/internal/service"
 	"github.com/yusefmosiah/cagent/internal/web"
 )
+
+// wsHub manages WebSocket connections and broadcasts events to all connected clients.
+type wsHub struct {
+	mu      sync.Mutex
+	clients map[chan []byte]struct{}
+}
+
+func newWSHub() *wsHub {
+	return &wsHub{clients: make(map[chan []byte]struct{})}
+}
+
+func (h *wsHub) subscribe() chan []byte {
+	ch := make(chan []byte, 16)
+	h.mu.Lock()
+	h.clients[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *wsHub) unsubscribe(ch chan []byte) {
+	h.mu.Lock()
+	if _, ok := h.clients[ch]; ok {
+		delete(h.clients, ch)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+
+// broadcast sends a typed event to all connected WebSocket clients.
+func (h *wsHub) broadcast(eventType string, data any) {
+	msg, err := json.Marshal(map[string]any{"type": eventType, "data": data})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.clients {
+		select {
+		case ch <- msg:
+		default: // drop if client is slow
+		}
+	}
+}
+
+func supervisorAvailableSlots(inFlightCount, maxConcurrent int, spawnedCompletionJob bool) int {
+	availableSlots := maxConcurrent - inFlightCount
+	if spawnedCompletionJob {
+		availableSlots--
+	}
+	if availableSlots < 0 {
+		return 0
+	}
+	return availableSlots
+}
+
+// wsUpgrade performs the WebSocket HTTP upgrade handshake.
+func wsUpgrade(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWriter, error) {
+	key := r.Header.Get("Sec-WebSocket-Key")
+	if key == "" {
+		http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)
+		return nil, nil, fmt.Errorf("missing websocket key")
+	}
+	h := sha1.New()
+	h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	accept := base64.StdEncoding.EncodeToString(h.Sum(nil))
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return nil, nil, fmt.Errorf("hijacking not supported")
+	}
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+	if _, err := rw.WriteString(resp); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	if err := rw.Flush(); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return conn, rw, nil
+}
+
+// wsWriteTextFrame writes a single WebSocket text frame (server→client, unmasked).
+func wsWriteTextFrame(rw *bufio.ReadWriter, data []byte) error {
+	n := len(data)
+	header := []byte{0x81} // FIN=1, opcode=text
+	switch {
+	case n < 126:
+		header = append(header, byte(n))
+	case n <= 65535:
+		header = append(header, 126, byte(n>>8), byte(n))
+	default:
+		header = append(header, 127,
+			byte(n>>56), byte(n>>48), byte(n>>40), byte(n>>32),
+			byte(n>>24), byte(n>>16), byte(n>>8), byte(n),
+		)
+	}
+	if _, err := rw.Write(header); err != nil {
+		return err
+	}
+	if _, err := rw.Write(data); err != nil {
+		return err
+	}
+	return rw.Flush()
+}
+
+// wsServeClient handles one WebSocket connection: sends hub messages until
+// the client disconnects or the context is cancelled.
+func wsServeClient(ctx context.Context, hub *wsHub, conn net.Conn, rw *bufio.ReadWriter) {
+	defer conn.Close()
+	ch := hub.subscribe()
+	defer hub.unsubscribe(ch)
+
+	// Detect client disconnect by reading (and discarding) incoming frames.
+	disconnected := make(chan struct{})
+	go func() {
+		defer close(disconnected)
+		buf := make([]byte, 512)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-disconnected:
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := wsWriteTextFrame(rw, msg); err != nil {
+				return
+			}
+		}
+	}
+}
 
 func newServeCommand(root *rootOptions) *cobra.Command {
 	var port int
@@ -101,9 +256,21 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	_ = os.WriteFile(servePath, serveJSON, 0o644)
 	defer os.Remove(servePath)
 
+	// WebSocket hub — shared across all goroutines
+	hub := newWSHub()
+
 	// Set up HTTP handlers
 	mux := http.NewServeMux()
-	registerAPIHandlers(mux, svc, cwd)
+	registerAPIHandlers(mux, svc, cwd, hub)
+
+	// WebSocket endpoint
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := wsUpgrade(w, r)
+		if err != nil {
+			return
+		}
+		go wsServeClient(ctx, hub, conn, rw)
+	})
 
 	if !noUI {
 		// Serve mind-graph UI
@@ -128,7 +295,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runHousekeeping(ctx, svc, cwd)
+		runHousekeeping(ctx, svc, cwd, hub)
 	}()
 
 	// Only auto-dispatch when --auto is set
@@ -136,7 +303,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runInProcessSupervisor(ctx, svc, cwd, root, maxConcurrent, defaultAdapter)
+			runInProcessSupervisor(ctx, svc, cwd, root, maxConcurrent, defaultAdapter, hub)
 		}()
 	}
 
@@ -189,7 +356,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 // - Reconcile expired leases (orphaned claims)
 // - Detect stalled jobs (no output for 10 minutes)
 // - Dispatch verification for completed jobs (from cagent dispatch)
-func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
+func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub *wsHub) {
 	selfBin, _ := os.Executable()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -236,6 +403,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
 						Message:        fmt.Sprintf("housekeeping: job %s stalled (no output for 10m)", jobID),
 						CreatedBy:      "housekeeping",
 					})
+					hub.broadcast("work_updated", map[string]string{"work_id": workID})
 					continue
 				}
 
@@ -255,7 +423,8 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
 						}
 						// Get config path from the binary's default
 						configPath := ""
-						go handleJobCompletion(ctx, svc, selfBin, configPath, cwd, workID, flight, "codex")
+						hub.broadcast("job_completed", map[string]string{"work_id": workID, "job_id": jobID})
+						go handleJobCompletion(ctx, svc, hub, selfBin, configPath, cwd, workID, flight, "codex")
 					}
 				}
 			}
@@ -263,7 +432,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
 	}
 }
 
-func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
+func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, hub *wsHub) {
 	// Work items list
 	mux.HandleFunc("/api/work/items", func(w http.ResponseWriter, r *http.Request) {
 		includeArchived := r.URL.Query().Get("include_archived") == "1" || strings.EqualFold(r.URL.Query().Get("include_archived"), "true")
@@ -273,6 +442,44 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
 			return
 		}
 		writeJSONHTTP(w, 200, items)
+	})
+
+	// Recent job runs across all work items
+	mux.HandleFunc("/api/runs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		limit := 50
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		runs, err := recentRuns(r.Context(), svc, limit)
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, runs)
+	})
+
+	mux.HandleFunc("/api/runs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		jobID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/runs/"), "/")
+		if jobID == "" {
+			writeJSONHTTP(w, 404, map[string]string{"error": "missing job id"})
+			return
+		}
+		result, err := runDetail(r.Context(), svc, jobID)
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, result)
 	})
 
 	// Work edges list (for DAG view)
@@ -353,8 +560,11 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
 
 	// Bash log
 	mux.HandleFunc("/api/bash-log", func(w http.ResponseWriter, r *http.Request) {
-		rawDir := filepath.Join(cwd, ".cagent", "raw", "stdout")
-		commands, jobID := collectBashLogCommands(rawDir)
+		commands, jobID, err := bashLogForRequest(r.Context(), svc, r.URL.Query().Get("job"))
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSONHTTP(w, 200, map[string]any{
 			"commands": commands,
 			"job_id":   jobID,
@@ -367,6 +577,45 @@ func writeJSONHTTP(w http.ResponseWriter, status int, data any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
+
+type runHistoryItem struct {
+	JobID              string     `json:"job_id"`
+	WorkID             string     `json:"work_id,omitempty"`
+	WorkTitle          string     `json:"work_title,omitempty"`
+	Adapter            string     `json:"adapter"`
+	Model              string     `json:"model,omitempty"`
+	JobState           string     `json:"job_state"`
+	Status             string     `json:"status"`
+	AttestationResult  string     `json:"attestation_result,omitempty"`
+	AttestationSummary string     `json:"attestation_summary,omitempty"`
+	DurationMS         int64      `json:"duration_ms"`
+	FilesChanged       *int       `json:"files_changed,omitempty"`
+	LinesAdded         *int       `json:"lines_added,omitempty"`
+	LinesRemoved       *int       `json:"lines_removed,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+}
+
+type runDetailResponse struct {
+	Run          runHistoryItem           `json:"run"`
+	Work         core.WorkItemRecord      `json:"work"`
+	Objective    string                   `json:"objective"`
+	Updates      []core.WorkUpdateRecord  `json:"updates,omitempty"`
+	Notes        []core.WorkNoteRecord    `json:"notes,omitempty"`
+	Attestation  *core.AttestationRecord  `json:"attestation,omitempty"`
+	Attestations []core.AttestationRecord `json:"attestations,omitempty"`
+	BashLog      []bashLogCommand         `json:"bash_log,omitempty"`
+}
+
+type runDiffStat struct {
+	filesChanged int
+	linesAdded   int
+	linesRemoved int
+	known        bool
+}
+
+var runDiffStatPattern = regexp.MustCompile(`(?m)(\d+)\s+files?\s+changed(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?`)
 
 type bashLogCommand struct {
 	Command       string `json:"command,omitempty"`
@@ -428,6 +677,305 @@ func collectBashLogCommands(rawDir string) ([]bashLogCommand, string) {
 	}
 
 	return state.commands, filepath.Base(latestDir)
+}
+
+func bashLogForRequest(ctx context.Context, svc *service.Service, requestedJobID string) ([]bashLogCommand, string, error) {
+	jobID := strings.TrimSpace(requestedJobID)
+	if jobID == "" || jobID == "latest" {
+		jobs, err := svc.ListJobs(ctx, service.ListJobsRequest{Limit: 1})
+		if err != nil {
+			return nil, "", err
+		}
+		if len(jobs) == 0 {
+			return []bashLogCommand{}, "", nil
+		}
+		jobID = jobs[0].JobID
+	}
+
+	logs, err := svc.RawLogs(ctx, jobID, 200)
+	if err != nil {
+		return nil, "", err
+	}
+	return collectBashLogCommandsFromEntries(logs), jobID, nil
+}
+
+func collectBashLogCommandsFromEntries(entries []service.RawLogEntry) []bashLogCommand {
+	state := &bashLogState{
+		pending: map[string]int{},
+	}
+
+	for _, entry := range entries {
+		for _, line := range strings.Split(entry.Content, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				continue
+			}
+			state.ingest(ev)
+		}
+	}
+
+	return state.commands
+}
+
+func recentRuns(ctx context.Context, svc *service.Service, limit int) ([]runHistoryItem, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	jobs, err := svc.ListJobs(ctx, service.ListJobsRequest{Limit: limit * 2})
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]runHistoryItem, 0, limit)
+	workCache := map[string]*service.WorkShowResult{}
+	statsCache := map[string]runDiffStat{}
+
+	for _, job := range jobs {
+		if job.WorkID == "" {
+			continue
+		}
+
+		work, err := cachedWorkShow(ctx, svc, workCache, job.WorkID)
+		if err != nil {
+			continue
+		}
+
+		stats, ok := statsCache[job.JobID]
+		if !ok {
+			stats = runDiffStatForJob(ctx, svc, job.JobID)
+			statsCache[job.JobID] = stats
+		}
+
+		entries = append(entries, buildRunHistoryItem(job, work, stats))
+		if len(entries) >= limit {
+			break
+		}
+	}
+
+	return entries, nil
+}
+
+func runDetail(ctx context.Context, svc *service.Service, jobID string) (*runDetailResponse, error) {
+	status, err := svc.Status(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	work, err := svc.Work(ctx, status.Job.WorkID)
+	if err != nil {
+		return nil, err
+	}
+
+	runItem := buildRunHistoryItem(status.Job, work, runDiffStatForJob(ctx, svc, jobID))
+	updates := filterRunUpdates(work.Updates, status.Job)
+	notes := filterRunNotes(work.Notes, status.Job)
+	attestation := latestAttestationForRun(work.Attestations)
+	bashLog, _, err := bashLogForRequest(ctx, svc, jobID)
+	if err != nil {
+		bashLog = []bashLogCommand{}
+	}
+
+	return &runDetailResponse{
+		Run:          runItem,
+		Work:         work.Work,
+		Objective:    work.Work.Objective,
+		Updates:      updates,
+		Notes:        notes,
+		Attestation:  attestation,
+		Attestations: work.Attestations,
+		BashLog:      bashLog,
+	}, nil
+}
+
+func cachedWorkShow(ctx context.Context, svc *service.Service, cache map[string]*service.WorkShowResult, workID string) (*service.WorkShowResult, error) {
+	if cached := cache[workID]; cached != nil {
+		return cached, nil
+	}
+	work, err := svc.Work(ctx, workID)
+	if err != nil {
+		return nil, err
+	}
+	cache[workID] = work
+	return work, nil
+}
+
+func buildRunHistoryItem(job core.JobRecord, work *service.WorkShowResult, stats runDiffStat) runHistoryItem {
+	attestation := latestAttestationForRun(work.Attestations)
+	status := string(job.State)
+	result := ""
+	summary := ""
+	if attestation != nil {
+		result = attestation.Result
+		summary = attestation.Summary
+		status = attestation.Result
+	}
+
+	return runHistoryItem{
+		JobID:              job.JobID,
+		WorkID:             job.WorkID,
+		WorkTitle:          work.Work.Title,
+		Adapter:            job.Adapter,
+		Model:              summaryStringValue(job.Summary, "model"),
+		JobState:           string(job.State),
+		Status:             status,
+		AttestationResult:  result,
+		AttestationSummary: summary,
+		DurationMS:         jobDuration(job).Milliseconds(),
+		FilesChanged:       stats.intPtrFilesChanged(),
+		LinesAdded:         stats.intPtrLinesAdded(),
+		LinesRemoved:       stats.intPtrLinesRemoved(),
+		CreatedAt:          job.CreatedAt,
+		UpdatedAt:          job.UpdatedAt,
+		FinishedAt:         job.FinishedAt,
+	}
+}
+
+func runDiffStatForJob(ctx context.Context, svc *service.Service, jobID string) runDiffStat {
+	logs, err := svc.RawLogs(ctx, jobID, 200)
+	if err != nil {
+		return runDiffStat{}
+	}
+	return parseRunDiffStatFromLogs(collectBashLogCommandsFromEntries(logs))
+}
+
+func parseRunDiffStatFromLogs(commands []bashLogCommand) runDiffStat {
+	for _, command := range commands {
+		output := strings.TrimSpace(command.OutputPreview)
+		if output == "" {
+			continue
+		}
+		if stat, ok := parseRunDiffStat(output); ok {
+			return stat
+		}
+	}
+	return runDiffStat{}
+}
+
+func parseRunDiffStat(output string) (runDiffStat, bool) {
+	matches := runDiffStatPattern.FindStringSubmatch(output)
+	if len(matches) == 0 {
+		return runDiffStat{}, false
+	}
+
+	filesChanged, _ := strconv.Atoi(matches[1])
+	linesAdded := 0
+	linesRemoved := 0
+	if len(matches) > 2 && matches[2] != "" {
+		linesAdded, _ = strconv.Atoi(matches[2])
+	}
+	if len(matches) > 3 && matches[3] != "" {
+		linesRemoved, _ = strconv.Atoi(matches[3])
+	}
+
+	return runDiffStat{
+		filesChanged: filesChanged,
+		linesAdded:   linesAdded,
+		linesRemoved: linesRemoved,
+		known:        true,
+	}, true
+}
+
+func (s runDiffStat) intPtrFilesChanged() *int {
+	if !s.known {
+		return nil
+	}
+	value := s.filesChanged
+	return &value
+}
+
+func (s runDiffStat) intPtrLinesAdded() *int {
+	if !s.known {
+		return nil
+	}
+	value := s.linesAdded
+	return &value
+}
+
+func (s runDiffStat) intPtrLinesRemoved() *int {
+	if !s.known {
+		return nil
+	}
+	value := s.linesRemoved
+	return &value
+}
+
+func latestAttestationForRun(attestations []core.AttestationRecord) *core.AttestationRecord {
+	if len(attestations) == 0 {
+		return nil
+	}
+	latest := attestations[0]
+	for _, attestation := range attestations[1:] {
+		if attestation.CreatedAt.After(latest.CreatedAt) {
+			latest = attestation
+		}
+	}
+	return &latest
+}
+
+func filterRunUpdates(updates []core.WorkUpdateRecord, job core.JobRecord) []core.WorkUpdateRecord {
+	filtered := make([]core.WorkUpdateRecord, 0, len(updates))
+	start := job.CreatedAt.Add(-1 * time.Second)
+	end := time.Now().UTC()
+	if job.FinishedAt != nil {
+		end = job.FinishedAt.Add(1 * time.Second)
+	}
+	for _, update := range updates {
+		if update.JobID != "" && update.JobID != job.JobID {
+			continue
+		}
+		if update.JobID == "" && (update.CreatedAt.Before(start) || update.CreatedAt.After(end)) {
+			continue
+		}
+		filtered = append(filtered, update)
+	}
+	return filtered
+}
+
+func filterRunNotes(notes []core.WorkNoteRecord, job core.JobRecord) []core.WorkNoteRecord {
+	filtered := make([]core.WorkNoteRecord, 0, len(notes))
+	start := job.CreatedAt.Add(-1 * time.Second)
+	end := time.Now().UTC()
+	if job.FinishedAt != nil {
+		end = job.FinishedAt.Add(1 * time.Second)
+	}
+	for _, note := range notes {
+		if note.CreatedAt.Before(start) || note.CreatedAt.After(end) {
+			continue
+		}
+		filtered = append(filtered, note)
+	}
+	return filtered
+}
+
+func jobDuration(job core.JobRecord) time.Duration {
+	end := job.UpdatedAt
+	if job.FinishedAt != nil {
+		end = *job.FinishedAt
+	}
+	if end.Before(job.CreatedAt) {
+		return 0
+	}
+	return end.Sub(job.CreatedAt)
+}
+
+func summaryStringValue(summary map[string]any, key string) string {
+	if summary == nil {
+		return ""
+	}
+	value, ok := summary[key]
+	if !ok {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
 }
 
 func (s *bashLogState) ingest(ev map[string]any) {
@@ -793,7 +1341,7 @@ func truncateText(text string, limit int) string {
 //   - Attestation: an independent agent reviews after the worker exits. Checks the diff,
 //     reads worker findings, runs its own checks, and gates the state transition.
 //   - Retry: if attestation fails, the failure reason feeds into the next worker's briefing.
-func handleJobCompletion(ctx context.Context, svc *service.Service, selfBin, configPath, cwd, workID string, flight *inFlightJob, defaultAdapter string) {
+func handleJobCompletion(ctx context.Context, svc *service.Service, hub *wsHub, selfBin, configPath, cwd, workID string, flight *inFlightJob, defaultAdapter string) bool {
 	workResult, err := svc.Work(ctx, workID)
 	if err != nil {
 		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
@@ -802,7 +1350,7 @@ func handleJobCompletion(ctx context.Context, svc *service.Service, selfBin, con
 			Message:        fmt.Sprintf("attestation: could not fetch work state: %v", err),
 			CreatedBy:      "attestation",
 		})
-		return
+		return false
 	}
 
 	work := workResult.Work
@@ -866,7 +1414,7 @@ Worker job: %s
 
 IMPORTANT: You MUST run exactly one cagent work attest command. This is the attestation contract —
 the attest command atomically records your finding AND transitions the work item state.
-Do not use cagent work complete or cagent work fail. Only cagent work attest with the nonce provided above.
+Do not use any other command to transition state. Only cagent work attest with the nonce provided above.
 Be thorough but concise.`,
 		workID, work.Title, work.Objective, flight.adapter, flight.jobID,
 		workerFindings,
@@ -894,7 +1442,7 @@ Be thorough but concise.`,
 			Message:        fmt.Sprintf("attestation: dispatch failed: %v", spawnErr),
 			CreatedBy:      "attestation",
 		})
-		return
+		return false
 	}
 
 	// Extract attestation job ID for tracking
@@ -908,17 +1456,21 @@ Be thorough but concise.`,
 		attestJobID = result.Job.JobID
 	}
 
+	// Notify connected clients that attestation has been dispatched
+	hub.broadcast("attestation_added", map[string]string{"work_id": workID, "job_id": attestJobID})
+
 	// Don't mark done — the attestor will do it via cagent work attest
 	_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
 		WorkID:    workID,
 		Message:   fmt.Sprintf("attestation: dispatched %s via %s/%s", attestJobID, attestAdapter, attestModel),
 		CreatedBy: "attestation",
 	})
+	return true
 }
 
 // runInProcessSupervisor runs the autonomous dispatch loop using the shared Service instance.
 // Only active when --auto is set.
-func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd string, root *rootOptions, maxConcurrent int, defaultAdapter string) {
+func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd string, root *rootOptions, maxConcurrent int, defaultAdapter string, hub *wsHub) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		selfBin = "cagent"
@@ -964,6 +1516,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 
 		// Check in-flight
 		mu.Lock()
+		spawnedCompletionJob := false
 		for workID, flight := range inFlight {
 			statusResult, err := svc.Status(ctx, flight.jobID)
 			if err != nil {
@@ -979,8 +1532,12 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 						Message:        fmt.Sprintf("supervisor: job %s %s", flight.jobID, jobState),
 						CreatedBy:      "supervisor",
 					})
+					hub.broadcast("work_updated", map[string]string{"work_id": workID, "job_id": flight.jobID})
 				} else {
-					handleJobCompletion(ctx, svc, selfBin, root.configPath, cwd, workID, flight, defaultAdapter)
+					hub.broadcast("job_completed", map[string]string{"work_id": workID, "job_id": flight.jobID})
+					if handleJobCompletion(ctx, svc, hub, selfBin, root.configPath, cwd, workID, flight, defaultAdapter) {
+						spawnedCompletionJob = true
+					}
 				}
 				delete(inFlight, workID)
 			} else if isJobStalled(filepath.Join(cwd, ".cagent", "raw", "stdout", flight.jobID), 10*time.Minute) {
@@ -990,6 +1547,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 					Message:        fmt.Sprintf("supervisor: job %s stalled (no output for 10m)", flight.jobID),
 					CreatedBy:      "supervisor",
 				})
+				hub.broadcast("work_updated", map[string]string{"work_id": workID, "job_id": flight.jobID})
 				delete(inFlight, workID)
 			} else if time.Now().After(flight.leaseNext) {
 				_, _ = svc.RenewWorkLease(ctx, service.WorkRenewLeaseRequest{
@@ -1004,9 +1562,13 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 		mu.Unlock()
 
 		// Dispatch
-		if inFlightCount < maxConcurrent {
-			readyItems, _ := svc.ReadyWork(ctx, maxConcurrent*2, false)
-			for _, item := range readyItems {
+		availableSlots := supervisorAvailableSlots(inFlightCount, maxConcurrent, spawnedCompletionJob)
+		if availableSlots > 0 {
+			readyItems, _ := svc.ReadyWork(ctx, availableSlots*2, false)
+			for i, item := range readyItems {
+				if i >= availableSlots {
+					break
+				}
 				mu.Lock()
 				if len(inFlight) >= maxConcurrent {
 					mu.Unlock()
@@ -1067,6 +1629,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 					leaseNext: time.Now().Add(leaseRenewInterval),
 				}
 				mu.Unlock()
+				hub.broadcast("job_started", map[string]string{"work_id": claimed.WorkID, "job_id": jobID, "adapter": adapter})
 			}
 		}
 

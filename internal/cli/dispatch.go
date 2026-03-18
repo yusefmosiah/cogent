@@ -56,7 +56,7 @@ func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride,
 	// If no work ID specified, pick the highest-priority ready item
 	var item *service.WorkShowResult
 	if workID == "" {
-		readyItems, err := svc.ReadyWork(ctx, 1)
+		readyItems, err := svc.ReadyWork(ctx, 1, false)
 		if err != nil {
 			return fmt.Errorf("list ready work: %w", err)
 		}
