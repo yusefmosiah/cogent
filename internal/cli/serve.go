@@ -274,6 +274,16 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string) {
 		writeJSONHTTP(w, 200, items)
 	})
 
+	// Work edges list (for DAG view)
+	mux.HandleFunc("/api/work/edges", func(w http.ResponseWriter, r *http.Request) {
+		edges, err := svc.ListEdges(r.Context(), 500, "", "", "")
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, edges)
+	})
+
 	// Work item show
 	mux.HandleFunc("/api/work/", func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/work/"), "/")
