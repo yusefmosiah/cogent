@@ -1347,6 +1347,43 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 	}
 	nextActions = append(nextActions, delegationNextAction(result.Work))
 
+	writeCommands := []string{
+		"cagent work update <work-id>",
+		"cagent work note-add <work-id>",
+	}
+	contractRules := []string{
+		"Do the work, add updates and notes as you go, then EXIT.",
+		"An independent attestation agent will verify and attest your work after you exit.",
+		"Record notes for findings, risks, and open questions.",
+		"Run verification (tests, builds) and report results as notes.",
+		"Do NOT create new work items, proposals, or child work. Only do what was assigned.",
+		"Do NOT call cagent work complete, cagent work fail, or cagent work attest.",
+		delegationNextAction(result.Work),
+	}
+
+	if result.Work.Kind == "attest" {
+		parentWorkID := "<parent-work-id>"
+		if parent != nil {
+			parentWorkID = parent.WorkID
+		}
+		attestCmd := fmt.Sprintf("cagent work attest %s --result [passed|failed] --message \"<summary>\"", parentWorkID)
+		writeCommands = append(writeCommands, attestCmd)
+		attestInstruction := fmt.Sprintf(
+			"REQUIRED: After completing your review, you MUST call: cagent work attest %s --result passed|failed --message \"<your finding summary>\"",
+			parentWorkID,
+		)
+		nextActions = append(nextActions, attestInstruction)
+		contractRules = []string{
+			"Review the parent work item thoroughly: inspect the code, diff, tests, notes, and evidence.",
+			"Record notes for your findings before attesting.",
+			fmt.Sprintf("REQUIRED: You MUST call 'cagent work attest %s --result passed|failed --message \"<your finding summary>\"' to submit your attestation result.", parentWorkID),
+			"Use --result passed if the work meets its objective; use --result failed if it does not.",
+			"Do NOT create new work items, proposals, or child work. Only do what was assigned.",
+			"Do NOT call cagent work complete or cagent work fail.",
+			delegationNextAction(result.Work),
+		}
+	}
+
 	runtimeSection := map[string]any{
 		"runtime_version": "dev",
 		"config_path":     s.ConfigPath,
@@ -1427,19 +1464,8 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 				"cagent artifacts list --work <work-id>",
 				"cagent history search --query <text>",
 			},
-			"write_commands": []string{
-				"cagent work update <work-id>",
-				"cagent work note-add <work-id>",
-			},
-			"rules": []string{
-				"Do the work, add updates and notes as you go, then EXIT.",
-				"An independent attestation agent will verify and attest your work after you exit.",
-				"Record notes for findings, risks, and open questions.",
-				"Run verification (tests, builds) and report results as notes.",
-				"Do NOT create new work items, proposals, or child work. Only do what was assigned.",
-				"Do NOT call cagent work complete, cagent work fail, or cagent work attest.",
-				delegationNextAction(result.Work),
-			},
+			"write_commands": writeCommands,
+			"rules":          contractRules,
 		},
 		"hydration": map[string]any{
 			"mode":                     mode,
