@@ -300,7 +300,7 @@ const (
 
 func (s WorkExecutionState) Terminal() bool {
 	switch s {
-	case WorkExecutionStateDone, WorkExecutionStateFailed, WorkExecutionStateCancelled:
+	case WorkExecutionStateDone, WorkExecutionStateFailed, WorkExecutionStateCancelled, WorkExecutionStateArchived:
 		return true
 	default:
 		return false

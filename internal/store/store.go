@@ -1083,9 +1083,15 @@ func (s *Store) RenewWorkItemLease(ctx context.Context, workID, claimant string,
 }
 
 func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction for release expired work claims: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	rows, err := s.db.QueryContext(
+	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,
@@ -1116,7 +1122,7 @@ func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRe
 	}
 
 	for i, item := range items {
-		_, err := s.db.ExecContext(
+		_, err := tx.ExecContext(
 			ctx,
 			`UPDATE work_items
 			    SET execution_state = 'ready',
@@ -1136,6 +1142,10 @@ func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRe
 		items[i].ExecutionState = core.WorkExecutionStateReady
 		items[i].ClaimedBy = ""
 		items[i].ClaimedUntil = nil
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit release expired work claims: %w", err)
 	}
 
 	return items, nil
@@ -2611,23 +2621,6 @@ func (s *Store) bootstrap(ctx context.Context) error {
 	}
 
 	migrations := []string{
-		`ALTER TABLE native_sessions ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'`,
-		`ALTER TABLE jobs ADD COLUMN work_id TEXT REFERENCES work_items(work_id) ON DELETE SET NULL`,
-		`ALTER TABLE work_items ADD COLUMN required_model_traits_json TEXT NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE work_items ADD COLUMN preferred_models_json TEXT NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE work_items ADD COLUMN avoid_models_json TEXT NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE work_items ADD COLUMN lock_state TEXT NOT NULL DEFAULT 'unlocked'`,
-		`ALTER TABLE work_items ADD COLUMN required_attestations_json TEXT NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE work_items ADD COLUMN head_commit_oid TEXT`,
-		`ALTER TABLE work_items ADD COLUMN attestation_frozen_at TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN method TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN verifier_kind TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN verifier_identity TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN confidence REAL NOT NULL DEFAULT 0`,
-		`ALTER TABLE attestation_records ADD COLUMN blocking INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE attestation_records ADD COLUMN supersedes_attestation_id TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN signer_pubkey TEXT`,
-		`ALTER TABLE attestation_records ADD COLUMN signature TEXT`,
 		`INSERT OR IGNORE INTO attestation_records (
 			attestation_id, subject_kind, subject_id, result, summary, artifact_id,
 			job_id, session_id, metadata_json, created_by, created_at
@@ -2637,8 +2630,6 @@ func (s *Store) bootstrap(ctx context.Context) error {
 		  FROM verification_records`,
 		`UPDATE work_items SET approval_state = 'pending' WHERE approval_state = 'pending_verification'`,
 		`UPDATE work_updates SET approval_state = 'pending' WHERE approval_state = 'pending_verification'`,
-		`CREATE INDEX IF NOT EXISTS idx_attestation_records_subject_created_at ON attestation_records(subject_kind, subject_id, created_at DESC)`,
-		`ALTER TABLE work_items ADD COLUMN position INTEGER NOT NULL DEFAULT 0`,
 		`UPDATE work_items SET position = (
 			SELECT COUNT(*) + 1
 			  FROM work_items AS wi2
@@ -3845,6 +3836,7 @@ CREATE TABLE IF NOT EXISTS work_items (
 	acceptance_json TEXT NOT NULL DEFAULT '{}',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
 	head_commit_oid TEXT,
+	attestation_frozen_at TEXT,
 	current_job_id TEXT,
 	current_session_id TEXT,
 	claimed_by TEXT,

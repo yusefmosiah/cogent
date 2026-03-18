@@ -151,9 +151,9 @@ func (ca *supervisorCA) issueCredential(workID, role, adapter, model string) (*c
 		return nil, nil, fmt.Errorf("generate agent keypair: %w", err)
 	}
 
-	caps := core.RoleCapabilities[role]
+	caps := core.CapabilitiesForRole(role)
 	if len(caps) == 0 {
-		caps = core.RoleCapabilities["worker"]
+		caps = core.CapabilitiesForRole("worker")
 	}
 
 	now := time.Now().UTC()

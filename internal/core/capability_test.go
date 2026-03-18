@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,6 +50,42 @@ func TestEnsureCALoadsExistingKeypair(t *testing.T) {
 	}
 	if string(ca2.PublicKey) != string(ca1.PublicKey) {
 		t.Fatal("second load produced different public key")
+	}
+}
+
+func TestEnsureCAConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	const goroutines = 20
+	results := make([]*CAKeyPair, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			ca, err := EnsureCA(dir)
+			if err != nil {
+				t.Errorf("goroutine %d: EnsureCA: %v", idx, err)
+				return
+			}
+			results[idx] = ca
+		}(i)
+	}
+	wg.Wait()
+
+	first := results[0]
+	if first == nil {
+		t.Fatal("first goroutine returned nil")
+	}
+	for i := 1; i < goroutines; i++ {
+		if results[i] == nil {
+			t.Fatalf("goroutine %d returned nil", i)
+		}
+		if string(results[i].PrivateKey) != string(first.PrivateKey) {
+			t.Fatalf("goroutine %d: private key differs from first", i)
+		}
+		if string(results[i].PublicKey) != string(first.PublicKey) {
+			t.Fatalf("goroutine %d: public key differs from first", i)
+		}
 	}
 }
 
@@ -170,36 +207,6 @@ func TestWriteCredentialCreatesFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("credential file does not exist: %v", err)
-	}
-}
-
-func TestSweepStaleTokenFiles(t *testing.T) {
-	dir := t.TempDir()
-	tokensDir := filepath.Join(dir, "tokens")
-	if err := os.MkdirAll(tokensDir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	writeFile := func(name string) {
-		if err := os.WriteFile(filepath.Join(tokensDir, name), []byte("{}"), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	writeFile("stale.json")
-	writeFile("fresh.json")
-
-	stalePath := filepath.Join(tokensDir, "stale.json")
-	if err := os.Chtimes(stalePath, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-
-	SweepStaleTokenFiles(dir, time.Hour)
-
-	if _, err := os.Stat(filepath.Join(tokensDir, "stale.json")); err == nil {
-		t.Fatal("stale file should have been removed")
-	}
-	if _, err := os.Stat(filepath.Join(tokensDir, "fresh.json")); err != nil {
-		t.Fatal("fresh file should still exist")
 	}
 }
 

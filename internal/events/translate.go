@@ -310,8 +310,6 @@ func appendUsageFields(dst map[string]any, src map[string]any) {
 	copyIntField(dst, src, "cached_input_tokens", "cached_input_tokens", "cachedInputTokens")
 	copyIntField(dst, src, "cache_read_input_tokens", "cache_read_input_tokens", "cacheReadInputTokens")
 	copyIntField(dst, src, "cache_creation_input_tokens", "cache_creation_input_tokens", "cacheCreationInputTokens")
-	copyIntField(dst, src, "cache_read_input_tokens", "cache_read_input_tokens", "cache_read_input_tokens")
-	copyIntField(dst, src, "cache_creation_input_tokens", "cache_creation_input_tokens", "cache_creation_input_tokens")
 	copyFloatField(dst, src, "cost_usd", "total_cost_usd", "costUSD")
 	copyStringField(dst, src, "model", "model")
 	copyStringField(dst, src, "provider", "provider")

@@ -13,13 +13,13 @@ import (
 	"github.com/yusefmosiah/cagent/internal/core"
 )
 
-func TestRequireCapabilitiesDefaultsToEnforce(t *testing.T) {
+func TestRequireCapabilitiesDefaultsToAudit(t *testing.T) {
 	t.Setenv(EnvCapabilityEnforcement, "")
 	t.Setenv(core.EnvAgentToken, "")
 
-	// Phase 1+: default is enforce — missing token is an error.
-	if err := requireCapabilities(core.CapWorkUpdate); err == nil {
-		t.Fatal("requireCapabilities should return error in enforce mode without a token")
+	// Default is audit — missing token is allowed for interactive use.
+	if err := requireCapabilities(core.CapWorkUpdate); err != nil {
+		t.Fatalf("requireCapabilities should succeed in audit mode without a token, got: %v", err)
 	}
 }
 

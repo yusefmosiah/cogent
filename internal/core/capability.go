@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,8 +35,8 @@ const (
 	CapabilityEnforcementEnforce CapabilityEnforcementMode = "enforce"
 )
 
-// RoleCapabilities maps role name → default capability set.
-var RoleCapabilities = map[string][]string{
+// roleCapabilities maps role name → default capability set.
+var roleCapabilities = map[string][]string{
 	"worker":   {CapWorkUpdate, CapWorkNoteAdd},
 	"attestor": {CapWorkAttest, CapWorkNoteAdd},
 	"reviewer": {CapWorkApprove, CapWorkReject, CapWorkNoteAdd},
@@ -45,7 +46,7 @@ var RoleCapabilities = map[string][]string{
 // CapabilitiesForRole returns the standard capability slice for a role.
 // Returns nil for unknown roles.
 func CapabilitiesForRole(role string) []string {
-	return RoleCapabilities[role]
+	return roleCapabilities[role]
 }
 
 // TokenSubject identifies the agent and scope a capability token was issued for.
@@ -130,13 +131,6 @@ type AgentCredential struct {
 	PrivateKey string          `json:"private_key"` // base64-encoded Ed25519 private key seed
 }
 
-// TokenFile is the on-disk format used by the service layer.
-// Pointer token and snake_case private key field distinguish it from AgentCredential.
-type TokenFile struct {
-	Token           *CapabilityToken `json:"token"`
-	AgentPrivateKey string           `json:"agent_private_key"` // base64-encoded Ed25519 private key
-}
-
 // ─── CA keypair ───────────────────────────────────────────────────────────────
 
 // CAKeyPair holds the supervisor Certificate Authority keypair.
@@ -145,9 +139,17 @@ type CAKeyPair struct {
 	PublicKey  ed25519.PublicKey
 }
 
+var caMu sync.Mutex
+
 // EnsureCA loads the CA keypair from stateDir/ca.key and stateDir/ca.pub.
 // If those files are absent, a new keypair is generated and persisted.
+// A process-wide mutex prevents TOCTOU races between concurrent goroutines
+// within the same process. For cross-process safety, callers should serialise
+// at a higher level (e.g. supervisor single-process guarantee).
 func EnsureCA(stateDir string) (*CAKeyPair, error) {
+	caMu.Lock()
+	defer caMu.Unlock()
+
 	privPath := filepath.Join(stateDir, "ca.key")
 	pubPath := filepath.Join(stateDir, "ca.pub")
 
@@ -189,12 +191,6 @@ func EnsureCA(stateDir string) (*CAKeyPair, error) {
 		return nil, fmt.Errorf("write CA public key: %w", err)
 	}
 	return &CAKeyPair{PrivateKey: priv, PublicKey: pub}, nil
-}
-
-// GenerateAgentKeypair creates an ephemeral Ed25519 keypair for one agent run.
-// Returns (publicKey, privateKey, error) — note the order matches ed25519.GenerateKey.
-func GenerateAgentKeypair() (ed25519.PublicKey, ed25519.PrivateKey, error) {
-	return ed25519.GenerateKey(rand.Reader)
 }
 
 // ─── Token issuance ───────────────────────────────────────────────────────────
@@ -258,39 +254,6 @@ func WriteCredential(stateDir string, cred AgentCredential) (string, error) {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 		return "", fmt.Errorf("marshal credential: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("write token file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("close token file: %w", err)
-	}
-	return f.Name(), nil
-}
-
-// WriteTokenFile serialises tf to a temp file in stateDir/tokens/ and returns its path.
-func WriteTokenFile(stateDir string, tf *TokenFile) (string, error) {
-	tokensDir := filepath.Join(stateDir, "tokens")
-	if err := os.MkdirAll(tokensDir, 0o700); err != nil {
-		return "", fmt.Errorf("create tokens dir: %w", err)
-	}
-	f, err := os.CreateTemp(tokensDir, "token-*.json")
-	if err != nil {
-		return "", fmt.Errorf("create token file: %w", err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("chmod token file: %w", err)
-	}
-	data, err := json.Marshal(tf)
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("marshal token file: %w", err)
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
@@ -439,27 +402,5 @@ func (r *AttestationRecord) Signable() AttestationSignable {
 		SupersedesAttestationID: r.SupersedesAttestationID,
 		CreatedBy:               r.CreatedBy,
 		CreatedAt:               r.CreatedAt.UTC().Format(time.RFC3339),
-	}
-}
-
-// SweepStaleTokenFiles removes token files in stateDir/tokens/ older than maxAge.
-func SweepStaleTokenFiles(stateDir string, maxAge time.Duration) {
-	tokensDir := filepath.Join(stateDir, "tokens")
-	entries, err := os.ReadDir(tokensDir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-maxAge)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(tokensDir, entry.Name()))
-		}
 	}
 }
