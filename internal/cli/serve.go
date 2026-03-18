@@ -251,7 +251,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string) {
 						flight := &inFlightJob{
 							workID:  workID,
 							jobID:   jobID,
-							adapter: "dispatch",
+							adapter: statusResult.Job.Adapter,
 						}
 						// Get config path from the binary's default
 						configPath := ""
@@ -511,9 +511,8 @@ Be thorough but concise.`,
 		workerFindings,
 		workID, workID, workID)
 
-	// Dispatch attestation via opencode/glm-5-turbo
-	attestAdapter := "opencode"
-	attestModel := "zai-coding-plan/glm-5-turbo"
+	// Dispatch attestation via a different model than the worker (rotation offset +1).
+	attestAdapter, attestModel := attestAdapterModel(flight.adapter)
 
 	args := []string{"run", "--json", "--adapter", attestAdapter, "--cwd", cwd,
 		"--model", attestModel, "--work", workID, "--prompt", attestPrompt}
@@ -658,7 +657,12 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 				}
 				mu.Unlock()
 
-				adapter := pickAdapter(item, defaultAdapter)
+				// Look up job history to inform rotation-based adapter selection.
+				var jobHistory []core.JobRecord
+				if workDetail, wErr := svc.Work(ctx, item.WorkID); wErr == nil {
+					jobHistory = workDetail.Jobs
+				}
+				adapter, model := pickAdapterModel(item, jobHistory, defaultAdapter)
 
 				claimed, err := svc.ClaimWork(ctx, service.WorkClaimRequest{
 					WorkID:        item.WorkID,
@@ -683,7 +687,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 				}
 
 				briefingJSON, _ := json.Marshal(briefing)
-				jobID, err := spawnRun(selfBin, root.configPath, adapter, cwd, string(briefingJSON))
+				jobID, err := spawnRun(selfBin, root.configPath, adapter, model, cwd, string(briefingJSON))
 				if err != nil {
 					_, _ = svc.ReleaseWork(ctx, service.WorkReleaseRequest{
 						WorkID:   claimed.WorkID,
@@ -697,6 +701,7 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 					workID:    claimed.WorkID,
 					jobID:     jobID,
 					adapter:   adapter,
+					model:     model,
 					started:   time.Now(),
 					leaseNext: time.Now().Add(leaseRenewInterval),
 				}

@@ -8,8 +8,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,6 +22,85 @@ import (
 	"github.com/yusefmosiah/cagent/internal/core"
 	"github.com/yusefmosiah/cagent/internal/service"
 )
+
+// rotationEntry pairs an adapter name with the model to use for that adapter.
+type rotationEntry struct {
+	adapter string
+	model   string
+}
+
+// workRotation is the round-robin pool for dispatch and attestation.
+// Order matters: attestation uses offset +1 from the work entry.
+var workRotation = []rotationEntry{
+	{adapter: "claude", model: "claude-sonnet-4-6"},
+	{adapter: "codex", model: "gpt-5.4-mini"},
+	{adapter: "opencode", model: "zai-coding-plan/glm-5-turbo"},
+}
+
+// globalRotationIdx is incremented each time we dispatch without prior history.
+var globalRotationIdx int64
+
+// rotationIndexForAdapter returns the index of adapter in workRotation, or -1.
+func rotationIndexForAdapter(adapter string) int {
+	for i, e := range workRotation {
+		if e.adapter == adapter {
+			return i
+		}
+	}
+	return -1
+}
+
+// modelForAdapter returns the model string for a known rotation adapter, or "".
+func modelForAdapter(adapter string) string {
+	for _, e := range workRotation {
+		if e.adapter == adapter {
+			return e.model
+		}
+	}
+	return ""
+}
+
+// pickAdapterModel selects adapter+model for a work item.
+// Priority: (1) item.PreferredAdapters, (2) rotation offset from job history,
+// (3) global round-robin counter.
+// jobs should be ordered newest-first so jobs[0] is the most recent attempt.
+func pickAdapterModel(item core.WorkItemRecord, jobs []core.JobRecord, defaultAdapter string) (adapter, model string) {
+	if len(item.PreferredAdapters) > 0 {
+		a := item.PreferredAdapters[0]
+		return a, modelForAdapter(a)
+	}
+	if len(jobs) > 0 {
+		// Find the most recent job that used a known rotation adapter and
+		// advance to the next slot (ensures retries differ from last attempt).
+		for _, job := range jobs {
+			lastIdx := rotationIndexForAdapter(job.Adapter)
+			if lastIdx >= 0 {
+				next := workRotation[(lastIdx+1)%len(workRotation)]
+				return next.adapter, next.model
+			}
+		}
+	}
+	// No usable history: global round-robin.
+	idx := int(atomic.AddInt64(&globalRotationIdx, 1)-1) % len(workRotation)
+	return workRotation[idx].adapter, workRotation[idx].model
+}
+
+// attestAdapterModel returns the adapter+model to use for attestation, offset
+// by one slot from the work adapter so a different model independently reviews.
+func attestAdapterModel(workAdapter string) (adapter, model string) {
+	idx := rotationIndexForAdapter(workAdapter)
+	if idx < 0 {
+		// Unknown adapter — pick the first rotation entry that differs.
+		for _, e := range workRotation {
+			if e.adapter != workAdapter {
+				return e.adapter, e.model
+			}
+		}
+		return workRotation[0].adapter, workRotation[0].model
+	}
+	next := workRotation[(idx+1)%len(workRotation)]
+	return next.adapter, next.model
+}
 
 type supervisorOptions struct {
 	interval       time.Duration
@@ -32,6 +115,7 @@ type inFlightJob struct {
 	workID    string
 	jobID     string // real cagent job_id from `run --json` output
 	adapter   string
+	model     string // model used for this job (for attestation offset)
 	started   time.Time
 	leaseNext time.Time // when to renew the lease
 }
@@ -336,7 +420,12 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 					continue
 				}
 
-				adapter := pickAdapter(item, opts.defaultAdapter)
+				// Look up job history to inform rotation-based adapter selection.
+			var jobHistory []core.JobRecord
+			if workDetail, wErr := svc.Work(ctx, item.WorkID); wErr == nil {
+				jobHistory = workDetail.Jobs
+			}
+			adapter, model := pickAdapterModel(item, jobHistory, opts.defaultAdapter)
 
 				if opts.dryRun {
 					report.Dispatched = append(report.Dispatched, dispatchEntry{
@@ -380,7 +469,7 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 				briefingJSON, _ := json.Marshal(briefing)
 
 				// Spawn `cagent run --json` and capture the job ID from stdout
-				jobID, spawnErr := spawnRun(selfBin, root.configPath, adapter, cwd, string(briefingJSON))
+				jobID, spawnErr := spawnRun(selfBin, root.configPath, adapter, model, cwd, string(briefingJSON))
 				if spawnErr != nil {
 					if !jsonOutput {
 						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "supervisor: failed to spawn job for %s: %v\n", claimed.WorkID, spawnErr)
@@ -397,6 +486,7 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 					workID:    claimed.WorkID,
 					jobID:     jobID,
 					adapter:   adapter,
+					model:     model,
 					started:   time.Now(),
 					leaseNext: time.Now().Add(leaseRenewInterval),
 				}
@@ -451,8 +541,11 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 // We still set Setpgid on the `cagent run` command itself so it doesn't receive
 // signals meant for the supervisor's terminal session (e.g., Ctrl+C) before we
 // get a chance to do orderly cleanup.
-func spawnRun(bin, configPath, adapter, cwd, prompt string) (string, error) {
+func spawnRun(bin, configPath, adapter, model, cwd, prompt string) (string, error) {
 	args := []string{"run", "--json", "--adapter", adapter, "--cwd", cwd, "--prompt", prompt}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
@@ -543,12 +636,6 @@ func isJobStalled(jobRawDir string, threshold time.Duration) bool {
 	return time.Since(newest) > threshold
 }
 
-func pickAdapter(item core.WorkItemRecord, defaultAdapter string) string {
-	if len(item.PreferredAdapters) > 0 {
-		return item.PreferredAdapters[0]
-	}
-	return defaultAdapter
-}
 
 type supervisorState struct {
 	PID       int                      `json:"pid"`
@@ -616,6 +703,11 @@ func sleepOrStop(ctx context.Context, d time.Duration, sigCh chan os.Signal, sto
 // own documentation ontology as the work graph.
 func bootstrapRepo(ctx context.Context, svc *service.Service, cwd string) error {
 	repoName := filepath.Base(cwd)
+	adrInfo := discoverADRNumbering(cwd)
+	adrExample := "ADR-0001"
+	if adrInfo.highest > 0 {
+		adrExample = fmt.Sprintf("ADR-%04d", adrInfo.highest+1)
+	}
 
 	var buf strings.Builder
 	buf.WriteString(fmt.Sprintf("Repository: %s\nPath: %s\n", repoName, cwd))
@@ -689,29 +781,45 @@ func bootstrapRepo(ctx context.Context, svc *service.Service, cwd string) error 
 		}
 	}
 
+	if adrInfo.highest > 0 {
+		buf.WriteString("\n## ADR numbering\n")
+		buf.WriteString(fmt.Sprintf(
+			"Highest discovered ADR: ADR-%04d\nContinue numbering from: ADR-%04d\n",
+			adrInfo.highest, adrInfo.highest+1,
+		))
+		if len(adrInfo.samples) > 0 {
+			buf.WriteString("Discovered ADR references:\n")
+			for _, sample := range adrInfo.samples {
+				buf.WriteString(fmt.Sprintf("- %s\n", sample))
+			}
+		}
+	}
+
 	objective := fmt.Sprintf(`Bootstrap the %s repository into the cagent work graph by ingesting its documentation.
 
 ## Approach
 
 1. DISCOVER THE DOC ONTOLOGY: Read the doc index files (ATLAS.md, README, etc.) to understand how this project organizes its documentation. Look for categories, taxonomies, and hierarchies that the project itself defines. Do NOT impose an external structure — mirror the project's own organization.
 
-2. CREATE WORK ITEMS FROM DOCS: Each significant document (ADR, design doc, spec, guide) should become a work item. The work item's state should reflect the document's status:
+2. RESPECT EXISTING ADR NUMBERING: If the repository already uses ADR numbering, continue from the highest discovered ADR number rather than restarting at ADR-0001. The repo context below includes the highest discovered ADR, if any.
+
+3. CREATE WORK ITEMS FROM DOCS: Each significant document (ADR, design doc, spec, guide) should become a work item. The work item's state should reflect the document's status:
    - Documents in "theory" or "proposed" or "draft" directories → kind=plan, state=ready
    - Documents in "practice" or "accepted" or "implemented" directories → kind=implement, state=done
    - Test reports, audits, load tests → these are attestation evidence, not work items. Record them as attestations on the relevant work item using: cagent work attest <work-id> --result passed --summary "..." --verifier-kind deterministic --method test
    - Guides and runbooks → attach as notes on the relevant work item
    - Archived/deprecated docs → skip (historical context, not active work)
 
-3. CREATE EDGES FROM DEPENDENCIES: If documents reference each other (e.g., "Requires: ADR-0014" or "Dependencies: ..."), create blocking edges between the corresponding work items.
+4. CREATE EDGES FROM DEPENDENCIES: If documents reference each other (e.g., "Requires: ADR-0014" or "Dependencies: ..."), create blocking edges between the corresponding work items.
 
-4. READ KEY DOCUMENTS: For each work item you create, read the actual document content and set the objective to a meaningful summary of what the document describes. Include the document path in the objective so it can be found.
+5. READ KEY DOCUMENTS: For each work item you create, read the actual document content and set the objective to a meaningful summary of what the document describes. Include the document path in the objective so it can be found.
 
-5. RECORD ATTESTATION EVIDENCE: Test reports and validation results should be recorded as attestations on the work items they validate. Use the report's findings as the attestation summary.
+6. RECORD ATTESTATION EVIDENCE: Test reports and validation results should be recorded as attestations on the work items they validate. Use the report's findings as the attestation summary.
 
 ## Commands
 
 Create work items:
-  cagent work create --title "ADR-0014: Per-User VM Lifecycle" --objective "..." --kind plan --priority 2
+  cagent work create --title "%s: Per-User VM Lifecycle" --objective "..." --kind plan --priority 2
 
 Record attestations (for test reports):
   cagent work attest <work-id> --result passed --summary "Load test: 62 concurrent VMs, KSM saving 1.7GB" --verifier-kind deterministic --method test
@@ -727,7 +835,7 @@ Create dependency edges between work items:
 
 ## Repository Context
 
-%s`, repoName, buf.String())
+%s`, repoName, adrExample, buf.String())
 
 	_, err := svc.CreateWork(ctx, service.WorkCreateRequest{
 		Title:     fmt.Sprintf("Bootstrap %s", repoName),
@@ -736,6 +844,76 @@ Create dependency edges between work items:
 		Priority:  1,
 	})
 	return err
+}
+
+type adrNumberingInfo struct {
+	highest int
+	samples []string
+}
+
+var adrNumberPattern = regexp.MustCompile(`(?i)\bADR-(\d+)\b`)
+
+func discoverADRNumbering(cwd string) adrNumberingInfo {
+	docsDir := filepath.Join(cwd, "docs")
+	info := adrNumberingInfo{}
+	if _, err := os.Stat(docsDir); err != nil {
+		return info
+	}
+
+	seen := map[int]string{}
+	_ = filepath.Walk(docsDir, func(path string, fileInfo os.FileInfo, err error) error {
+		if err != nil || fileInfo.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".md") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(cwd, path)
+		if relErr != nil {
+			rel = path
+		}
+		header := readFileHeader(path, 20)
+		if header == "" {
+			return nil
+		}
+		matches := adrNumberPattern.FindAllStringSubmatch(header, -1)
+		if len(matches) == 0 {
+			return nil
+		}
+		seenNumbers := map[int]struct{}{}
+		for _, match := range matches {
+			n, convErr := strconv.Atoi(match[1])
+			if convErr != nil || n <= 0 {
+				continue
+			}
+			if n > info.highest {
+				info.highest = n
+			}
+			if _, ok := seenNumbers[n]; ok {
+				continue
+			}
+			seenNumbers[n] = struct{}{}
+			if _, ok := seen[n]; !ok {
+				snippet := readFileHeader(path, 5)
+				if snippet != "" {
+					seen[n] = fmt.Sprintf("%s [%s]", rel, snippet)
+				} else {
+					seen[n] = rel
+				}
+			}
+		}
+		return nil
+	})
+
+	if len(seen) == 0 {
+		return info
+	}
+	keys := make([]int, 0, len(seen))
+	for n := range seen {
+		keys = append(keys, n)
+	}
+	sort.Ints(keys)
+	for _, n := range keys {
+		info.samples = append(info.samples, seen[n])
+	}
+	return info
 }
 
 // readFileHeader reads the first N lines of a file and returns a compact summary.

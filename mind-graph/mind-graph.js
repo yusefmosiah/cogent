@@ -353,10 +353,10 @@ function drawDagView() {
 // ── Simulation ──────────────────────────────────────────────
 
 const RHO_STATE = { claimed: 0.45, in_progress: 0.45, blocked: 0.85, ready: 1.35, failed: 2.80, cancelled: 2.80, done: 3.20 };
-const DAMPING = { claimed: 1.0, in_progress: 1.0, blocked: 1.4, ready: 1.6, failed: 2.0, cancelled: 2.0, done: 2.8 };
+const DAMPING = { claimed: 2.0, in_progress: 2.0, blocked: 2.5, ready: 3.0, failed: 3.5, cancelled: 3.5, done: 4.0 };
 const K_RHO = 0.8, K_TREE = 1.0, L_TREE = 0.85, K_BLOCK = 1.8, L_BLOCK = 0.35;
 const K_REP = 0.04, K_WALL = 3.0, RHO_WALL = 4.0, SIGMA_WALL = 0.3;
-const DT = 1/60, V_MAX = 0.06;
+const DT = 1/60, V_MAX = 0.12;
 const COL = {ready:"#c4a060",claimed:"#50b888",in_progress:"#4db884",blocked:"#d06060",done:"#408868",
              failed:"#803030",cancelled:"#555"};
 
@@ -407,6 +407,49 @@ function initSimulation(items) {
     while (cur.p && byId[cur.p]) { d++; cur = byId[cur.p]; }
     nodes[w.id].depth = d;
   });
+  computeDagDepths();
+}
+
+function computeDagDepths() {
+  // Kahn's algorithm: compute topological depth from blocking edges + API edges
+  const nodeSet = new Set(W.map(w => w.id));
+  const outAdj = new Map(W.map(w => [w.id, []]));
+  const inAdj  = new Map(W.map(w => [w.id, []]));
+  function addE(from, to) {
+    if (!nodeSet.has(from) || !nodeSet.has(to) || from === to) return;
+    if (!outAdj.get(from).includes(to)) { outAdj.get(from).push(to); inAdj.get(to).push(from); }
+  }
+  W.forEach(w => { if (w.bb) w.bb.forEach(bid => addE(bid, w.id)); });
+  dagEdges.forEach(e => {
+    if (e.edge_type === "blocks" || e.edge_type === "parent_child" || e.edge_type === "depends_on")
+      addE(e.from_work_id, e.to_work_id);
+  });
+  const inDeg = new Map(W.map(w => [w.id, inAdj.get(w.id).length]));
+  const layer = new Map(W.map(w => [w.id, 0]));
+  const queue = W.filter(w => inAdj.get(w.id).length === 0).map(w => w.id);
+  let head = 0;
+  while (head < queue.length) {
+    const id = queue[head++];
+    const myLayer = layer.get(id);
+    for (const toId of outAdj.get(id)) {
+      if (myLayer + 1 > layer.get(toId)) layer.set(toId, myLayer + 1);
+      const d = inDeg.get(toId) - 1; inDeg.set(toId, d);
+      if (d <= 0) queue.push(toId);
+    }
+  }
+  // Also compute fan-out (how many items transitively depend on this)
+  const maxDepth = Math.max(1, ...layer.values());
+  W.forEach(w => {
+    if (nodes[w.id]) {
+      nodes[w.id].dagDepth = layer.get(w.id) || 0;
+      nodes[w.id].dagMaxDepth = maxDepth;
+      nodes[w.id].dagFanOut = outAdj.get(w.id).length;
+      // Assign angular sector by dependency chain root
+      let root = w.id, cur = w.id;
+      while (inAdj.get(cur) && inAdj.get(cur).length > 0) { root = inAdj.get(cur)[0]; cur = root; }
+      nodes[w.id].dagChainRoot = root;
+    }
+  });
 }
 
 function refreshData(items) {
@@ -452,13 +495,21 @@ function refreshData(items) {
     while (cur.p && byId[cur.p]) { d++; cur = byId[cur.p]; }
     nodes[w.id].depth = d;
   });
+  computeDagDepths();
 }
 
 function preferredRho(w) {
   const n = nodes[w.id];
   const stale = Math.min(1, Math.max(0, (Date.now() - w.up) / (14 * 86400000)));
   const attDef = w.att ? 1 - w.att[1] / Math.max(w.att[0], 1) : 0;
-  return (RHO_STATE[w.s] || 1.5) + 0.18 * n.depth + 0.5 * stale - 0.3 * attDef;
+  const stateRho = (RHO_STATE[w.s] || 1.5);
+  if (n.dagDepth !== undefined && n.dagMaxDepth > 0) {
+    // Has DAG structure: depth drives radial position
+    const dagRho = 0.4 + (n.dagDepth / n.dagMaxDepth) * 2.5;
+    return 0.6 * dagRho + 0.4 * stateRho + 0.2 * stale - 0.15 * attDef;
+  }
+  // No DAG edges: fall back to state-based placement
+  return stateRho + 0.1 * n.depth + 0.4 * stale - 0.2 * attDef;
 }
 
 function simulate() {
@@ -521,24 +572,30 @@ function simulate() {
       if (n > 1e-8) F = add(F, scale(scale(toOrigin, 1/n), K_WALL * Math.exp((rhoI - RHO_WALL) / SIGMA_WALL)));
     }
 
-    // 6. Temporal angle spring — weak pull toward chronological position
-    if (ni.temporalAngle !== undefined && rhoI > 0.05) {
+    // 6. Angular spring — fixed target angles, no chasing moving points
+    if (rhoI > 0.05) {
       const currentAngle = Math.atan2(pi[1], pi[0]);
-      let angleDiff = ni.temporalAngle - currentAngle;
-      // Normalize to [-PI, PI]
+      // Use a stable target: chain root's TEMPORAL angle (fixed at init), not its current position
+      let targetAngle = ni.temporalAngle || 0;
+      if (ni.dagChainRoot && ni.dagChainRoot !== w.id && nodes[ni.dagChainRoot]) {
+        targetAngle = nodes[ni.dagChainRoot].temporalAngle || targetAngle;
+      }
+      let angleDiff = targetAngle - currentAngle;
       while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
       while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-      // Tangential force proportional to angle error
       const tangent = [-Math.sin(currentAngle), Math.cos(currentAngle)];
-      const K_ANGLE = 0.15; // weak — don't fight structure
+      const K_ANGLE = 0.25;
       F = add(F, scale(tangent, K_ANGLE * angleDiff));
     }
 
     // 7. Activity noise
     if (w.s === "claimed" || w.s === "in_progress") F = add(F, [(Math.random()-0.5)*0.006, (Math.random()-0.5)*0.006]);
 
-    // Integrate
-    const gamma = DAMPING[w.s] || 1.0;
+    // Integrate — fast initial snap, then decelerate
+    const baseGamma = DAMPING[w.s] || 2.0;
+    const vn0 = norm(ni.vel);
+    // Adaptive damping: increases as velocity drops (fast start, gentle settle)
+    const gamma = baseGamma + 4.0 * (1.0 - Math.min(vn0 / V_MAX, 1.0));
     ni.vel = add(scale(ni.vel, Math.exp(-gamma * DT)), scale(F, DT));
     const vn = norm(ni.vel);
     if (vn > V_MAX) ni.vel = scale(ni.vel, V_MAX / vn);
@@ -633,8 +690,12 @@ function textSizeForNode(w) {
   const fp = focusTransform(focusPoint, nodes[w.id].pos);
   const r = norm(fp);
   const soft = 0.15 + 0.85 * (1 - r * r) / 2;
-  const baseSize = !w.p ? 26 : (w.ch && w.ch.length > 0 ? 18 : 14);
-  return Math.max(5, baseSize * soft * 1.8);
+  const n = nodes[w.id];
+  // Size by DAG importance: items blocking many others are larger
+  const fanOut = n.dagFanOut || 0;
+  const dagBoost = 1 + Math.min(fanOut * 0.15, 0.6); // up to 60% larger
+  const baseSize = n.dagDepth === 0 ? 24 : (fanOut > 0 ? 18 : 14);
+  return Math.max(5, baseSize * soft * 1.8 * dagBoost);
 }
 
 function stateMatchesFilter(state, filter) {

@@ -81,10 +81,16 @@ func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride,
 		item = result
 	}
 
-	// Pick adapter
+	// Pick adapter+model using round-robin rotation, offset from job history.
+	// Explicit --adapter and --model flags take priority.
+	pickedAdapter, pickedModel := pickAdapterModel(item.Work, item.Jobs, "codex")
 	adapter := adapterOverride
 	if adapter == "" {
-		adapter = pickAdapter(item.Work, "codex")
+		adapter = pickedAdapter
+	}
+	model := modelOverride
+	if model == "" {
+		model = pickedModel
 	}
 
 	// Hydrate briefing
@@ -107,7 +113,7 @@ func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride,
 		Adapter: adapter,
 		CWD:     cwd,
 		Prompt:  prompt,
-		Model:   modelOverride,
+		Model:   model,
 		WorkID:  workID,
 	})
 
@@ -117,8 +123,8 @@ func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride,
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s → %s via %s\n", workID, result.Job.JobID, adapter)
 			fmt.Fprintf(cmd.OutOrStdout(), "  title: %s\n", item.Work.Title)
-			if modelOverride != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "  model: %s\n", modelOverride)
+			if model != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  model: %s\n", model)
 			}
 		}
 	}
