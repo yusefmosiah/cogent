@@ -112,12 +112,14 @@ type supervisorOptions struct {
 
 // inFlightJob tracks a dispatched job by its real cagent job ID, not a process PID.
 type inFlightJob struct {
-	workID    string
-	jobID     string // real cagent job_id from `run --json` output
-	adapter   string
-	model     string // model used for this job (for attestation offset)
-	started   time.Time
-	leaseNext time.Time // when to renew the lease
+	workID       string
+	jobID        string // real cagent job_id from `run --json` output
+	adapter      string
+	model        string    // model used for this job (for attestation offset)
+	started      time.Time
+	leaseNext    time.Time // when to renew the lease
+	worktreePath string    // absolute path to git worktree (empty if not using worktrees)
+	branchName   string    // git branch name for this job's worktree
 }
 
 type supervisorCycleReport struct {
@@ -826,8 +828,8 @@ Record attestations (for test reports):
 Add notes (for guides, snapshots, findings):
   cagent work note-add <work-id> --type finding --text "Implementation guide at docs/theory/guides/adr-0014-implementation.md"
 
-Mark implemented items as done (bootstrap only — normal workers must NOT call this):
-  cagent work complete <work-id> --message "Implemented and operational per practice/decisions/"
+Mark implemented items as done via attestation (bootstrap only — normal workers must NOT call this):
+  cagent work attest <work-id> --result passed --summary "Implemented and operational per practice/decisions/"
 
 Create dependency edges between work items:
   cagent work proposal create --type add_edge --target <blocked-work-id> --rationale "ADR-0024 requires ADR-0014" --patch '{"edge_type":"blocks","source_work_id":"<blocker-work-id>"}'
@@ -938,11 +940,103 @@ func readFileHeader(path string, maxLines int) string {
 			parts = append(parts, line)
 			continue
 		}
-		// Markdown title
+		// Markdown title (H1 or H2 — ADR numbers appear in both)
+		if strings.HasPrefix(line, "## ") {
+			parts = append(parts, line[3:])
+			continue
+		}
 		if strings.HasPrefix(line, "# ") {
 			parts = append(parts, line[2:])
 			continue
 		}
 	}
 	return strings.Join(parts, " | ")
+}
+
+// gitIsRepo returns true if cwd is inside a git repository.
+func gitIsRepo(cwd string) bool {
+	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--git-dir")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+// createWorktree creates a git worktree at .cagent/worktrees/<workID> on a new
+// branch cagent/work_<workID>. Returns the worktree path and branch name.
+func createWorktree(cwd, workID string) (worktreePath, branchName string, err error) {
+	branchName = "cagent/work_" + workID
+	worktreePath = filepath.Join(cwd, ".cagent", "worktrees", workID)
+
+	if err = os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		return "", "", fmt.Errorf("create worktrees dir: %w", err)
+	}
+
+	cmd := exec.Command("git", "-C", cwd, "worktree", "add", "-b", branchName, worktreePath)
+	if out, runErr := cmd.CombinedOutput(); runErr != nil {
+		return "", "", fmt.Errorf("git worktree add: %w: %s", runErr, strings.TrimSpace(string(out)))
+	}
+	return worktreePath, branchName, nil
+}
+
+// removeWorktree removes a git worktree and prunes stale entries.
+func removeWorktree(cwd, worktreePath string) error {
+	cmd := exec.Command("git", "-C", cwd, "worktree", "remove", "--force", worktreePath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree remove: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	_ = exec.Command("git", "-C", cwd, "worktree", "prune").Run()
+	return nil
+}
+
+// mergeWorktree merges branchName into the current branch of cwd with --no-ff.
+// Returns (conflicted=true, nil) when there are merge conflicts so the caller
+// can spawn a resolver rather than treating the error as fatal.
+func mergeWorktree(cwd, branchName string) (conflicted bool, err error) {
+	cmd := exec.Command("git", "-C", cwd, "merge", "--no-ff", branchName,
+		"-m", "Merge "+branchName)
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "conflict") {
+			// Leave the conflicted state; caller must resolve or abort.
+			return true, nil
+		}
+		return false, fmt.Errorf("git merge: %w: %s", runErr, strings.TrimSpace(outStr))
+	}
+	return false, nil
+}
+
+// deleteBranch deletes a local branch (best-effort, ignores errors).
+func deleteBranch(cwd, branchName string) {
+	_ = exec.Command("git", "-C", cwd, "branch", "-d", branchName).Run()
+}
+
+// spawnMergeResolver launches a cagent run job that resolves merge conflicts.
+// conflictFiles is the list of paths that have conflict markers.
+func spawnMergeResolver(selfBin, configPath, cwd, workID, branchName string) error {
+	prompt := fmt.Sprintf(`You are a merge-conflict resolver.
+A git merge of branch %s into the main working directory failed with conflicts.
+
+Working directory: %s
+Work item ID: %s
+
+Steps:
+1. Run: git status   — identify conflicted files
+2. For each conflicted file: open it, resolve the conflict markers (<<<<<<<, =======, >>>>>>>)
+3. Run: git add <resolved-files>
+4. Run: git commit -m "Resolve merge conflicts from %s"
+5. Add a note: cagent work note-add %s --type finding --text "Merge conflicts resolved automatically"
+
+Only resolve conflicts; do not make other changes.`, branchName, cwd, workID, branchName, workID)
+
+	args := []string{"run", "--json", "--adapter", "claude", "--cwd", cwd, "--prompt", prompt}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	cmd := exec.Command(selfBin, args...)
+	cmd.Dir = cwd
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd.Start()
 }

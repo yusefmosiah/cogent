@@ -230,16 +230,24 @@ function computeDagLayout(items, edges) {
   items.forEach(w => layers[layer.get(w.id) || 0].push(w));
   layers.forEach(l => l.sort((a, b) => a.t.localeCompare(b.t)));
 
-  const NODE_W = 200, NODE_H = 44, H_GAP = 28, V_GAP = 72;
+  const NODE_W = 200, NODE_H = 44, H_GAP = 20, V_GAP = 60;
+  // Wrap layers to fit available width (prevent horizontal overflow)
+  const maxCols = Math.max(2, Math.floor((W_px - 80) / (NODE_W + H_GAP)));
   const positions = new Map();
-  layers.forEach((layerItems, li) => {
-    const totalW = layerItems.length * (NODE_W + H_GAP) - H_GAP;
-    layerItems.forEach((w, idx) => {
-      positions.set(w.id, {
-        x: idx * (NODE_W + H_GAP) - totalW / 2,
-        y: li * (NODE_H + V_GAP),
+  let currentY = 0;
+  layers.forEach((layerItems) => {
+    // Split layer into rows of maxCols
+    for (let rowStart = 0; rowStart < layerItems.length; rowStart += maxCols) {
+      const row = layerItems.slice(rowStart, rowStart + maxCols);
+      const totalW = row.length * (NODE_W + H_GAP) - H_GAP;
+      row.forEach((w, idx) => {
+        positions.set(w.id, {
+          x: idx * (NODE_W + H_GAP) - totalW / 2,
+          y: currentY,
+        });
       });
-    });
+      currentY += NODE_H + V_GAP;
+    }
   });
   return { positions, outAdj, inAdj, layer, layers, NODE_W, NODE_H };
 }
@@ -394,7 +402,7 @@ let runItems = [], runById = {}, currentRunId = null;
 let runCache = {}; // job_id → { data, fetchedAt }
 
 // ── View Mode ────────────────────────────────────────────────
-let viewMode = "dag"; // "dag" | "hyperbolic"
+let viewMode = "hyperbolic"; // "hyperbolic" | "dag"
 
 const DAG_COL = {
   ready: "#c4a060", in_progress: "#4a90d9", claimed: "#4a90d9",
@@ -1028,6 +1036,48 @@ cv.addEventListener("wheel", ev => {
   dagTransform.y = my + (dagTransform.y - my) * (newS / dagTransform.s);
   dagTransform.s = newS;
 }, { passive: false });
+
+// Touch pinch-to-zoom for DAG on mobile
+let dagTouchDist = null;
+let dagTouchCenter = null;
+cv.addEventListener("touchstart", ev => {
+  if (viewMode !== "dag") return;
+  if (ev.touches.length === 2) {
+    ev.preventDefault();
+    const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+    const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+    dagTouchDist = Math.sqrt(dx * dx + dy * dy);
+    const rect = cv.getBoundingClientRect();
+    dagTouchCenter = {
+      x: (ev.touches[0].clientX + ev.touches[1].clientX) / 2 - rect.left,
+      y: (ev.touches[0].clientY + ev.touches[1].clientY) / 2 - rect.top,
+    };
+  } else if (ev.touches.length === 1) {
+    dagDrag = { sx: ev.touches[0].clientX, sy: ev.touches[0].clientY, ox: dagTransform.x, oy: dagTransform.y };
+    dagDragMoved = false;
+  }
+}, { passive: false });
+cv.addEventListener("touchmove", ev => {
+  if (viewMode !== "dag") return;
+  if (ev.touches.length === 2 && dagTouchDist) {
+    ev.preventDefault();
+    const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+    const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+    const newDist = Math.sqrt(dx * dx + dy * dy);
+    const factor = newDist / dagTouchDist;
+    const newS = Math.max(0.1, Math.min(5, dagTransform.s * factor));
+    dagTransform.x = dagTouchCenter.x + (dagTransform.x - dagTouchCenter.x) * (newS / dagTransform.s);
+    dagTransform.y = dagTouchCenter.y + (dagTransform.y - dagTouchCenter.y) * (newS / dagTransform.s);
+    dagTransform.s = newS;
+    dagTouchDist = newDist;
+  } else if (ev.touches.length === 1 && dagDrag) {
+    const dx = ev.touches[0].clientX - dagDrag.sx, dy = ev.touches[0].clientY - dagDrag.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 3) dagDragMoved = true;
+    dagTransform.x = dagDrag.ox + dx;
+    dagTransform.y = dagDrag.oy + dy;
+  }
+}, { passive: false });
+cv.addEventListener("touchend", () => { dagDrag = null; dagTouchDist = null; });
 
 cv.addEventListener("click", ev => {
   if (viewMode === "dag" && dagDragMoved) return;

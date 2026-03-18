@@ -1205,30 +1205,6 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	updateCmd.Flags().StringVar(&updateOpts.sessionID, "session", "", "related session id")
 	updateCmd.Flags().StringVar(&updateOpts.artifactID, "artifact", "", "related artifact id")
 
-	completeCmd := &cobra.Command{
-		Use:   "complete <work-id>",
-		Short: "Mark work done and append an update",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := service.Open(context.Background(), root.configPath)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = svc.Close() }()
-			work, err := svc.UpdateWork(context.Background(), service.WorkUpdateRequest{
-				WorkID:         args[0],
-				ExecutionState: core.WorkExecutionStateDone,
-				Message:        updateOpts.message,
-				CreatedBy:      "cli",
-			})
-			if err != nil {
-				return mapServiceError(err)
-			}
-			return renderWorkItem(cmd, root.jsonOutput, work)
-		},
-	}
-	completeCmd.Flags().StringVar(&updateOpts.message, "message", "", "completion message")
-
 	blockCmd := &cobra.Command{
 		Use:   "block <work-id>",
 		Short: "Mark work blocked and append an update",
@@ -1252,30 +1228,6 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		},
 	}
 	blockCmd.Flags().StringVar(&updateOpts.message, "message", "", "blocker message")
-
-	failCmd := &cobra.Command{
-		Use:   "fail <work-id>",
-		Short: "Mark work failed and append an update",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := service.Open(context.Background(), root.configPath)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = svc.Close() }()
-			work, err := svc.UpdateWork(context.Background(), service.WorkUpdateRequest{
-				WorkID:         args[0],
-				ExecutionState: core.WorkExecutionStateFailed,
-				Message:        updateOpts.message,
-				CreatedBy:      "cli",
-			})
-			if err != nil {
-				return mapServiceError(err)
-			}
-			return renderWorkItem(cmd, root.jsonOutput, work)
-		},
-	}
-	failCmd.Flags().StringVar(&updateOpts.message, "message", "", "failure message")
 
 	archiveCmd := &cobra.Command{
 		Use:   "archive <work-id>",
@@ -1941,7 +1893,7 @@ This guarantees every doc has a corresponding work item.`,
 
 	edgeCmd.AddCommand(edgeAddCmd, edgeRmCmd, edgeLsCmd)
 
-	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, completeCmd, blockCmd, failCmd, archiveCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd)
+	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, blockCmd, archiveCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd)
 	return cmd
 }
 
