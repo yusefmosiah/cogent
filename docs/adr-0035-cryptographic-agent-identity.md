@@ -43,10 +43,23 @@ key to produce a certificate binding the key to {work_id, job_id, role,
 capabilities, expiry}.
 
 **choir (distributed):** The hypervisor holds the root CA key. Each VM receives
-an intermediate CA certificate signed by the hypervisor. The VM's agent runtime
-generates per-agent keypairs signed by the VM's intermediate CA. This creates a
-three-level chain: hypervisor → VM → agent → artifacts. The hypervisor root key
-is the only long-lived secret; VM and agent keys are ephemeral.
+an intermediate CA certificate signed by the hypervisor. The VM's local
+supervisor generates per-agent keypairs and signs them with the VM's
+intermediate CA. This creates a three-level chain: hypervisor → VM → agent →
+artifacts. The hypervisor root key is the only long-lived secret; VM and agent
+keys are ephemeral.
+
+**Choir CA authority boundary:** In a choir deployment, each VM runs its own
+supervisor process. The VM supervisor is authoritative for capability token
+issuance on that VM — it signs agent tokens with the VM's intermediate CA key.
+The hypervisor does not sign individual agent tokens; it signs only the
+per-VM intermediate CA certificate. This means the hypervisor has visibility
+into which VMs are trusted but delegates token issuance to each VM's supervisor.
+Consequence: to verify an agent token from a choir VM, a verifier must have the
+VM's intermediate CA certificate (signed by hypervisor root) plus the agent
+token (signed by VM intermediate CA). The `--trust-root` flag on `cagent verify`
+specifies the hypervisor root; the VM intermediate CA certificate is fetched
+from the work item's job metadata where it was stored at dispatch time.
 
 #### 2. Capability Tokens
 
@@ -93,6 +106,32 @@ temporary file (mode 0600) and passes the path via the `CAGENT_AGENT_TOKEN`
 environment variable. The agent runtime reads and deletes the file on startup.
 This avoids passing secrets on the command line (visible in `ps`).
 
+**Token deletion race condition:** The dispatch architecture uses a detached
+worker subprocess (`Setpgid: true`) that survives the `cagent run` launcher. The
+token file must be deleted by the detached worker process after it reads the
+token, not by the launcher. If the launcher exits before the worker reads the
+token, the file persists. If the worker crashes before deletion, the file also
+persists. Mitigation:
+
+1. The supervisor records the token file path in the job metadata at dispatch time.
+2. On job completion or expiry, the supervisor deletes any token file path
+   recorded for that job (cleanup goroutine in supervisor reap loop).
+3. A background sweep at supervisor startup deletes any token files older than
+   `max_expiry` (30 minutes) in the state directory temp prefix.
+
+This layered approach ensures orphaned token files are removed even when the
+worker process crashes.
+
+**Token refresh for long-running jobs:** The token expiry is 30 minutes,
+matching the initial lease duration. However, the supervisor already renews
+leases every 10 minutes for active jobs. When the supervisor renews a lease, it
+also issues a refreshed token with a new 30-minute expiry and writes it to the
+same `CAGENT_AGENT_TOKEN` path (or a new path communicated via the lease renewal
+response). The worker re-reads the token before each write operation. Jobs that
+run longer than 30 minutes without a lease renewal will have their token expire;
+lease renewal is the gating mechanism. If a lease renewal fails, the token
+expires intentionally, preventing a disconnected worker from writing indefinitely.
+
 #### 3. Signed Git Commits
 
 Each agent run configures git to sign commits with its ephemeral key:
@@ -112,6 +151,17 @@ supervisor can verify commits via `git log --show-signature`.
 database. SSH signing uses the same Ed25519 keys we already generate, requires
 no daemon, and is supported by Git 2.34+. The key material is identical; only
 the envelope differs.
+
+**`allowed_signers` concurrency:** The supervisor manages multiple concurrent
+workers, each with its own entry in `allowed_signers`. Concurrent job
+completions create write contention. Git's `allowed_signers` file has no
+built-in locking. Mitigation: the supervisor maintains `allowed_signers` through
+a single-writer goroutine. All add/remove operations are serialized through a
+channel. The goroutine performs an atomic write (write to a temp file, then
+`os.Rename`) to prevent partial reads by git. This is sufficient for the
+expected concurrency level of a local supervisor. Future optimization: if the
+number of concurrent agents grows large enough to cause serialization latency,
+switch to a SQLite-backed signers store that supports concurrent reads.
 
 #### 4. Signed Attestation Records
 
@@ -190,45 +240,89 @@ hypervisor root CA
 
 The verify command accepts `--trust-root <pubkey>` to specify which root to
 verify against. For local cagent, this defaults to the supervisor CA. For choir,
-it's the hypervisor root CA distributed out-of-band.
+it's the hypervisor root CA distributed out-of-band. VM intermediate CA
+certificates are stored in job metadata at dispatch time, so cross-VM
+verification does not require the source VM to be online. If a VM intermediate
+CA certificate is missing from job metadata (e.g., pre-Phase-1 jobs), that
+job's artifacts are reported as `UNVERIFIED (legacy)` rather than `INVALID`.
 
 ### Implementation Phases
+
+**Phase 0: Audit-only mode (one release cycle before enforcement)**
+- Implement all Phase 1 token issuance and delivery infrastructure
+- CLI checks capabilities but logs violations instead of blocking
+- Violations emitted as structured log events (level: warn, kind: capability_violation)
+- Operator can run `cagent verify` in dry-run mode to see what would fail
+- No behavior change for existing installs; enables observability before cutover
+- Controlled by `CAGENT_CAPABILITY_ENFORCEMENT=audit|enforce` (default: `audit`)
 
 **Phase 1: Capability tokens (CLI enforcement)**
 - Generate supervisor CA keypair on first `cagent supervisor` or `cagent serve`
 - Generate per-run Ed25519 keypair at dispatch time
 - Sign capability tokens with CA key
 - Pass token to agent via env var + temp file
-- CLI checks capabilities before executing write commands
+- Switch `CAGENT_CAPABILITY_ENFORCEMENT` default to `enforce`
+- CLI checks capabilities before executing write commands; hard rejection on violation
 - Store agent certificate in job metadata for audit
+- Supervisor cleanup goroutine removes orphaned token files on job completion/expiry
 
-**Phase 2: Signed git commits**
+**Phase 2: Signed git commits + minimal verify**
 - Configure `gpg.format=ssh` and signing key per-run
-- Supervisor maintains `allowed_signers` file
+- Supervisor maintains `allowed_signers` via single-writer goroutine
 - `HeadCommitOID` on work items must reference a signed commit
-- `cagent verify` checks commit signatures
+- Ship minimal `cagent verify <work-id>` covering certificate and commit signature checks
+- Verification tooling ships alongside signing to enable per-phase validation
 
 **Phase 3: Signed attestation records**
 - Add `SignerPubkey` and `Signature` fields to `AttestationRecord`
 - Attestor CLI signs record before storage
-- `cagent verify` checks attestation signatures
+- Extend `cagent verify` to check attestation signatures and nonce ordering
 
 **Phase 4: Full verification tooling**
-- `cagent verify <work-id>` command with structured output
 - Batch verification: `cagent verify --all`
 - Export verification report as JSON artifact
 - choir: multi-level chain verification with `--trust-root`
+- Cross-VM certificate resolution from job metadata
+
+### Migration Strategy
+
+Existing cagent installations have no CA keypair and no signed artifacts.
+
+**Bootstrap:** On first `cagent supervisor` or `cagent serve` after upgrade:
+1. If no `ca.key` exists, generate the CA keypair and log the event.
+2. Existing work items and jobs are not retroactively signed.
+3. `cagent verify` on pre-Phase-1 work items returns `UNVERIFIED (legacy)` for
+   all artifacts, not `INVALID`. Legacy status is not an error; it records the
+   absence of a signature, not the presence of a bad one.
+
+**CLI behavior during Phase 0:** Existing `cagent work update` calls without a
+capability token succeed with a warning logged. No breakage for scripts or
+manual usage.
+
+**CLI behavior from Phase 1 onwards:** Calls without a valid token fail with a
+clear error: `capability enforcement active: no token found (CAGENT_AGENT_TOKEN
+not set)`. Human operators running commands interactively can obtain a short-
+lived operator token via `cagent token issue --role worker --work <work-id>`,
+which requires the local CA key (i.e., must be run on the same machine as the
+supervisor).
+
+**Unsigned work items in verify output:** Work items created before Phase 1 are
+reported as `LEGACY` in verify output. Items created after Phase 1 that are
+missing signatures are reported as `UNSIGNED (expected)` until Phase 2/3 are
+deployed, then as `MISSING SIGNATURE (error)`.
 
 ### Cryptographic Choices
 
 | Choice | Rationale |
 |--------|-----------|
-| Ed25519 | Fast, small keys (32 bytes), deterministic signatures, no parameter negotiation. Standard in Go (`crypto/ed25519`), SSH, and git. |
+| Ed25519 | Fast, small keys (32 bytes), deterministic signatures, no parameter negotiation. Standard in Go (`crypto/ed25519`), SSH, and git. Sign operations only — not to be confused with X25519 (key agreement). |
 | Not JWT | JWT requires choosing algorithms, handling `alg:none` attacks, importing a JWT library. A simple `sign(canonical_json, privkey)` is auditable and has no attack surface beyond Ed25519 itself. |
+| Not COSE/CWT | COSE/CWT would require non-trivial library dependencies (`cbor`, `go-cose`) in a project that currently has zero crypto imports. The zero-dependency advantage of the custom format is load-bearing. If interop with external SPIFFE/Sigstore systems is needed, COSE wrapping can be added at the boundary without changing the internal format. |
 | Not GPG | GPG requires a keyring daemon, web-of-trust configuration, and UID management. SSH signing uses the same Ed25519 math with zero infrastructure. |
 | Not X.509 | X.509 certificates are complex (ASN.1, extensions, CRL/OCSP). Our certificates are a single signed JSON blob — human-readable, auditable, no parsing ambiguity. |
-| Ephemeral keys | Agent keys live only for the duration of a run. No key rotation policy needed. Compromise of one key affects one job, not the entire system. |
-| 30-minute expiry | Matches the existing lease duration. A token cannot outlive its claim. |
+| Ephemeral keys | Agent keys live only for the duration of a run. No key rotation policy needed. Compromise of one key affects one job, not the entire system. Short expiry is the effective revocation mechanism for agent keys. |
+| 30-minute expiry | Matches the existing lease duration. A token cannot outlive its claim. Refreshed on lease renewal for long-running jobs. |
+| Post-quantum | Ed25519 is the right default now. PQ signatures (e.g., ML-DSA-65/Dilithium) are 2–3× larger, slower, and have less mature Go library support. The realistic threat is a compromised agent or VM within the trust boundary, not a quantum adversary. Future-proofing: wrap `crypto/ed25519` behind a `Signer` interface from day one so the signing primitive can be swapped without changing call sites. PQ migration is tracked as future work. |
 
 ### Dependencies
 
@@ -244,7 +338,13 @@ work: encrypt at rest with a passphrase or use OS keychain integration.
 
 **Token theft:** If an agent's token file is stolen before deletion, the
 attacker has a 30-minute window with scoped capabilities. Mitigation: the token
-is deleted on read, and capabilities are narrow.
+is deleted on read by the worker; supervisor cleanup removes orphaned files on
+job completion; a startup sweep removes stale files older than max expiry.
+Capabilities are narrow and job-scoped.
+
+**Token deletion race condition:** See §2 (Token delivery) for the full
+treatment. The core mitigation is supervisor-side cleanup, not reliance on the
+worker process to always delete its own token file.
 
 **Replay attacks:** Tokens include `job_id` and `expires_at`. A replayed token
 for a different job_id is rejected. An expired token is rejected.
@@ -252,7 +352,24 @@ for a different job_id is rejected. An expired token is rejected.
 **Canonical JSON:** Signature verification requires identical serialization.
 We define canonical JSON as: sorted keys, no whitespace, no trailing commas,
 UTF-8 encoding. The `json.Marshal` output with sorted struct fields satisfies
-this for Go structs; for maps, keys must be explicitly sorted.
+this for Go structs. **Critical:** Go randomizes map iteration order. Any field
+of type `map[string]any` (e.g., `AttestationRecord.Metadata`) must never be
+included in the signed payload directly. Options: (a) exclude map fields from
+the signed payload entirely, (b) serialize map fields to a sorted key-value list
+before signing, or (c) convert the map to a sorted slice of `{key, value}` pairs.
+The canonical serialization helper must be tested with map inputs as part of the
+Phase 1 test suite.
+
+**Choir CA authority:** See §1 (Choir CA authority boundary). The VM supervisor
+signs agent tokens; the hypervisor signs only VM intermediate CAs. A compromised
+VM intermediate CA affects all agents dispatched from that VM for the
+intermediate's lifetime. The ADR does not yet specify the VM intermediate CA
+lifetime or rotation policy; this is tracked as follow-on work.
+
+**Hypervisor availability:** If the hypervisor root CA is unavailable, no new VM
+intermediate CAs can be issued. This halts new VM onboarding but does not affect
+VMs with already-issued intermediate CAs. Operationally, the hypervisor CA only
+needs to be online when adding new VMs to a choir fleet.
 
 ### Alternatives Considered
 
@@ -266,5 +383,8 @@ transparency logs. Relevant for the public artifact case but requires network
 access to Rekor/Fulcio. Could be layered on top for public verifiability.
 
 **Hardware-backed keys (TPM/Secure Enclave):** Ideal for choir VMs. Out of
-scope for Phase 1 but the Ed25519 interface is compatible — the private key
-operations can be delegated to hardware in the future.
+scope for Phase 1 but the `Signer` interface abstraction is compatible — the
+private key operations can be delegated to hardware in the future.
+
+**COSE/CWT:** Considered and rejected for Phase 1. See Cryptographic Choices
+table. Revisit if external system interop is needed.

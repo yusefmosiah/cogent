@@ -1330,10 +1330,10 @@ func truncateText(text string, limit int) string {
 	return text[:limit]
 }
 
-// handleJobCompletion dispatches an attestation run after a worker completes.
-// The attestor independently reviews: did files change? do changes match the
+// handleJobCompletion dispatches attestation run(s) after a worker completes.
+// The attestor(s) independently review: did files change? do changes match the
 // objective? did the worker report verification results? does it build?
-// The attestor marks the work item done (pass) or failed (retry with context).
+// Each attestor marks the work item done (pass) or failed (retry with context).
 //
 // Three-layer model:
 //   - Verification: workers verify their own work during their run (tests, build checks)
@@ -1341,6 +1341,11 @@ func truncateText(text string, limit int) string {
 //   - Attestation: an independent agent reviews after the worker exits. Checks the diff,
 //     reads worker findings, runs its own checks, and gates the state transition.
 //   - Retry: if attestation fails, the failure reason feeds into the next worker's briefing.
+//
+// When the work item has RequiredAttestations, each blocking slot is dispatched
+// sequentially using a different model (round-robin offset per slot index).
+// The work item only transitions to done once ALL blocking slots pass.
+// Work items without RequiredAttestations receive the default single attestation.
 func handleJobCompletion(ctx context.Context, svc *service.Service, hub *wsHub, selfBin, configPath, cwd, workID string, flight *inFlightJob, defaultAdapter string) bool {
 	workResult, err := svc.Work(ctx, workID)
 	if err != nil {
@@ -1356,7 +1361,7 @@ func handleJobCompletion(ctx context.Context, svc *service.Service, hub *wsHub, 
 	work := workResult.Work
 
 	// Generate attestation nonce — this didn't exist while the worker was running,
-	// so the worker cannot have used it. The attestor receives it in the prompt.
+	// so the worker cannot have used it. All attestors for this completion receive it.
 	nonce := core.GenerateID("nonce")
 	if work.Metadata == nil {
 		work.Metadata = map[string]any{}
@@ -1368,7 +1373,7 @@ func handleJobCompletion(ctx context.Context, svc *service.Service, hub *wsHub, 
 		CreatedBy: "attestation",
 	})
 
-	// Collect worker's verification findings (notes) for the attestor
+	// Collect worker's verification findings (notes) for the attestor(s)
 	var workerFindings string
 	for _, note := range workResult.Notes {
 		if note.NoteType == "finding" || note.NoteType == "verification" {
@@ -1379,6 +1384,57 @@ func handleJobCompletion(ctx context.Context, svc *service.Service, hub *wsHub, 
 		workerFindings = "(worker reported no verification findings)"
 	}
 
+	workerIdx := rotationIndexForAdapter(flight.adapter)
+
+	// For work items with no RequiredAttestations, dispatch the default single attestation
+	// using offset +1 from the worker's adapter.
+	if len(work.RequiredAttestations) == 0 {
+		attestAdapter, attestModel := attestAdapterModel(flight.adapter)
+		return dispatchAttestorAndWait(ctx, svc, hub, selfBin, configPath, cwd, workID, work, flight, workerFindings, nonce, attestAdapter, attestModel, 0)
+	}
+
+	// Multi-attestation: loop until all blocking slots are satisfied.
+	// Each slot dispatches a different model (round-robin offset by slot index).
+	// We dispatch slots sequentially: wait for each attestor to complete before
+	// dispatching the next, so each attestor sees the prior attestation records.
+	dispatched := false
+	const maxRounds = 20 // safety cap against unexpected looping
+	for round := 0; round < maxRounds; round++ {
+		latestResult, fetchErr := svc.Work(ctx, workID)
+		if fetchErr != nil {
+			break
+		}
+		unsatisfied := service.UnsatisfiedAttestationSlotIndices(latestResult.Work, latestResult.Attestations)
+		if len(unsatisfied) == 0 {
+			break // all blocking slots have passing attestations
+		}
+		// Work failed mid-attestation (e.g. a prior attestor recorded failed).
+		if latestResult.Work.ExecutionState == core.WorkExecutionStateFailed {
+			break
+		}
+
+		slotIdx := unsatisfied[0]
+		// Rotate: worker uses slot W, attestors use W+1, W+2, … (wrapping).
+		var attestIdx int
+		if workerIdx >= 0 {
+			attestIdx = (workerIdx + 1 + slotIdx) % len(workRotation)
+		} else {
+			attestIdx = (slotIdx + 1) % len(workRotation)
+		}
+		entry := workRotation[attestIdx]
+
+		if !dispatchAttestorAndWait(ctx, svc, hub, selfBin, configPath, cwd, workID, latestResult.Work, flight, workerFindings, nonce, entry.adapter, entry.model, slotIdx) {
+			return false
+		}
+		dispatched = true
+	}
+	return dispatched
+}
+
+// dispatchAttestorAndWait spawns an attestation job for a single slot, waits for
+// the job to reach a terminal state, and returns true if it dispatched successfully.
+// On dispatch failure it marks the work item failed and returns false.
+func dispatchAttestorAndWait(ctx context.Context, svc *service.Service, hub *wsHub, selfBin, configPath, cwd, workID string, work core.WorkItemRecord, flight *inFlightJob, workerFindings, nonce, attestAdapter, attestModel string, slotIdx int) bool {
 	attestPrompt := fmt.Sprintf(`You are an attestation agent. A worker just finished work item %s.
 Your job is to independently verify the work was done correctly.
 
@@ -1420,9 +1476,6 @@ Be thorough but concise.`,
 		workerFindings,
 		workID, nonce, workID, nonce, workID, nonce)
 
-	// Dispatch attestation via a different model than the worker (rotation offset +1).
-	attestAdapter, attestModel := attestAdapterModel(flight.adapter)
-
 	args := []string{"run", "--json", "--adapter", attestAdapter, "--cwd", cwd,
 		"--model", attestModel, "--work", workID, "--prompt", attestPrompt}
 	if configPath != "" {
@@ -1439,7 +1492,7 @@ Be thorough but concise.`,
 		_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
 			WorkID:         workID,
 			ExecutionState: core.WorkExecutionStateFailed,
-			Message:        fmt.Sprintf("attestation: dispatch failed: %v", spawnErr),
+			Message:        fmt.Sprintf("attestation: slot %d dispatch failed: %v", slotIdx, spawnErr),
 			CreatedBy:      "attestation",
 		})
 		return false
@@ -1462,9 +1515,24 @@ Be thorough but concise.`,
 	// Don't mark done — the attestor will do it via cagent work attest
 	_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
 		WorkID:    workID,
-		Message:   fmt.Sprintf("attestation: dispatched %s via %s/%s", attestJobID, attestAdapter, attestModel),
+		Message:   fmt.Sprintf("attestation: slot %d dispatched %s via %s/%s", slotIdx, attestJobID, attestAdapter, attestModel),
 		CreatedBy: "attestation",
 	})
+
+	// Wait for the attestation job to reach a terminal state so we can dispatch
+	// the next slot (if any) only after this attestor has recorded its result.
+	if attestJobID != "(unknown)" {
+		if _, waitErr := svc.WaitStatus(ctx, attestJobID, 5*time.Second, 30*time.Minute); waitErr != nil {
+			_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+				WorkID:         workID,
+				ExecutionState: core.WorkExecutionStateFailed,
+				Message:        fmt.Sprintf("attestation: slot %d wait failed: %v", slotIdx, waitErr),
+				CreatedBy:      "attestation",
+			})
+			return false
+		}
+	}
+
 	return true
 }
 

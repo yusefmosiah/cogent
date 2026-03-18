@@ -1956,11 +1956,23 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 	// you can't attest without also committing a state change.
 	switch req.Result {
 	case "passed":
-		work.ExecutionState = core.WorkExecutionStateDone
-		work.ClaimedBy = ""
-		work.ClaimedUntil = nil
-		if shouldSetPendingApproval(work) {
-			work.ApprovalState = core.WorkApprovalStatePending
+		// When a work item has required attestation slots, only transition to done
+		// once ALL blocking slots have a passing attestation. Until then, leave the
+		// execution state unchanged so the supervisor can dispatch remaining slots.
+		shouldSetDone := true
+		if len(work.RequiredAttestations) > 0 {
+			allAttestations, fetchErr := s.store.ListAttestationRecords(ctx, "work", req.WorkID, 200)
+			if fetchErr == nil {
+				shouldSetDone = requiredAttestationsResolved(work, allAttestations)
+			}
+		}
+		if shouldSetDone {
+			work.ExecutionState = core.WorkExecutionStateDone
+			work.ClaimedBy = ""
+			work.ClaimedUntil = nil
+			if shouldSetPendingApproval(work) {
+				work.ApprovalState = core.WorkApprovalStatePending
+			}
 		}
 	case "failed":
 		work.ExecutionState = core.WorkExecutionStateFailed
@@ -3802,6 +3814,23 @@ func requiredAttestationsResolved(work core.WorkItemRecord, attestations []core.
 		}
 	}
 	return true
+}
+
+// UnsatisfiedAttestationSlotIndices returns the indices (into RequiredAttestations)
+// of blocking slots that do not yet have a passing, non-superseded attestation.
+// Used by the supervisor to determine how many more attestors to dispatch.
+func UnsatisfiedAttestationSlotIndices(work core.WorkItemRecord, attestations []core.AttestationRecord) []int {
+	superseded := supersededAttestationIDs(attestations)
+	var result []int
+	for i, slot := range work.RequiredAttestations {
+		if !slot.Blocking {
+			continue
+		}
+		if !hasPassingAttestationForSlot(work, slot, attestations, superseded) {
+			result = append(result, i)
+		}
+	}
+	return result
 }
 
 func supersededAttestationIDs(attestations []core.AttestationRecord) map[string]bool {
