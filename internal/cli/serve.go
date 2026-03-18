@@ -475,9 +475,8 @@ Worker job: %s
 ## Attestation procedure
 1. Run: git diff --stat
 2. If NO files changed (only .cagent/cagent.db or nothing):
-   The worker failed silently. Record and fail:
-   cagent work note-add %s --type finding --text "attestation: no code changes produced by worker"
-   cagent work fail %s --message "attestation: no code changes produced"
+   The worker failed silently. Attest failure:
+   cagent work attest %s --result failed --summary "no code changes produced by worker" --verifier-kind attestation --method automated_review
    Stop.
 
 3. If files changed, review the diff:
@@ -487,17 +486,20 @@ Worker job: %s
    - Check for obvious errors or regressions
 
 4. If the work is correct and complete:
-   cagent work note-add %s --type finding --text "attestation: passed — N files changed, builds clean, changes match objective"
-   cagent work complete %s --message "attestation: passed"
+   cagent work attest %s --result passed --summary "N files changed, builds clean, changes match objective" --verifier-kind attestation --method automated_review
+   Stop.
 
 5. If the work is incorrect or incomplete:
-   cagent work note-add %s --type finding --text "attestation: failed — <specific reason with details>"
-   cagent work fail %s --message "attestation: <brief reason>"
+   cagent work attest %s --result failed --summary "<specific reason>" --verifier-kind attestation --method automated_review
+   Stop.
 
-Be thorough but concise. The failure message will be injected into the retry briefing.`,
+IMPORTANT: You MUST run exactly one cagent work attest command. This is the attestation contract —
+the attest command atomically records your finding AND transitions the work item state.
+Do not use cagent work complete or cagent work fail. Only cagent work attest.
+Be thorough but concise.`,
 		workID, work.Title, work.Objective, flight.adapter, flight.jobID,
 		workerFindings,
-		workID, workID, workID, workID, workID, workID)
+		workID, workID, workID)
 
 	// Dispatch attestation via opencode/glm-5-turbo
 	attestAdapter := "opencode"

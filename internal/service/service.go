@@ -1933,23 +1933,39 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 	if err := s.store.CreateAttestationRecord(ctx, record); err != nil {
 		return nil, nil, err
 	}
-	if shouldSetPendingApproval(work) {
-		work.ApprovalState = core.WorkApprovalStatePending
-		work.UpdatedAt = now
-		if err := s.store.UpdateWorkItem(ctx, work); err != nil {
-			return nil, nil, err
+
+	// Attestation is transactional: recording the attestation also transitions
+	// the work item's execution state. This is the attestation contract —
+	// you can't attest without also committing a state change.
+	switch req.Result {
+	case "passed":
+		work.ExecutionState = core.WorkExecutionStateDone
+		work.ClaimedBy = ""
+		work.ClaimedUntil = nil
+		if shouldSetPendingApproval(work) {
+			work.ApprovalState = core.WorkApprovalStatePending
 		}
+	case "failed":
+		work.ExecutionState = core.WorkExecutionStateFailed
+		work.ClaimedBy = ""
+		work.ClaimedUntil = nil
 	}
+	work.UpdatedAt = now
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, nil, err
+	}
+
 	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
-		UpdateID:      core.GenerateID("wup"),
-		WorkID:        work.WorkID,
-		ApprovalState: work.ApprovalState,
-		Message:       req.Summary,
-		JobID:         req.JobID,
-		SessionID:     req.SessionID,
-		ArtifactID:    req.ArtifactID,
-		CreatedBy:     req.CreatedBy,
-		CreatedAt:     now,
+		UpdateID:       core.GenerateID("wup"),
+		WorkID:         work.WorkID,
+		ExecutionState: work.ExecutionState,
+		ApprovalState:  work.ApprovalState,
+		Message:        req.Summary,
+		JobID:          req.JobID,
+		SessionID:      req.SessionID,
+		ArtifactID:     req.ArtifactID,
+		CreatedBy:      req.CreatedBy,
+		CreatedAt:      now,
 		Metadata: map[string]any{
 			"attestation_result":   req.Result,
 			"attestation_method":   record.Method,
