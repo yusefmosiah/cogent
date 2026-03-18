@@ -1476,6 +1476,31 @@ func (s *Service) ReconcileOnStartup(ctx context.Context) ([]string, error) {
 			CreatedAt: now,
 		})
 	}
+
+	// Fail orphan jobs: any job still marked "running" has no live supervisor
+	// watching it. The invariant is that all active runs must be tracked in the
+	// supervisor's in-flight map. On startup, nothing is in-flight yet, so any
+	// "running" job in the DB is orphaned. Mark them failed so their work items
+	// can be retried.
+	orphans, err := s.store.ListJobsFiltered(ctx, 200, "", string(core.JobStateRunning), "")
+	if err == nil {
+		for _, job := range orphans {
+			job.State = core.JobStateFailed
+			job.FinishedAt = &now
+			job.UpdatedAt = now
+			_ = s.store.UpdateJob(ctx, job)
+			if job.WorkID != "" {
+				_, _ = s.UpdateWork(ctx, WorkUpdateRequest{
+					WorkID:         job.WorkID,
+					ExecutionState: core.WorkExecutionStateFailed,
+					Message:        fmt.Sprintf("orphan job %s failed during reconciliation", job.JobID),
+					CreatedBy:      "reconciler",
+				})
+			}
+			ids = append(ids, job.JobID)
+		}
+	}
+
 	return ids, nil
 }
 
