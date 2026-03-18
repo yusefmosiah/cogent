@@ -1654,6 +1654,13 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	now := time.Now().UTC()
 	if req.ExecutionState != "" {
+		// Guard: cannot transition to done via UpdateWork if attestation is unresolved.
+		// Done must be reached through AttestWork or refreshAttestationParentState.
+		if req.ExecutionState == core.WorkExecutionStateDone {
+			if err := s.guardDoneTransition(ctx, work); err != nil {
+				return nil, err
+			}
+		}
 		work.ExecutionState = req.ExecutionState
 	}
 	if req.ApprovalState != "" {
@@ -5769,6 +5776,30 @@ func (s *Service) refreshParentAfterAttestationChild(ctx context.Context, child 
 		return nil
 	}
 	return s.refreshAttestationParentState(ctx, parentID)
+}
+
+// guardDoneTransition returns an error if the work item cannot transition to done
+// because it has unresolved attestation requirements or pending attestation children.
+func (s *Service) guardDoneTransition(ctx context.Context, work core.WorkItemRecord) error {
+	// Check for attestation children that aren't done
+	children, err := s.store.ListWorkChildren(ctx, work.WorkID, 100)
+	if err == nil {
+		for _, child := range children {
+			if child.Kind == "attest" && child.ExecutionState != core.WorkExecutionStateDone {
+				return fmt.Errorf("%w: work item %s has pending attestation child %s (state: %s)",
+					ErrInvalidInput, work.WorkID, child.WorkID, child.ExecutionState)
+			}
+		}
+	}
+	// Check required attestations (legacy path without children)
+	if len(work.RequiredAttestations) > 0 {
+		attestations, fetchErr := s.store.ListAttestationRecords(ctx, "work", work.WorkID, 200)
+		if fetchErr == nil && !requiredAttestationsResolved(work, attestations) {
+			return fmt.Errorf("%w: work item %s has unresolved required attestations",
+				ErrInvalidInput, work.WorkID)
+		}
+	}
+	return nil
 }
 
 func (s *Service) refreshAttestationParentState(ctx context.Context, parentID string) error {
