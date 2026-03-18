@@ -333,8 +333,8 @@ func runSupervisor(cmd *cobra.Command, root *rootOptions, opts *supervisorOption
 
 		// 0. Auto-init: if no active work on first cycle, bootstrap
 		if cycle == 1 {
-			readyWork, listErr := svc.ReadyWork(ctx, 1, false)
-			if listErr == nil && len(readyWork) == 0 {
+			allWork, listErr := svc.ListWork(ctx, service.WorkListRequest{Limit: 1, IncludeArchived: true})
+			if listErr == nil && len(allWork) == 0 {
 				if !jsonOutput {
 					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "supervisor: empty work graph, bootstrapping %s\n", cwd)
 				}

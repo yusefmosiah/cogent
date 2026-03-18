@@ -1428,10 +1428,10 @@ func runInProcessSupervisor(ctx context.Context, svc *service.Service, cwd strin
 
 		cycle++
 
-		// Auto-init
+		// Auto-init: only bootstrap if the work graph has never been used
 		if cycle == 1 {
-			readyWork, _ := svc.ReadyWork(ctx, 1, false)
-			if len(readyWork) == 0 {
+			allWork, _ := svc.ListWork(ctx, service.WorkListRequest{Limit: 1, IncludeArchived: true})
+			if len(allWork) == 0 {
 				_ = bootstrapRepo(ctx, svc, cwd)
 			}
 		}
