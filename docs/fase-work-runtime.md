@@ -1,326 +1,250 @@
-Date: 2026-03-10
-Kind: Guide + spec
-Status: Draft
+Date: 2026-03-20
+Kind: Design document
+Status: Implemented (v0)
 Priority: 1
 Requires: [fase-spec-and-implementation-guide.md]
 Owner: Runtime / Work System
 
 ## Narrative Summary (1-minute read)
 
-`fase` is evolving from a durable job runner into a durable work runtime for
-coding agents.
+The work runtime is the durable semantic layer of fase. Work items are the
+primary abstraction above jobs and sessions. Typed edges express structural
+relationships between work items. A three-tier graph mutation model separates
+execution updates from structural proposals from approval-gated changes. Workers
+hydrate from compiled briefings that are deterministic projections of runtime
+state. Documentation is a read-only projection, not a separate source of truth.
 
-The core idea is that `work`, not prompts, becomes the source of truth.
-Coding-agent sessions are execution vehicles attached to work. Adapters are
-transport backends. The runtime persists the state that matters:
-- work items
-- work updates
-- notes and discoveries
-- attestation and approval state
-- artifacts and history
-- derived projections of the current system state
+The core principle: prompts are compiled views over runtime state, not the
+primary control plane. The briefing JSON passed to every worker is the output
+of `CompileWorkerBriefing`, not a handwritten prompt.
 
-This is the bridge from filesystem Markdown docs to a semantic work system.
-Markdown was the bootstrap medium. The work runtime becomes the durable semantic
-medium. Documentation can then become a deterministic projection of work state
-instead of a separate hand-maintained truth universe.
+## 1) Core Principle
 
-## What Changed
+### Prompts are compiled views, not the control plane
 
-1. Defined `work` as the primary abstraction above jobs and sessions.
-2. Framed `fase` as a single integrated runtime, not a federation of hidden
-   actors.
-3. Made worker hydration from work state the happy path, with prompting as a
-   derived compatibility layer.
-4. Separated canonical `history search` from future adapter-native history
-   import.
-5. Connected the work runtime directly to deterministic documentation
-   generation.
-
-## What To Do Next
-
-1. Implement the minimum `work` data model.
-2. Add worker-safe read/update commands for work state.
-3. Attach jobs and sessions to work items.
-4. Add attestation and discovery records as first-class objects.
-5. Render deterministic doc views from work state and linked artifacts.
-
-## 1) Product Direction
-
-`fase` is becoming a runtime for coding-agent work.
-
-The runtime should unify:
-- heterogeneous coding-agent interfaces,
-- long-running and resumable execution,
-- cross-adapter failover,
-- durable work coordination,
-- attestation and approval,
-- documentation as a projection over current state.
-
-This does not make `fase` a hosted workflow SaaS or a general distributed
-workflow engine. It remains a local machine runtime. The expansion is semantic,
-not infrastructural.
-
-## 2) Core Principle
-
-### Prompting considered harmful
-
-Prompts are not the source of truth.
-
-They are:
-- lossy,
-- expensive,
-- hard to diff,
-- hard to validate,
-- easy to drift from actual system state.
+Prompts are not the source of truth. They are lossy, expensive, hard to diff,
+hard to validate, and easy to drift from actual system state.
 
 The happy path is:
-1. a worker is launched,
-2. the worker hydrates from durable work state,
-3. the worker acts,
-4. the worker publishes progress back into work state.
+1. a work item exists in the work graph with an objective and constraints,
+2. a supervisor claims the work item and compiles a briefing from runtime state,
+3. the briefing JSON is passed as the prompt to a worker,
+4. the worker acts, publishing structured updates and notes back to the work item,
+5. attestation and approval follow from durable evidence.
 
-Prompts still exist, but as compiled views over runtime state, not as the
-primary control plane.
+This is already how the system works. `CompileWorkerBriefing` in
+`internal/service/service.go:1351` is the single compiler. The supervisor loop
+in `internal/cli/supervisor_loop.go:220` claims, hydrates, serializes to JSON,
+and passes the result directly as `--prompt` to `fase run`.
 
-## 3) Runtime Framing
+## 2) Work As The Primary Abstraction
 
-`fase` is one integrated runtime.
+Jobs are execution-shaped. Work is orchestration-shaped.
 
-It is not best modeled as a collection of durable actors with hidden private
-mailboxes. A more Go-shaped framing is:
-- work items are durable structs in storage,
-- worker sessions are transient processors,
-- updates/notes/discoveries are durable messages,
-- claims are leases,
-- summaries/projections are materialized views,
-- adapters are execution backends.
-
-The runtime remembers. Workers consult and mutate. Adapters execute.
-
-## 4) Work As The Primary Abstraction
-
-Jobs are execution-shaped.
-Work is orchestration-shaped.
-
-One work item may involve:
+One work item (`WorkItemRecord`) may involve:
 - one or more research jobs,
 - implementation jobs,
 - attestation-producing jobs,
 - review jobs,
 - retries,
-- child work items,
+- child work items linked by `parent_of` edges,
 - debrief and transfer artifacts.
 
-That makes `work` the natural object for:
-- identity,
-- continuity,
-- attestation,
-- documentation,
-- coordination,
-- recovery.
+That makes work the natural object for identity, continuity, attestation,
+documentation, coordination, and recovery.
 
-## 5) Core Work Objects
+Jobs (`JobRecord`) and sessions (`SessionRecord`) are execution traces attached
+to work items via `current_job_id` and `current_session_id`. A work item
+survives job failure, session loss, and adapter changes. The invariant holds:
+agents may always stop, the system may always resume.
 
-### 5.1 Work Item
+### 2.1 Work Item Record
 
-A durable unit of responsibility.
+Defined in `internal/core/types.go:345`:
 
-Minimum fields:
-- `work_id`
-- `title`
-- `objective`
-- `kind`
-- `status`
-- `phase`
-- `parent_work_id`
-- `retry_of_work_id`
-- `current_job_id`
-- `current_session_id`
-- `acceptance_criteria`
-- `required_capabilities`
-- `preferred_adapters`
-- `forbidden_adapters`
-- `configuration_class`
-- `budget_class`
-- `metadata`
+```
+WorkItemRecord
+  work_id               string           -- immutable identity
+  title                 string           -- human-readable label
+  objective             string           -- what needs to happen
+  kind                  string           -- semantic hint (plan, task, implement, attest, review, ...)
+  execution_state       WorkExecutionState -- 9-state machine
+  approval_state        WorkApprovalState  -- 4-state machine
+  lock_state            WorkLockState      -- unlocked | human_locked
+  phase                 string           -- informational progress marker
+  priority              int              -- dispatch ordering
+  position              int              -- queue ordering within priority
+  configuration_class   string           -- runtime config selection
+  budget_class          string           -- cost governance
+  required_capabilities []string         -- capability constraints
+  required_model_traits []string         -- model selection hints
+  preferred_adapters    []string         -- adapter preferences
+  forbidden_adapters    []string         -- adapter exclusions
+  preferred_models      []string         -- model preferences
+  avoid_models          []string         -- model exclusions
+  required_attestations []RequiredAttestation -- verification policy
+  acceptance            map[string]any   -- acceptance criteria
+  metadata              map[string]any   -- open extension
+  head_commit_oid       string           -- git anchor for attestation freshness
+  attestation_frozen_at *time.Time       -- monotonic attestation contract
+  current_job_id        string           -- active execution trace
+  current_session_id    string           -- active session
+  claimed_by            string           -- lease holder
+  claimed_until         *time.Time       -- lease expiry
+  created_at            time.Time
+  updated_at            time.Time
+```
 
-### 5.2 Work Update
+### 2.2 Work Item Kinds
 
-Structured progress emitted by workers.
+Open-ended semantic hints, not a fixed ontology:
 
-Examples:
-- phase started
-- implementation completed
-- attestation failed
-- blocked on dependency
-- ready for review
+| Kind | Typical Use |
+|------|-------------|
+| `plan` | Architecture and design |
+| `research` | Investigation and exploration |
+| `implement` | Code changes |
+| `attest` | Verification and review |
+| `review` | Human or agent review |
+| `red_team` | Adversarial testing |
+| `doc` | Documentation work |
+| `recovery` | State repair and retry |
 
-Minimum fields:
-- `update_id`
-- `work_id`
-- `ts`
-- `status`
-- `phase`
-- `message`
-- `job_id`
-- `session_id`
-- `artifact_id`
-- `metadata`
+Kinds influence worker contract rules. For example, `attest` kind workers get
+a different set of contract rules and write commands, including the mandatory
+`fase work attest` instruction.
 
-### 5.3 Work Note
+## 3) Execution State Machine
 
-Unstructured but durable commentary.
+Execution state and approval state are deliberately separate. "Finished" and
+"accepted" are not the same thing.
 
-Examples:
-- verifier feedback
-- operator override
-- review finding
-- coordination reminder
+### 3.1 Execution States
 
-Notes are comments. Updates are structured progress.
+Defined in `internal/core/types.go:287`:
 
-### 5.4 Work Discovery
+```
+ready ──(claim)──> claimed ──(start)──> in_progress
+  ^                  │                     │
+  │                  │(release)            ├──> awaiting_attestation
+  │                  v                     │          │
+  │                ready                   ├──> blocked
+  │                                        │
+  │                                        v
+  │                              done / failed / cancelled
+  │                                        │
+  │                                        v
+  │                                     archived
 
-A proposed new work item discovered during execution.
+Terminal: done, failed, cancelled, archived
+```
 
-Discovered work should not immediately become accepted work. It first exists as
-a proposal to be triaged in context of the larger system state.
+Full state set: `ready`, `claimed`, `in_progress`,
+`awaiting_attestation`, `blocked`, `done`, `failed`, `cancelled`,
+`archived`.
 
-### 5.5 Attestation Record
+Transition guards (`internal/service/service.go:1988`):
+- Cannot transition to `done` or `archived` if attestation policy has
+  unresolved blocking attestations.
+- Moving to `done` with an attestation policy auto-sets
+  `approval_state = pending`.
 
-Explicit evidence-bearing claim that a result, artifact, document, or proposal
-was checked.
+### 3.2 Approval States
 
-Execution completion is not approval. Attestation and approval must be
-first-class and attributable.
+Defined in `internal/core/types.go:322`:
 
-### 5.6 Claims
+`none` -> `pending` -> `verified` | `rejected`
 
-Leases over work items or native sessions.
+Approval requires all blocking attestations to have a passing result.
+Checked by `requiredAttestationsResolved()` before `ApproveWork` succeeds.
 
-If a worker dies, the work remains. Another worker can continue.
+### 3.3 Lock States
 
-## 6) Execution State vs Approval State
+`unlocked` | `human_locked`
 
-These should remain separate.
+Human-locked items are excluded from the ready projection and cannot be
+claimed by automated dispatch.
 
-Execution state:
-- `queued`
-- `in_progress`
-- `blocked`
-- `failed`
-- `done`
+## 4) Typed Edges
 
-Approval state:
-- `pending`
-- `verified`
-- `rejected`
-- `approved`
+The work graph is over work items, not over sessions or jobs. Edges are
+first-class records (`WorkEdgeRecord` in `internal/core/types.go:377`).
 
-This matters because "finished" and "accepted" are not the same thing.
+### 4.1 Edge Types
 
-## 7) Work Graph Semantics
+| Edge Type | Semantics | Blocking? | Direction Convention |
+|-----------|-----------|-----------|---------------------|
+| `parent_of` | Hierarchy and scope grouping | No | from=parent, to=child |
+| `blocks` | Hard prerequisite for readiness | Yes | from=prerequisite, to=dependent |
+| `verifies` | Attestation/approval relationship | No | from=verifier, to=subject |
+| `discovered_from` | Lineage without blocking | No | from=source, to=discovery |
+| `supersedes` | Replacement for retries/rewrites | Yes (soft) | from=newer, to=older |
+| `relates_to` | Weak informational relationship | No | bidirectional |
 
-The graph should be over work, not over sessions or jobs.
+### 4.2 Parent-Child Constraint
 
-Sessions and jobs are execution traces.
-Work nodes are the durable semantic units.
+Parent edges form an acyclic forest. A work item has at most one parent.
+Children are parallel by default. If ordering matters, explicit `blocks` edges
+must be used.
 
-The runtime needs:
-- durable work nodes,
-- explicit typed edges,
-- deterministic projections such as `ready`, `blocked`, and `awaiting_approval`,
-- agentic participation in shaping the graph through explicit API operations.
+### 4.3 Edge Record
 
-### 7.1 Nodes
+```
+WorkEdgeRecord
+  edge_id     string         -- immutable identity
+  from_work_id string        -- source node
+  to_work_id   string        -- target node
+  edge_type    string        -- one of the typed edge types
+  metadata     map[string]any -- open extension
+  created_by   string        -- identity of creator
+  created_at   time.Time
+```
 
-The primary node type is the work item.
+## 5) Ready Projection
 
-Useful initial kinds:
-- `plan`
-- `research`
-- `implement`
-- `verify`
-- `review`
-- `red_team`
-- `doc`
-- `recovery`
+`ready` is the most important projection in the graph. It is the machine
+answer to "what can run now?"
 
-Kinds should stay open-ended. They are semantic hints, not a fixed ontology.
+Implemented in `internal/store/store.go:825` as `ListReadyWork`. A work item
+is ready when all of the following hold:
 
-### 7.2 Edges
+1. `execution_state = 'ready'`, or `execution_state = 'claimed'` with an
+   expired lease (claim reclamation).
+2. Not currently held by a valid lease (`claimed_by` is empty, or
+   `claimed_until` has passed).
+3. Not `human_locked`.
+4. No incoming `blocks` or `depends_on` edges from work items that are not
+   in a terminal execution state (`done` or `cancelled`).
+5. No incoming `supersedes` edges from work items that are not in a terminal
+   failure state (`failed` or `cancelled`).
 
-The initial edge set should stay small and explicit:
+Results are ordered by `priority DESC, position ASC, updated_at DESC`.
 
-- `parent_of`
-  - hierarchy and scope grouping only
-- `blocks`
-  - hard prerequisite for readiness
-- `verifies`
-  - approval/attestation relationship
-- `discovered_from`
-  - lineage without blocking
-- `supersedes`
-  - replacement lineage for retries or plan rewrites
-- `relates_to`
-  - weak informational relationship
+## 6) Graph Mutation Model
 
-Parent-child should not imply sequence.
-Children are parallel by default. If order matters, use explicit `blocks`
-edges.
+Three tiers of operations with increasing governance cost.
 
-### 7.3 Ready Semantics
+### 6.1 Direct Mutations
 
-A work item is ready when:
-- it is not terminal,
-- all incoming `blocks` edges are satisfied,
-- it is not currently claimed,
-- any parent-level policy permits execution,
-- its required capabilities are satisfiable by at least one available worker.
+Routine execution operations a worker can perform directly via
+`fase work update`:
 
-`ready` is the most important projection in the graph. It is the machine answer
-to "what can run now?"
-
-### 7.4 Discovery Semantics
-
-Discovered work should begin as a proposal, not as automatically accepted work.
-
-That keeps agents from polluting the graph with speculative scope expansion.
-It also lets a coherence or triage flow judge new work in context of:
-- current objectives,
-- existing graph state,
-- duplicate or overlapping work,
-- budget and risk,
-- current documentation and attestation state.
-
-## 8) Graph Mutation Model
-
-The graph itself should remain deterministic.
-Interaction with the graph should be agentic.
-Governance of graph changes should itself be explicit work.
-
-This produces three operation classes.
-
-### 8.1 Direct Mutations
-
-Cheap, routine mutations that a worker can perform directly:
 - claim or release work,
-- update status or phase,
-- append a work update,
+- update execution state or phase,
+- append a work update record,
 - add a note,
 - attach an artifact,
 - mark blocked,
-- mark done,
-- mark failed,
-- create a discovered-work proposal stub,
-- create child work when explicitly allowed by local policy.
+- mark done or failed.
 
-These are execution-shaped operations.
+These are execution-shaped. They modify work item fields and append records
+but do not reshape the graph structure.
 
-### 8.2 Proposal-Based Structural Edits
+### 6.2 Proposal-Based Structural Edits
 
-Changes that reshape the graph should be explicit proposals:
+Changes that reshape the graph require explicit proposals
+(`WorkProposalRecord`):
+
 - split one work item into many,
 - merge duplicate work,
 - add or remove `blocks` edges,
@@ -331,12 +255,14 @@ Changes that reshape the graph should be explicit proposals:
 - reparent work,
 - rewrite dependency structure.
 
-These are graph-governance operations, not ordinary execution updates.
+Workers do not perform these directly. They are graph-governance operations.
+The worker contract enforces `dependency_edits: proposal_only` and
+`scope_expansion: proposal_only`.
 
-### 8.3 Approval-Gated Changes
+### 6.3 Approval-Gated Changes
 
-Some proposals should require attestation or explicit approval before
-application:
+Some proposals require attestation or explicit approval before application:
+
 - material scope expansion,
 - deletion or supersession of accepted work,
 - changes to approval or attestation policy,
@@ -344,311 +270,257 @@ application:
 - root-objective reframing,
 - changes with budget, security, or release implications.
 
-Execution is direct.
-Structure is proposed.
-Governance is explicit.
+The pattern: execution is direct, structure is proposed, governance is
+explicit.
 
-## 9) Planning And Prep Should Be Proportional
+## 7) Worker Hydration
 
-Not every task needs a full spec, plan, guide, implementation plan, and review
-packet before any work begins.
+Workers hydrate from compiled briefings, not from bespoke prompts.
 
-The amount of preamble should scale with task hardness.
+### 7.1 Compilation
 
-### 9.1 Low-Hardness Work
+`CompileWorkerBriefing(workID, mode)` in `internal/service/service.go:1351`
+is the single compiler. It:
 
-Examples:
-- small bugfixes,
-- narrow doc edits,
-- obvious local refactors,
-- quick probes,
-- targeted attestation.
+1. Loads the full work item plus children, updates, notes, jobs, proposals,
+   attestations, approvals, promotions, artifacts, and docs via `Work()`.
+2. Queries graph neighbors: parent, blocking inbound/outbound, children,
+   verifiers, discovered, supersedes/superseded_by.
+3. Truncates evidence to mode-dependent limits.
+4. Generates a summary, open questions, and recommended next actions.
+5. Builds worker contract rules (different for `attest` kind workers).
+6. Assembles the complete briefing JSON.
 
-Preferred approach:
-- create or claim the work,
-- hydrate thinly,
-- execute,
-- publish updates,
-- verify if needed.
+The output schema is `fase.worker_briefing.v1`, defined in
+`schemas/worker-briefing.schema.json` and documented in
+`docs/fase-worker-briefing-schema.md`.
 
-For this class of work, heavy ceremony is counterproductive.
+### 7.2 Hydration Modes
 
-### 9.2 Medium-Hardness Work
+| Mode | Updates | Notes | Attestations | Artifacts | Jobs | Use Case |
+|------|---------|-------|--------------|-----------|------|----------|
+| `thin` | 3 | 3 | 3 | 5 | 3 | Fast orientation, simple work |
+| `standard` | 10 | 10 | 10 | 20 | 10 | Default for most dispatches |
+| `deep` | 25 | 25 | 25 | 50 | 25 | Complex, recovery-heavy work |
 
-Examples:
-- feature slices,
-- interface changes,
-- multi-file implementation work,
-- migration steps,
-- adapter additions.
+### 7.3 Briefing Sections
 
-Preferred approach:
-- short plan,
-- explicit acceptance criteria,
-- maybe a checklist artifact,
-- implementation,
-- attestation,
-- review if risk warrants it.
+The briefing has 7 required sections:
 
-### 9.3 High-Hardness Work
+1. **runtime** -- provenance (version, config path, state dir, claimant).
+2. **assignment** -- the work item being hydrated (work_id, title, objective,
+   kind, states, lease).
+3. **requirements** -- acceptance criteria, capabilities, adapter preferences,
+   mutation policy.
+4. **graph_context** -- parent, blocking inbound/outbound, children, verifiers,
+   discovered, supersession.
+5. **evidence** -- recent updates, notes, attestations, artifacts, jobs,
+   history matches.
+6. **worker_contract** -- safe read/write commands and behavioral rules.
+7. **hydration** -- compiled summary, open questions, recommended next actions.
 
-Examples:
-- architectural shifts,
-- new subsystems,
-- safety or security sensitive work,
-- large migrations,
-- graph or runtime model changes,
-- release-critical coordination.
+### 7.4 Worker Contract
 
-Preferred approach:
-- explicit spec,
-- clear plan,
-- linked acceptance and attestation requirements,
-- implementation phases,
-- attestation and review,
-- deterministic reporting or documentation projection.
+Workers receive explicit read and write commands:
 
-The important rule is not "always do less prep" or "always do more prep."
-It is:
+Read commands:
+- `fase work show <work-id>`
+- `fase work notes <work-id>`
+- `fase artifacts list --work <work-id>`
+- `fase history search --query <text>`
 
-- do the minimum preparation that makes the next irreversible step legible,
-- and increase ceremony only when complexity, uncertainty, or risk justifies it.
+Write commands:
+- `fase work update <work-id>` -- structured progress updates
+- `fase work note-add <work-id>` -- commentary and findings
 
-## 10) Worker Hydration
+For `attest` kind workers, an additional write command is provided:
+- `fase work attest <parent-work-id> --result [passed|failed] --message "<summary>"`
 
-Workers should hydrate from runtime state, not from giant bespoke prompts.
+Workers are explicitly prohibited from:
+- creating new work items, proposals, or child work,
+- calling `fase work complete`, `fase work fail`, or `fase work attest`
+  (except attest-kind workers).
 
-Hydration inputs:
-- work item
-- latest updates
-- acceptance criteria
-- required capabilities
-- notes
-- linked artifacts
-- recent attestation findings
-- child work status
-- recent relevant history
+### 7.5 Dispatch Integration
 
-Hydration modes:
+The supervisor loop (`internal/cli/supervisor_loop.go:220`) performs:
 
-### Thin hydration
+1. `ClaimWork` with a 30-minute lease.
+2. `HydrateWork` in "standard" mode.
+3. `json.Marshal(briefing)` -- the compiled briefing IS the prompt.
+4. Issue capability token (Ed25519-signed, if CA is available).
+5. `spawnRun()` with `prompt = string(briefingJSON)`.
 
-Default path for ordinary work.
+No additional prompt wrapping occurs. The briefing JSON is the prompt.
 
-Includes:
-- objective
-- current phase
-- current blockers
-- key artifacts
-- most recent notes and attestation result
+## 8) Project Hydration
 
-### Deep hydration
+For cold-starting sessions without a specific work item assignment,
+`ProjectHydrate()` compiles a project-scoped briefing covering:
 
-For complex, recovery-heavy, or system-coherence work.
+- convention notes from all work items with `note_type='convention'`,
+- work graph summary (counts by state),
+- active, ready, blocked, and recently completed work,
+- pending attestations,
+- project-level contract rules.
 
-Includes:
-- broader work graph state
-- relevant recent history
-- rolling summaries
-- unresolved issues
-- significant artifacts
-- current frontier of active work
+This replaces the MEMORY.md bootstrap approach with a deterministic
+compilation from work state.
 
-Deep state should always exist in the runtime even when only a compact view is
-injected into a model context window.
+## 9) Documentation As Deterministic Projection
 
-## 11) Worker API
+Documentation is a read-only projection of work state, not a separate writable
+source of truth.
 
-Workers should interact with the runtime directly through a work API exposed by
-the `fase` CLI.
+### 9.1 Source Inputs
 
-Worker-safe read operations:
-- `work show`
-- `work notes`
-- `work artifacts`
-- `work children`
-- `work status`
-- `history search`
+Projections are rendered from durable records:
+- work items (objectives, state, acceptance criteria),
+- work edges (structural relationships),
+- work updates (progress timeline),
+- work notes (findings, conventions, commentary),
+- work proposals (pending structural changes),
+- attestation records (verification evidence),
+- artifacts (code, diffs, reports),
+- history (canonical session/turn/event records).
 
-Worker-safe update operations:
-- `work update`
-- `work note add`
-- `work block`
-- `work complete`
-- `work fail`
-- `work discover`
+### 9.2 DocContentRecord
 
-Host- or supervisor-oriented operations:
-- `work create`
-- `work retry`
-- `work claim`
-- `work approve`
-- `work reject`
-- `work list`
+The runtime stores generated doc content:
 
-The key point is that a running worker does not need hidden prompt injection to
-stay current. It can read and write the work API directly.
+```
+DocContentRecord
+  doc_id     string    -- identity
+  work_id    string    -- source work item
+  path       string    -- target filesystem path
+  title      string    -- human-readable label
+  body       string    -- rendered content
+  format     string    -- markdown, json, etc.
+  version    int       -- projection version
+  created_at time.Time
+  updated_at time.Time
+```
 
-## 11.1 Stable Worker Briefing
+### 9.3 Bridge From Filesystem Docs
 
-Workers should not start from bespoke handwritten prompts.
+Filesystem Markdown was the bootstrap medium. It let the system discover its
+conceptual shape before the runtime existed. The bridge is:
 
-They should start from a compiled, versioned worker briefing generated from
-runtime state. The stable contract is documented in
-[docs/fase-worker-briefing-schema.md](/Users/wiz/cagent/docs/fase-worker-briefing-schema.md)
-and the schema lives at
-[schemas/worker-briefing.schema.json](/Users/wiz/cagent/schemas/worker-briefing.schema.json).
-
-That briefing is the adapter-independent hydration contract. Natural-language
-prompt rendering is downstream of it.
-
-## 12) Dynamic Requirements, Not Predefined Worker Profiles
-
-Avoid predefined worker profiles as a core concept.
-
-Instead:
-- work declares requirements,
-- workers advertise capabilities,
-- claim/assignment matches the two.
-
-Examples:
-- E2E browser attestation may require `browser`, `multimodal`, and `tool_use`.
-- Cheap text research may require only `web` and `tool_use`.
-- Recovery summarization may prefer high context and strong synthesis.
-
-This keeps the runtime dynamic and prevents early overfitting to named worker
-roles.
-
-## 13) Canonical History vs Adapter Import
-
-General case:
-- `fase history search` over canonical sessions, jobs, turns, events, and
-  artifacts that `fase` already owns.
-
-Special case:
-- adapter-native history import for sessions that were never launched through
-  `fase`.
-
-The search path should be built on canonical history first. Native import is an
-extension, not the foundation.
-
-## 14) Documentation Bridge
-
-Filesystem Markdown is useful, but deeply flawed as the final system of record.
-
-Its failure modes:
-- truth split across parallel notes,
-- stale summaries,
-- no direct tie to execution or attestation,
-- weak semantics around lifecycle,
-- hard-to-enforce canonicality.
-
-But the filesystem-doc era was necessary. It let the system discover its own
-conceptual shape.
-
-The bridge is:
-- work state becomes the durable semantic layer,
+- work state is the durable semantic layer,
 - artifacts hold human-readable intermediate material,
 - Markdown docs become deterministic projections of current work state.
 
-This means future docs can be rendered from:
-- work graph state,
-- accepted decisions,
-- attestation records,
-- current summaries,
-- linked artifacts,
-- active lifecycle bucket.
+The filesystem-doc era was necessary. The work runtime era is the target.
+Generated docs can be regenerated from work state at any time.
 
-In other words:
-- Markdown was the bootstrap medium,
-- work becomes the semantic medium,
-- generated docs become the readable surface.
+### 9.4 Doc-Work Coupling
 
-## 15) Relationship To Existing Docs Systems
+Docs are coupled to work items via the `DocContentRecord.work_id` field.
+When work state changes, projections can be re-rendered. When attestation
+detects doc-code drift, the projection is stale.
 
-Many repositories already use Markdown docs as a lifecycle-organized knowledge
-system with:
-- an entrypoint,
-- current truth,
-- proposal space,
-- execution evidence,
-- archive/history.
+ADR-0002 (docs-before-execution) establishes:
+- plans are committed docs,
+- docs are safe to commit speculatively,
+- asynchrony between docs and execution is expected,
+- the work graph mirrors doc state,
+- attestation verifies doc-code consistency.
 
-`fase work` should not replace that intent.
+## 10) Attestation
 
-It should absorb the semantics behind it:
-- "current truth" maps to accepted work state and approved artifacts,
-- "proposal space" maps to draft work and discoveries,
-- "execution evidence" maps to updates, logs, attestations, and state artifacts,
-- "archive" maps to completed and superseded work history.
+Attestation is the centerpiece. Work is not "done" because an agent says so --
+it is done when durable evidence satisfies the attestation policy.
 
-This lets documentation stay useful for humans while its semantic backbone
-moves into the runtime.
+### 10.1 Required Attestations
 
-## 16) Minimum Viable Command Surface
+Each work item declares a verification policy:
 
-The first meaningful `work` layer likely needs:
-- `work create`
-- `work show`
-- `work list`
-- `work update`
-- `work note add`
-- `work notes`
-- `work complete`
-- `work fail`
-- `work block`
-- `work children`
-- `work retry`
-- `run --work`
-- `send --work`
-- `artifacts list --work`
+```
+RequiredAttestation
+  verifier_kind  string         -- "deterministic", "code_review", "security", etc.
+  method         string         -- "test", "review", etc.
+  blocking       bool           -- must pass before approval
+  metadata       map[string]any
+```
 
-Future additions:
-- `work claim`
-- `work claim-next`
-- `work release`
-- `work approve`
-- `work reject`
-- `work discover`
-- `work ready`
-- `work updates`
-- `work projection`
-- `work propose`
-- `work proposal accept`
-- `work proposal reject`
+### 10.2 Attestation Record
 
-## 17) Bash-Orchestrated Shape
+```
+AttestationRecord
+  attestation_id            string
+  subject_kind              string    -- "work", "job", "session", "artifact", "doc", "projection"
+  subject_id                string
+  result                    string    -- "passed", "failed", "inconclusive", "matches", "drifted"
+  summary                   string
+  artifact_id               string
+  job_id, session_id        string
+  method                    string    -- "deterministic", "self_report", "third_party_review", "human"
+  verifier_kind             string
+  verifier_identity         string
+  confidence                float64
+  blocking                  bool
+  signer_pubkey             string    -- Ed25519 public key
+  signature                 string    -- Ed25519 signature
+  metadata                  map[string]any
+  created_by                string
+  created_at                time.Time
+```
 
-The shell remains the orchestration language.
-The runtime owns the durable semantics.
+### 10.3 Attestation Freshness
 
-Bash should keep:
-- sequencing,
-- fanout/fanin,
-- branching,
-- retries,
-- policy.
+An attestation only satisfies a policy slot if its `metadata.commit_oid`
+matches the work item's current `head_commit_oid`. When new code lands,
+prior attestations become stale.
 
-`fase` should own:
-- work identity,
-- updates,
-- notes,
-- discovery,
-- attestation,
-- history,
-- claims,
-- projections.
+### 10.4 Monotonic Attestation Contract
 
-This preserves the current bash-friendly shape while giving the system a much
-stronger substrate.
+ADR-0036 proposes replacing synchronous `handleJobCompletion` with:
+- predefined attestation slots frozen at dispatch,
+- escalation-only after completion,
+- attestation jobs as first-class work items in the dispatch queue,
+- `awaiting_attestation` as an explicit execution state.
 
-## 18) Product Statement
+### 10.5 Verification
 
-`fase` is becoming a local runtime that turns coding agents from isolated
-chat/process silos into one durable work system.
+`VerifyWork()` in `internal/service/verify.go` performs a comprehensive audit:
+validates capability tokens, checks CA trust root, validates Git commit OID,
+and verifies Ed25519 signatures on attestation records.
 
-The central feature is not prompting.
-The central feature is work.
+## 11) Claims As Leases
 
-Everything else is a way of executing, inspecting, verifying, recovering, and
-documenting work.
+Claims are time-bounded leases over work items.
+
+`ClaimWorkItem` in `internal/store/store.go:916` sets `claimed_by` and
+`claimed_until`. The ready projection automatically reclaims expired leases,
+allowing a different worker to pick up the work.
+
+If a worker dies, the work remains. Another worker hydrates from the same
+work state and continues.
+
+## 12) Dynamic Requirements
+
+The runtime uses dynamic capability matching, not predefined worker profiles:
+
+- work items declare `required_capabilities`, `preferred_adapters`,
+  `forbidden_adapters`, `preferred_models`, `avoid_models`,
+- adapters and models are selected by the supervisor based on work
+  requirements and rotation policy,
+- `pickAdapterModel()` respects work-level preferences first, then applies
+  global round-robin rotation.
+
+This keeps the runtime dynamic and prevents early overfitting to named
+worker roles.
+
+## 13) Companion Documents
+
+| Document | Purpose |
+|----------|---------|
+| `docs/fase-work-api-and-schema.md` | Concrete Go structs, table shapes, CLI surface, implementation plan |
+| `docs/fase-worker-briefing-schema.md` | Stable briefing contract, compilation rules, schema definition |
+| `docs/fase-v0-local-control-plane.md` | Product direction, board model, supervision guarantees |
+| `docs/fase-live-agent-protocol.md` | Multi-agent orchestration protocol across adapters |
+| `docs/adr-0035-cryptographic-agent-identity.md` | Ed25519 CA, capability tokens, signed commits/attestations |
+| `docs/adr-0036-monotonic-attestation-contract.md` | Attestation as first-class work, monotonic contract |
+| `docs/adr-0034-verification-before-approval.md` | Verification ladder, attestation-driven approval |
+| `schemas/worker-briefing.schema.json` | JSON Schema for the v1 briefing contract |
+| `fase-spec-and-implementation-guide.md` | Master specification and implementation guide |
