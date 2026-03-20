@@ -1959,6 +1959,9 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	now := time.Now().UTC()
 	if req.ExecutionState != "" {
+		if !req.ExecutionState.Valid() {
+			return nil, fmt.Errorf("%w: invalid execution state %q", ErrInvalidInput, req.ExecutionState)
+		}
 		// Guard: cannot transition to done or archived via UpdateWork if
 		// attestation is unresolved. Terminal-success transitions require
 		// satisfied attestations; failed/cancelled are exempt.

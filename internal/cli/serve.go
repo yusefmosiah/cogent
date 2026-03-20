@@ -456,7 +456,7 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub) {
 					switch cur.executionState {
 					case "claimed", "in_progress", "starting":
 						hub.broadcast("job_started", event)
-					case "done", "completed":
+					case "done":
 						hub.broadcast("job_completed", event)
 					}
 				}

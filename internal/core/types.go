@@ -298,6 +298,18 @@ const (
 	WorkExecutionStateArchived            WorkExecutionState = "archived"
 )
 
+func (s WorkExecutionState) Valid() bool {
+	switch s {
+	case WorkExecutionStateReady, WorkExecutionStateClaimed, WorkExecutionStateInProgress,
+		WorkExecutionStateAwaitingAttestation, WorkExecutionStateBlocked,
+		WorkExecutionStateDone, WorkExecutionStateFailed, WorkExecutionStateCancelled,
+		WorkExecutionStateArchived:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s WorkExecutionState) Terminal() bool {
 	switch s {
 	case WorkExecutionStateDone, WorkExecutionStateFailed, WorkExecutionStateCancelled, WorkExecutionStateArchived:
