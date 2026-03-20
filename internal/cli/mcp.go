@@ -28,7 +28,7 @@ func newMCPCommand(root *rootOptions) *cobra.Command {
 			defer func() { _ = svc.Close() }()
 
 			server := mcpserver.New(svc)
-			return server.Run(cmd.Context(), &mcp.StdioTransport{})
+			return server.RunStdio(cmd.Context())
 		},
 	}
 
@@ -45,7 +45,7 @@ func newMCPCommand(root *rootOptions) *cobra.Command {
 
 			server := mcpserver.New(svc)
 			handler := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
-				return server
+				return server.MCP
 			}, nil)
 
 			fmt.Fprintf(cmd.OutOrStdout(), "cagent MCP server listening on %s\n", httpAddr)

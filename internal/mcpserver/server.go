@@ -4,22 +4,85 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yusefmosiah/cagent/internal/core"
 	"github.com/yusefmosiah/cagent/internal/service"
 )
 
+// Server wraps the MCP server and provides channel notification support.
+type Server struct {
+	MCP *mcp.Server
+	svc *service.Service
+
+	// mu protects writes to the stdio connection so channel notifications
+	// don't interleave with MCP protocol messages.
+	mu sync.Mutex
+	w  io.Writer
+}
+
 // New creates an MCP server backed by the given service.
-func New(svc *service.Service) *mcp.Server {
-	server := mcp.NewServer(
+func New(svc *service.Service) *Server {
+	mcpServer := mcp.NewServer(
 		&mcp.Implementation{Name: "cagent", Version: "0.1.0"},
 		&mcp.ServerOptions{
-			Instructions: "cagent work graph server. Use tools to inspect and manage work items, attestations, and project state.",
+			Instructions: "cagent work graph server. Use tools to inspect and manage work items, attestations, and project state.\n\nWhen working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.",
+			Capabilities: &mcp.ServerCapabilities{
+				Experimental: map[string]any{
+					"claude/channel": map[string]any{},
+				},
+			},
 		},
 	)
-	registerTools(server, svc)
-	return server
+	s := &Server{MCP: mcpServer, svc: svc, w: os.Stdout}
+	registerTools(mcpServer, svc)
+	return s
+}
+
+// SetWriter sets the writer for channel notifications (defaults to os.Stdout).
+func (s *Server) SetWriter(w io.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.w = w
+}
+
+// channelNotification is a JSON-RPC notification for claude/channel.
+type channelNotification struct {
+	JSONRPC string              `json:"jsonrpc"`
+	Method  string              `json:"method"`
+	Params  channelNotifyParams `json:"params"`
+}
+
+type channelNotifyParams struct {
+	Content string            `json:"content"`
+	Meta    map[string]string `json:"meta,omitempty"`
+}
+
+// SendChannelEvent pushes a channel event to the connected Claude Code session.
+func (s *Server) SendChannelEvent(content string, meta map[string]string) error {
+	msg := channelNotification{
+		JSONRPC: "2.0",
+		Method:  "notifications/claude/channel",
+		Params:  channelNotifyParams{Content: content, Meta: meta},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal channel event: %w", err)
+	}
+	data = append(data, '\n')
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.w.Write(data)
+	return err
+}
+
+// RunStdio runs the MCP server over stdio transport.
+func (s *Server) RunStdio(ctx context.Context) error {
+	return s.MCP.Run(ctx, &mcp.StdioTransport{})
 }
 
 // --- Tool input types ---

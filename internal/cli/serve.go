@@ -269,7 +269,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// MCP endpoint — same work graph tools as `cagent mcp http`
 	mcpServer := mcpserver.New(svc)
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
-		return mcpServer
+		return mcpServer.MCP
 	}, nil))
 
 	// WebSocket endpoint
