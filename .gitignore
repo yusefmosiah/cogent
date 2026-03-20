@@ -2,6 +2,7 @@
 .direnv/
 .factory/
 .claude/
+/fase
 /cagent
 *.test
 .dogfood*/
@@ -20,7 +21,33 @@ mind-graph/SPEC.md
 mind-graph/README.md
 mind-graph/eslint.config.js
 work_seed/
-# cagent local state — track DB, ignore artifacts
+# fase local state — track DB, ignore artifacts
+.fase/raw/
+.fase/serve.json
+.fase/supervisor.json
+.fase/jobs/
+.fase/transfers/
+.fase/debriefs/
+.fase/fase.db-shm
+.fase/fase.db-wal
+.fase/fase-private.db
+.fase/fase-private.db-shm
+.fase/fase-private.db-wal
+.fase/ca.key
+.fase/ca.pub
+.fase/tokens/
+.fase/keys/
+.fase/agent-credential-*
+.fase/fase.db.corrupt
+.fase/fase.db.new
+.fase/fase-events.db
+.fase/fase-events.db-shm
+.fase/fase-events.db-wal
+.fase/allowed_signers
+.fase/serve.log
+.fase/usage.json
+
+# legacy cagent local state — retained for compatibility
 .cagent/raw/
 .cagent/serve.json
 .cagent/supervisor.json
@@ -35,6 +62,7 @@ work_seed/
 .cagent/ca.key
 .cagent/ca.pub
 .cagent/tokens/
+.cagent/keys/
 .cagent/agent-credential-*
 .cagent/cagent.db.corrupt
 .cagent/cagent.db.new
