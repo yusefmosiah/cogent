@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cagent": {
+      "command": "cagent",
+      "args": ["mcp", "stdio"],
+      "description": "cagent work graph: project hydration, work items, attestations, notes"
+    }
+  }
+}

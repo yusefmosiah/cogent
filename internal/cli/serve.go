@@ -23,7 +23,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yusefmosiah/cagent/internal/core"
+	"github.com/yusefmosiah/cagent/internal/mcpserver"
 	"github.com/yusefmosiah/cagent/internal/service"
 	"github.com/yusefmosiah/cagent/internal/web"
 )
@@ -263,6 +265,12 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	var supLoop *supervisorLoop
 	mux := http.NewServeMux()
 	registerAPIHandlers(mux, svc, cwd, hub, &supLoop)
+
+	// MCP endpoint — same work graph tools as `cagent mcp http`
+	mcpServer := mcpserver.New(svc)
+	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
+		return mcpServer
+	}, nil))
 
 	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
