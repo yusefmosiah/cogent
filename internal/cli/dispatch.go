@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yusefmosiah/fase/internal/core"
 	"github.com/yusefmosiah/fase/internal/service"
 )
 
@@ -16,6 +18,7 @@ func newDispatchCommand(root *rootOptions) *cobra.Command {
 	var adapter string
 	var model string
 	var workID string
+	var force bool
 
 	cmd := &cobra.Command{
 		Use:   "dispatch [work-id]",
@@ -32,17 +35,18 @@ instead of bypassing it like "fase run".`,
 			if len(args) == 1 {
 				workID = args[0]
 			}
-			return runDispatch(cmd, root, workID, adapter, model)
+			return runDispatch(cmd, root, workID, adapter, model, force)
 		},
 	}
 
 	cmd.Flags().StringVar(&adapter, "adapter", "", "override adapter selection")
 	cmd.Flags().StringVar(&model, "model", "", "override model selection")
+	cmd.Flags().BoolVar(&force, "force", false, "dispatch even if other work is in progress")
 
 	return cmd
 }
 
-func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride, modelOverride string) error {
+func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride, modelOverride string, force bool) error {
 	ctx := context.Background()
 
 	svc, err := service.Open(ctx, root.configPath)
@@ -51,7 +55,26 @@ func runDispatch(cmd *cobra.Command, root *rootOptions, workID, adapterOverride,
 	}
 	defer func() { _ = svc.Close() }()
 
+	// Resolve CWD to the git repo root so workers always start at the
+	// project root, regardless of where the caller's shell happens to be.
 	cwd, _ := os.Getwd()
+	if stateDir := core.ResolveRepoStateDirFrom(cwd); stateDir != "" {
+		cwd = filepath.Dir(stateDir)
+	}
+
+	// Concurrency guard: refuse to dispatch if work is already in progress,
+	// unless --force is set. This prevents manual dispatch from violating
+	// the max-concurrent=1 invariant when the supervisor is also running.
+	if !force {
+		inProgress, _ := svc.ListWork(ctx, service.WorkListRequest{
+			Limit:          10,
+			ExecutionState: string(core.WorkExecutionStateInProgress),
+		})
+		if len(inProgress) > 0 {
+			return fmt.Errorf("concurrency guard: %d work item(s) already in progress (use --force to override):\n  %s — %s",
+				len(inProgress), inProgress[0].WorkID, inProgress[0].Title)
+		}
+	}
 
 	// If no work ID specified, pick the highest-priority ready item
 	var item *service.WorkShowResult

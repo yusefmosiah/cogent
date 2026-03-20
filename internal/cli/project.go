@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/yusefmosiah/fase/internal/service"
@@ -14,6 +15,7 @@ func newProjectCommand(root *rootOptions) *cobra.Command {
 	}
 
 	var hydrateMode string
+	var hydrateFormat string
 
 	hydrateCmd := &cobra.Command{
 		Use:   "hydrate",
@@ -25,15 +27,21 @@ func newProjectCommand(root *rootOptions) *cobra.Command {
 			}
 			defer func() { _ = svc.Close() }()
 			result, err := svc.ProjectHydrate(context.Background(), service.ProjectHydrateRequest{
-				Mode: hydrateMode,
+				Mode:   hydrateMode,
+				Format: hydrateFormat,
 			})
 			if err != nil {
 				return mapServiceError(err)
 			}
-			return writeJSON(cmd.OutOrStdout(), result)
+			if hydrateFormat == "json" {
+				return writeJSON(cmd.OutOrStdout(), result)
+			}
+			_, err = fmt.Fprint(cmd.OutOrStdout(), service.RenderProjectHydrateMarkdown(result))
+			return err
 		},
 	}
 	hydrateCmd.Flags().StringVar(&hydrateMode, "mode", "standard", "hydration mode: thin, standard, or deep")
+	hydrateCmd.Flags().StringVar(&hydrateFormat, "format", "markdown", "output format: markdown or json")
 
 	cmd.AddCommand(hydrateCmd)
 	return cmd

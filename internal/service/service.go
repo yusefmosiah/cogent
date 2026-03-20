@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -376,7 +377,8 @@ type WorkHydrateRequest struct {
 type WorkHydrateResult map[string]any
 
 type ProjectHydrateRequest struct {
-	Mode string // thin, standard, deep
+	Mode   string // thin, standard, deep
+	Format string // json, markdown (default: markdown)
 }
 
 type ProjectHydrateResult map[string]any
@@ -1694,6 +1696,156 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 	return result, nil
 }
 
+func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
+	var b strings.Builder
+
+	b.WriteString("# Project Briefing\n\n")
+
+	if gen, ok := r["generated_at"].(string); ok {
+		fmt.Fprintf(&b, "Generated: %s\n", gen)
+	}
+	if mode, ok := r["mode"].(string); ok {
+		fmt.Fprintf(&b, "Mode: %s\n\n", mode)
+	}
+
+	if conventions := toSlice(r["conventions"]); len(conventions) > 0 {
+		b.WriteString("## Project Conventions\n\n")
+		for _, c := range conventions {
+			if entry, ok := c.(map[string]any); ok {
+				if body, ok := entry["body"].(string); ok {
+					for _, line := range strings.Split(body, "\n") {
+						if strings.TrimSpace(line) == "" {
+							continue
+						}
+						b.WriteString("- " + line + "\n")
+					}
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if summary, ok := r["graph_summary"].(map[string]any); ok {
+		b.WriteString("## Work Graph Summary\n\n")
+		if total, ok := summary["total_items"].(int); ok {
+			fmt.Fprintf(&b, "Total items: %d\n", total)
+		}
+		if counts, ok := summary["state_counts"].(map[any]any); ok {
+			for k, v := range counts {
+				fmt.Fprintf(&b, "  %v: %d\n", k, v)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	renderWorkList := func(title string, key string) {
+		items := toSlice(r[key])
+		if len(items) == 0 {
+			return
+		}
+		b.WriteString("## " + title + "\n\n")
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				wtitle := "(untitled)"
+				if t, ok := m["title"].(string); ok {
+					wtitle = t
+				}
+				id := ""
+				if wid, ok := m["work_id"].(string); ok {
+					id = wid
+				}
+				kind := ""
+				if k, ok := m["kind"].(string); ok {
+					kind = k
+				}
+				fmt.Fprintf(&b, "- **%s** `%s` [%s]", wtitle, id, kind)
+				if claimed, ok := m["claimed_by"].(string); ok && claimed != "" {
+					fmt.Fprintf(&b, " claimed by %s", claimed)
+				}
+				if pri, ok := m["priority"].(int); ok && pri != 0 {
+					fmt.Fprintf(&b, " priority=%d", pri)
+				}
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	renderWorkList("Active Work", "active_work")
+	renderWorkList("Ready Work", "ready_work")
+	renderWorkList("Blocked Work", "blocked_work")
+	renderWorkList("Recently Completed", "recent_completed")
+
+	if atts := toSlice(r["pending_attestations"]); len(atts) > 0 {
+		b.WriteString("## Pending Attestations\n\n")
+		for _, a := range atts {
+			if m, ok := a.(map[string]any); ok {
+				wtitle := "(untitled)"
+				if t, ok := m["title"].(string); ok {
+					wtitle = t
+				}
+				if wid, ok := m["work_id"].(string); ok {
+					fmt.Fprintf(&b, "- **%s** `%s`", wtitle, wid)
+				}
+				if ra, ok := m["required_attestations"].([]any); ok {
+					fmt.Fprintf(&b, " requires: %v", ra)
+				}
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if contract, ok := r["contract"].(map[string]any); ok {
+		b.WriteString("## Contract\n\n")
+		if cmds := toSlice(contract["read_commands"]); len(cmds) > 0 {
+			b.WriteString("Read commands:\n")
+			for _, c := range cmds {
+				if s, ok := c.(string); ok {
+					fmt.Fprintf(&b, "  - `%s`\n", s)
+				}
+			}
+		}
+		if cmds := toSlice(contract["write_commands"]); len(cmds) > 0 {
+			b.WriteString("\nWrite commands:\n")
+			for _, c := range cmds {
+				if s, ok := c.(string); ok {
+					fmt.Fprintf(&b, "  - `%s`\n", s)
+				}
+			}
+		}
+		if rules := toSlice(contract["rules"]); len(rules) > 0 {
+			b.WriteString("\nRules:\n")
+			for _, rule := range rules {
+				if s, ok := rule.(string); ok {
+					fmt.Fprintf(&b, "  - %s\n", s)
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func toSlice(v any) []any {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.([]any); ok {
+		return s
+	}
+	val := reflect.ValueOf(v)
+	if val.Kind() == reflect.Slice {
+		result := make([]any, val.Len())
+		for i := range val.Len() {
+			result[i] = val.Index(i).Interface()
+		}
+		return result
+	}
+	return nil
+}
+
 func (s *Service) HydrateWork(ctx context.Context, req WorkHydrateRequest) (WorkHydrateResult, error) {
 	if req.Debrief {
 		return nil, fmt.Errorf("%w: debrief hydration is not implemented yet", ErrUnsupported)
@@ -2282,6 +2434,30 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 			metadata["commit_oid"] = work.HeadCommitOID
 		}
 	}
+
+	unsatisfiedSlots := []core.RequiredAttestation(nil)
+	if len(work.RequiredAttestations) > 0 {
+		attestations, fetchErr := s.store.ListAttestationRecords(ctx, "work", req.WorkID, 200)
+		if fetchErr != nil {
+			return nil, nil, fetchErr
+		}
+		unsatisfiedSlots = unsatisfiedAttestationSlots(work, attestations)
+	}
+
+	verifierKind := strings.TrimSpace(req.VerifierKind)
+	method := strings.TrimSpace(req.Method)
+	if len(unsatisfiedSlots) == 1 {
+		if verifierKind == "" {
+			verifierKind = strings.TrimSpace(unsatisfiedSlots[0].VerifierKind)
+		}
+		if method == "" {
+			method = strings.TrimSpace(unsatisfiedSlots[0].Method)
+		}
+	}
+	if len(work.RequiredAttestations) > 0 && !attestationSubmissionMatchesAnySlot(verifierKind, method, unsatisfiedSlots) {
+		return nil, nil, fmt.Errorf("%w: attestation verifier_kind/method must match one unsatisfied required attestation slot; expected one of %s, got verifier_kind=%q method=%q", ErrInvalidInput, formatAttestationSlots(unsatisfiedSlots), verifierKind, method)
+	}
+
 	record := core.AttestationRecord{
 		AttestationID:           core.GenerateID("attest"),
 		SubjectKind:             "work",
@@ -2291,8 +2467,8 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 		ArtifactID:              req.ArtifactID,
 		JobID:                   req.JobID,
 		SessionID:               req.SessionID,
-		Method:                  strings.TrimSpace(req.Method),
-		VerifierKind:            strings.TrimSpace(req.VerifierKind),
+		Method:                  method,
+		VerifierKind:            verifierKind,
 		VerifierIdentity:        strings.TrimSpace(req.VerifierIdentity),
 		Confidence:              req.Confidence,
 		Blocking:                req.Blocking,
@@ -4551,6 +4727,18 @@ func requiredAttestationsResolved(work core.WorkItemRecord, attestations []core.
 	return true
 }
 
+func unsatisfiedAttestationSlots(work core.WorkItemRecord, attestations []core.AttestationRecord) []core.RequiredAttestation {
+	superseded := supersededAttestationIDs(attestations)
+	var result []core.RequiredAttestation
+	for _, slot := range work.RequiredAttestations {
+		if hasPassingAttestationForSlot(work, slot, attestations, superseded) {
+			continue
+		}
+		result = append(result, slot)
+	}
+	return result
+}
+
 // UnsatisfiedAttestationSlotIndices returns the indices (into RequiredAttestations)
 // of blocking slots that do not yet have a passing, non-superseded attestation.
 // Used by the supervisor to determine how many more attestors to dispatch.
@@ -4566,6 +4754,50 @@ func UnsatisfiedAttestationSlotIndices(work core.WorkItemRecord, attestations []
 		}
 	}
 	return result
+}
+
+func attestationSubmissionMatchesAnySlot(verifierKind, method string, slots []core.RequiredAttestation) bool {
+	for _, slot := range slots {
+		if attestationSubmissionMatchesSlot(verifierKind, method, slot) {
+			return true
+		}
+	}
+	return false
+}
+
+func attestationSubmissionMatchesSlot(verifierKind, method string, slot core.RequiredAttestation) bool {
+	if slot.VerifierKind != "" && verifierKind != "" && verifierKind != slot.VerifierKind {
+		return false
+	}
+	if slot.Method != "" && method != "" && method != slot.Method {
+		return false
+	}
+	if slot.VerifierKind != "" && verifierKind == "" {
+		return false
+	}
+	if slot.Method != "" && method == "" {
+		return false
+	}
+	return true
+}
+
+func formatAttestationSlots(slots []core.RequiredAttestation) string {
+	if len(slots) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		verifier := strings.TrimSpace(slot.VerifierKind)
+		if verifier == "" {
+			verifier = "*"
+		}
+		method := strings.TrimSpace(slot.Method)
+		if method == "" {
+			method = "*"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s", verifier, method))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 func supersededAttestationIDs(attestations []core.AttestationRecord) map[string]bool {

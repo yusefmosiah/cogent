@@ -115,7 +115,8 @@ func (s *Server) runEventForwarder(ctx context.Context) {
 // --- Tool input types ---
 
 type projectHydrateInput struct {
-	Mode string `json:"mode,omitempty" jsonschema:"hydration mode: thin, standard, or deep"`
+	Mode   string `json:"mode,omitempty" jsonschema:"hydration mode: thin, standard, or deep"`
+	Format string `json:"format,omitempty" jsonschema:"output format: json or markdown (default: markdown)"`
 }
 
 type workListInput struct {
@@ -171,15 +172,23 @@ type readyWorkInput struct {
 func registerTools(server *mcp.Server, svc *service.Service) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "project_hydrate",
-		Description: "Compile a project-scoped briefing: conventions, graph summary, active work, pending attestations, contract.",
+		Description: "Compile a project-scoped briefing: conventions, graph summary, active work, pending attestations, contract. Returns markdown by default for session injection.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input projectHydrateInput) (*mcp.CallToolResult, any, error) {
 		mode := input.Mode
 		if mode == "" {
 			mode = "standard"
 		}
-		result, err := svc.ProjectHydrate(ctx, service.ProjectHydrateRequest{Mode: mode})
+		format := input.Format
+		if format == "" {
+			format = "markdown"
+		}
+		result, err := svc.ProjectHydrate(ctx, service.ProjectHydrateRequest{Mode: mode, Format: format})
 		if err != nil {
 			return nil, nil, err
+		}
+		if format == "markdown" {
+			md := service.RenderProjectHydrateMarkdown(result)
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: md}}}, nil, nil
 		}
 		return jsonResult(result)
 	})

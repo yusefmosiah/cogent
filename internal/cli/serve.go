@@ -419,6 +419,31 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 					continue
 				}
 			}
+
+			// Detect orphaned workers: in_progress work whose worker process is dead.
+			// This catches jobs dispatched manually (not tracked in supervisor's in-flight map).
+			inProgress, _ := svc.ListWork(ctx, service.WorkListRequest{
+				Limit:          50,
+				ExecutionState: string(core.WorkExecutionStateInProgress),
+			})
+			for _, item := range inProgress {
+				if item.CurrentJobID == "" {
+					continue
+				}
+				rt, rtErr := svc.GetJobRuntime(ctx, item.CurrentJobID)
+				if rtErr != nil || rt.SupervisorPID == 0 || rt.CompletedAt != nil {
+					continue
+				}
+				if !isProcessAlive(rt.SupervisorPID) {
+					_, _ = svc.UpdateWork(ctx, service.WorkUpdateRequest{
+						WorkID:         item.WorkID,
+						ExecutionState: core.WorkExecutionStateFailed,
+						Message:        fmt.Sprintf("housekeeping: worker process (pid %d) for job %s is dead", rt.SupervisorPID, item.CurrentJobID),
+						CreatedBy:      "housekeeping",
+					})
+					hub.broadcast("work_updated", map[string]string{"work_id": item.WorkID})
+				}
+			}
 		}
 	}
 }

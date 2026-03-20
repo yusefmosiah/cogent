@@ -1967,6 +1967,83 @@ func TestAttestationGateAllowsDoneAfterAttestation(t *testing.T) {
 	}
 }
 
+func TestAttestWorkRejectsMismatchedSlotParams(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "mismatch test",
+		Objective: "attestation params must match the slot",
+		RequiredAttestations: []core.RequiredAttestation{
+			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, _, err = svc.AttestWork(ctx, WorkAttestRequest{
+		WorkID:       work.WorkID,
+		Result:       "passed",
+		Summary:      "wrong verifier and method",
+		VerifierKind: "security",
+		Method:       "security_review",
+		CreatedBy:    "verifier",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for mismatched attestation params, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "expected one of [attestation/automated_review]") {
+		t.Fatalf("expected error to list required slot, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `got verifier_kind="security" method="security_review"`) {
+		t.Fatalf("expected error to include actual params, got %v", err)
+	}
+
+	attestations, err := svc.store.ListAttestationRecords(ctx, "work", work.WorkID, 10)
+	if err != nil {
+		t.Fatalf("ListAttestationRecords: %v", err)
+	}
+	if len(attestations) != 0 {
+		t.Fatalf("expected no attestation to be recorded, got %d", len(attestations))
+	}
+}
+
+func TestAttestWorkAutoFillsSingleUnsatisfiedSlot(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "autofill test",
+		Objective: "single remaining slot should populate params",
+		RequiredAttestations: []core.RequiredAttestation{
+			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	record, updated, err := svc.AttestWork(ctx, WorkAttestRequest{
+		WorkID:    work.WorkID,
+		Result:    "passed",
+		Summary:   "looks good",
+		CreatedBy: "verifier",
+	})
+	if err != nil {
+		t.Fatalf("AttestWork: %v", err)
+	}
+	if record.VerifierKind != "attestation" {
+		t.Fatalf("expected verifier kind to be autofilled, got %q", record.VerifierKind)
+	}
+	if record.Method != "automated_review" {
+		t.Fatalf("expected method to be autofilled, got %q", record.Method)
+	}
+	if updated.ExecutionState != core.WorkExecutionStateDone {
+		t.Fatalf("expected done state after autofilled attestation, got %s", updated.ExecutionState)
+	}
+}
+
 func TestAttestationGateExemptsFailedAndCancelled(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
