@@ -2,6 +2,7 @@
 set -eu
 
 session_path=""
+rpc_mode=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -17,6 +18,7 @@ Options:
   --provider <name>              Provider name (default: google)
   --model <id>                   Model ID (default: gemini-2.5-flash)
   --list-models [search]         List available models (with optional fuzzy search)
+  --mode <mode>                  Output mode: text (default), json, or rpc
 EOF
       exit 0
       ;;
@@ -33,9 +35,51 @@ EOF
       shift
       session_path="${1:-}"
       ;;
+    --mode)
+      shift
+      rpc_mode="${1:-}"
+      ;;
   esac
   shift
 done
+
+if [ "$rpc_mode" = "rpc" ]; then
+  while IFS= read -r line; do
+    cmd_type=$(echo "$line" | sed 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
+    cmd_id=$(echo "$line" | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
+
+    case "$cmd_type" in
+      get_state)
+        printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"fake-session-123","thinkingLevel":"off","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","autoCompactionEnabled":false,"messageCount":0,"pendingMessageCount":0}}\n' "$cmd_id"
+        ;;
+      prompt)
+        printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$cmd_id"
+        printf '{"type":"agent_start"}\n'
+        printf '{"type":"turn_start"}\n'
+        printf '{"type":"message_start","message":{"role":"assistant","content":[]}}\n'
+        printf '{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"Fake Pi response."}}\n'
+        printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Fake Pi response."}]}}\n'
+        printf '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Fake Pi response."}]}}\n'
+        printf '{"type":"agent_end","messages":[]}\n'
+        ;;
+      steer)
+        printf '{"id":"%s","type":"response","command":"steer","success":true}\n' "$cmd_id"
+        ;;
+      follow_up)
+        printf '{"id":"%s","type":"response","command":"follow_up","success":true}\n' "$cmd_id"
+        ;;
+      abort)
+        printf '{"id":"%s","type":"response","command":"abort","success":true}\n' "$cmd_id"
+        printf '{"type":"turn_end","message":{"role":"assistant","content":[]}}\n'
+        printf '{"type":"agent_end","messages":[]}\n'
+        ;;
+      *)
+        printf '{"type":"response","command":"%s","success":false,"error":"Unknown command: %s"}\n' "$cmd_type" "$cmd_type"
+        ;;
+    esac
+  done
+  exit 0
+fi
 
 mode="run"
 if [ -n "$session_path" ]; then
