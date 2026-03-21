@@ -1891,6 +1891,7 @@ func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
 		renderProtoSection("Attestation Flow", "attestation_flow")
 		renderProtoSection("Error Handling", "error_handling")
 		renderProtoSection("Concurrency Rules", "concurrency_rules")
+		renderProtoSection("Work Creation Rules", "work_creation_rules")
 	}
 
 	return b.String()
@@ -1933,6 +1934,14 @@ func supervisorDispatchProtocol() map[string]any {
 			"One code-writing worker at a time per environment.",
 			"Plan, research, and attest tasks can run concurrently.",
 			"Use force dispatch only when you are certain there is no conflict.",
+		},
+		"work_creation_rules": []string{
+			"When creating work items, include DETAILED objectives that a worker can execute independently.",
+			"Title: concise but specific (e.g., 'Fix SSE streaming in AnthropicClient' not 'Fix bug').",
+			"Objective: include (1) what to implement, (2) which files to create/modify, (3) acceptance criteria (tests to pass, build to be clean), (4) relevant context (ADR references, related work IDs).",
+			"Always set kind (implement/plan/attest), priority, and preferred_adapters if the task needs a specific adapter.",
+			"A worker reading only the objective should be able to complete the task without asking questions.",
+			"Do NOT create throwaway/test work items. Only create real work that advances the project.",
 		},
 	}
 }
