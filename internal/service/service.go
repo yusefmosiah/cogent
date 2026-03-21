@@ -1683,6 +1683,20 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 		effectiveMode = "standard"
 	}
 
+	// Load project spec (SPEC.md) if present — gives supervisor and workers
+	// project-specific context beyond conventions.
+	var projectSpec string
+	cwd, _ := os.Getwd()
+	for _, specName := range []string{"SPEC.md", "spec.md", "SPEC", "README.md"} {
+		if data, err := os.ReadFile(filepath.Join(cwd, specName)); err == nil {
+			projectSpec = strings.TrimSpace(string(data))
+			if len(projectSpec) > 4000 {
+				projectSpec = projectSpec[:4000] + "\n\n[truncated — read full file with read_file tool]"
+			}
+			break
+		}
+	}
+
 	result := ProjectHydrateResult{
 		"schema_version": "fase.project_briefing.v1",
 		"briefing_kind":  "project",
@@ -1731,12 +1745,23 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 			"Host agent role: delegate and review, never write code directly.",
 		},
 		"available_adapters": []string{
-			"claude (claude-sonnet-4-6, claude-haiku-4-5)",
-			"codex (gpt-5.4, gpt-5.4-mini)",
-			"opencode (zai-coding-plan/glm-5-turbo)",
+			"native (zai/glm-5-turbo, zai/glm-5, zai/glm-4.7, zai/glm-4.7-flash, bedrock/claude-haiku-4-5, bedrock/claude-sonnet-4-6, bedrock/claude-opus-4-6, chatgpt/gpt-5.4, chatgpt/gpt-5.4-mini) — in-process Go adapter",
+			"claude (claude-sonnet-4-6, claude-haiku-4-5) — Claude Code subprocess",
+			"codex (gpt-5.4, gpt-5.4-mini) — Codex subprocess",
+			"opencode (zai-coding-plan/glm-5-turbo) — OpenCode subprocess",
+		},
+		"model_capabilities": []string{
+			"GLM models (glm-5-turbo, glm-5, glm-4.7, glm-4.7-flash): text-only, no multimodal. Cannot run Playwright or verify screenshots.",
+			"Claude models (haiku, sonnet, opus): multimodal. Can run Playwright and verify visual output.",
+			"GPT models (gpt-5.4, gpt-5.4-mini): multimodal. Can run Playwright and verify visual output.",
+			"Native adapter: web search via Exa/Tavily/Brave/Serper (rate-limited, uses project API keys).",
+			"External adapters (claude, codex): have their own built-in web search (no rate limits). Prefer external adapters for research-heavy tasks.",
 		},
 	}
 	result["contract"] = contract
+	if projectSpec != "" {
+		result["project_spec"] = projectSpec
+	}
 
 	if mode == "supervisor" {
 		result["supervisor_role"] = supervisorRolePrompt()
@@ -1880,7 +1905,21 @@ func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
 				}
 			}
 		}
+		if caps := toSlice(contract["model_capabilities"]); len(caps) > 0 {
+			b.WriteString("\nModel capabilities:\n")
+			for _, c := range caps {
+				if s, ok := c.(string); ok {
+					fmt.Fprintf(&b, "  - %s\n", s)
+				}
+			}
+		}
 		b.WriteString("\n")
+	}
+
+	if spec, ok := r["project_spec"].(string); ok && spec != "" {
+		b.WriteString("## Project Spec\n\n")
+		b.WriteString(spec)
+		b.WriteString("\n\n")
 	}
 
 	if role, ok := r["supervisor_role"].(string); ok {
