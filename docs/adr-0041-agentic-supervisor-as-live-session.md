@@ -1,121 +1,103 @@
-# ADR-0041: Agentic Supervisor as a LiveSession — Delete Deterministic Loop
+# ADR-0041: Agentic Supervisor — Just Another Adapter Session
 
-**Status:** Accepted
+**Status:** Accepted (revised 2026-03-21)
 **Date:** 2026-03-21
 
 ## Context
 
-The current supervisor is a Go loop (`supervisor_event_driven.go`, `supervisor_loop.go`, `supervisor_routing.go`) with hardcoded scoring, rotation pools, kind affinity, health tracking, circuit breakers, retry backoff, and budget filtering. It's 1500+ lines of deterministic dispatch logic that we keep debugging and patching.
+The supervisor should not be special Go infrastructure. It should be a regular FASE session running on any adapter (claude, codex, opencode), using FASE MCP tools to manage the work queue. The supervisor is just another agent — it happens to dispatch and review instead of writing code.
 
-Meanwhile, we have the live adapter protocol — `LiveAgentAdapter`/`LiveSession` — implemented for claude, codex, opencode, and pi. Every adapter supports persistent sessions, tool use, and steering. The supervisor should be a FASE agent running on any of these adapters, not a Go loop.
-
-ADR-0040 already removed edge-based dispatch filtering. This ADR completes the transition: the supervisor is an LLM session with FASE tools.
+The deterministic supervisor (1500+ lines of Go dispatch logic) has already been deleted. This ADR specifies its replacement: a single adapter session with a supervisor prompt.
 
 ## Decision
 
-### Supervisor = LiveSession
+### Supervisor = Regular Adapter Session
 
-`fase serve --auto` starts a `LiveSession` on a configurable adapter (default: claude/claude-sonnet-4-6). The session receives a supervisor system prompt hydrated by `project_hydrate`. The LLM reads the work graph, reasons about dependencies and parallelism, dispatches work by spawning co-agent sessions, monitors progress via events, and attests completed work.
+`fase serve --auto` launches the supervisor as a regular `svc.Run` call on a configurable adapter. The supervisor is not special infrastructure — it's a work item dispatched to an adapter, same as any worker. The adapter process connects to FASE's MCP server (already exposed at `/mcp` by serve) and uses FASE tools to manage the queue.
 
-### Hydration Strategy
+There is no Go goroutine making dispatch decisions. The LLM decides everything.
 
-The supervisor session is cold-started with `project_hydrate` output as its system context. This replaces CLAUDE.md/MEMORY.md.
+### How It Works
 
-**`project_hydrate` for supervisor must include:**
-1. **Role prompt**: "You are the FASE supervisor. Your job is to dispatch ready work items to worker agents, monitor their progress, and attest completed work."
-2. **Conventions**: Project-specific rules from convention notes
-3. **Ready queue**: All ready work items with title, objective summary, priority, preferred adapters/models
-4. **Active work**: Currently claimed/in-progress items
-5. **Pending attestations**: Work awaiting review
-6. **Available adapters**: Which adapters are available and their capabilities
-7. **Contract**: Available FASE tools and how to use them
-8. **Dispatch instructions**: How to claim work, hydrate a briefing, spawn a worker session, monitor via events
+1. `fase serve --auto` calls `svc.Run` with:
+   - **adapter**: configurable (default `claude`)
+   - **model**: configurable (default `claude-sonnet-4-6`)
+   - **prompt**: `project_hydrate --mode supervisor` output — role, queue state, dispatch protocol, MCP tool contract
+2. The adapter process (e.g., `claude --print`) starts with FASE MCP tools available via `.mcp.json` or the `/mcp` endpoint.
+3. The supervisor LLM reads the queue state from its prompt and uses MCP tools:
+   - `ready_work` → see what's dispatchable
+   - `work_show` → inspect a specific item
+   - `work_claim` → claim it
+   - Dispatch workers via `fase dispatch` or by calling the dispatch API
+   - `work_attest` → review and attest completed work
+4. When the supervisor turn completes, serve checks EventBus for state changes since the turn started. If anything changed, it re-runs the supervisor with fresh `project_hydrate` output. If nothing is ready, it waits for EventBus events before re-running.
 
-**Token budget:** `project_hydrate` should target ~4K tokens for the supervisor role. The supervisor can call `work_show` for details on specific items. The hydration is a summary, not a dump.
-
-### Dispatch Flow
-
-The supervisor LLM decides everything the Go loop used to decide:
-
-```
-1. Call ready_work → see what's available
-2. Reason: "Phase 1 has priority 10, needs codex/gpt-5.4. Phase 2 depends on Phase 1's output. Dispatch Phase 1 only."
-3. Call work_claim on Phase 1
-4. Call work_hydrate to get the worker briefing
-5. Spawn a co-agent session: adapter=codex, model=gpt-5.4, prompt=briefing
-6. Monitor co-agent events for completion
-7. On completion: review output, call work_attest
-8. Check ready_work again, dispatch next item
-```
-
-### Steering for Real-Time Updates
-
-The supervisor session subscribes to work graph events via the EventBus. When a worker completes, fails, or stalls, a steer message is injected into the supervisor session:
+### Supervisor Lifecycle
 
 ```
-[fase:steer] Work item work_XYZ completed. Worker output: "All tests pass."
-Please review and attest, then check for next dispatchable work.
+serve --auto starts
+  │
+  ├─ generate supervisor prompt (project_hydrate --mode supervisor)
+  ├─ svc.Run(adapter, model, prompt)  ← first turn, creates session
+  │    └─ LLM uses MCP tools: ready_work, dispatch, attest, etc.
+  ├─ turn completes
+  ├─ wait for EventBus events (work completed, created, failed, etc.)
+  ├─ svc.Send(session, eventSummary)  ← continue same session
+  │    └─ LLM has full context from prior turns
+  └─ loop: wait for events → send → repeat
 ```
 
-This replaces the polling heartbeat and process exit watchers.
+The supervisor is a **long-running session**. The first turn (`svc.Run`) creates the session with the full supervisor hydration prompt. Subsequent turns use `svc.Send` on the same session, passing event summaries as the prompt. The LLM accumulates context across turns — it remembers what it dispatched, what's pending, what failed. This is the same session continuation protocol used by workers via `fase send`.
 
-### What Gets Deleted
+### Supervisor Prompt (project_hydrate --mode supervisor)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `supervisor_event_driven.go` | ~720 | Event-driven dispatch loop, scoring, retry |
-| `supervisor_loop.go` | ~370 | Polling dispatch loop |
-| `supervisor_routing.go` | ~200 | Health tracking, scoring, circuit breakers |
-| `supervisor.go` (partial) | ~300 | Rotation pool, fallback routing, state writing |
-| `budget.go` (partial) | ~150 | Daily usage tracking, budget filtering |
+The initial prompt (first turn only) includes:
+1. **Role**: "You are the FASE supervisor. Dispatch ready work, monitor workers, attest completed work. Never write code directly."
+2. **Queue state**: Ready items (with priority, preferred adapters/models), active work, pending attestations, recent completions.
+3. **Dispatch protocol**: Step-by-step instructions for claiming, hydrating, dispatching, and attesting.
+4. **Concurrency rules**: One code-writer at a time. Plan/research/attest can run concurrently.
+5. **MCP tools available**: The contract — which tools exist and how to use them.
+6. **Conventions**: Project-specific rules from convention notes.
 
-**Replaced by:** ~100 lines in `serve.go` that start a LiveSession with the supervisor prompt and wire EventBus events to steer messages.
+Target: ~4K tokens. The supervisor calls `work_show` for details on specific items.
+
+Subsequent turns receive an event summary: "Work item X completed. 2 items now ready. Check queue and act." The LLM already has the role, protocol, and conventions from its session history.
+
+### Go Infrastructure
+
+The serve-side Go code is minimal (~40 lines):
+
+```go
+func runSupervisorLoop(ctx, svc, adapter, model) {
+    // First turn: cold-start with full hydration
+    prompt := projectHydrate(mode: "supervisor")
+    result := svc.Run(adapter, model, prompt)
+    sessionID := result.Session.SessionID
+
+    for {
+        events := waitForEvents(ctx, svc.Events)
+        summary := formatEventSummary(events)
+        svc.Send(sessionID, summary)  // continue same session
+    }
+}
+```
+
+No dispatch logic. No adapter selection. No rotation pools. No health tracking. The LLM handles all of that. The Go code just manages the session lifecycle and relays events.
 
 ### Configuration
 
-```toml
-[supervisor]
-adapter = "claude"           # any live adapter
-model = "claude-sonnet-4-6"  # model for the supervisor
-hydrate_mode = "standard"    # project_hydrate mode
-```
+Flags: `fase serve --auto --supervisor-adapter claude --supervisor-model claude-sonnet-4-6`
 
-Or via flags: `fase serve --auto --supervisor-adapter claude --supervisor-model claude-sonnet-4-6`
+### Pause / Resume
 
-### What Stays
-
-- **`fase serve`**: HTTP server, web UI, MCP endpoint — unchanged
-- **`project_hydrate`**: Enhanced to include supervisor-specific context
-- **Live adapter infrastructure**: All adapters, sessions, events — unchanged
-- **Work graph**: Items, attestations, notes, claims — unchanged
-- **EventBus**: Used to steer the supervisor session
-
-## Implementation
-
-### Phase 1: Supervisor Session Startup
-1. Add supervisor config (adapter, model) to serve command
-2. On `--auto`, start a LiveSession on the configured adapter
-3. Inject `project_hydrate` output as the initial turn
-4. Wire EventBus → steer channel for the supervisor session
-
-### Phase 2: Supervisor Prompt Engineering
-5. Write the supervisor system prompt: role, tools, dispatch protocol, attestation protocol
-6. Tune `project_hydrate` for supervisor context (~4K tokens, focused on actionable state)
-7. Test supervisor dispatch loop end-to-end
-
-### Phase 3: Cleanup
-8. Delete `supervisor_event_driven.go`, `supervisor_loop.go`, `supervisor_routing.go`
-9. Remove deterministic dispatch code from `supervisor.go`
-10. Remove `--max-concurrent`, `--default-adapter` flags (supervisor decides)
-11. Update `serve.go` to use the new supervisor session
+`fase supervisor pause` sets a flag. The loop checks the flag before re-running. While paused, the current turn (if any) completes but no new turns start.
 
 ## Consequences
 
-- **Simpler codebase**: ~1500 lines of Go dispatch logic replaced by ~100 lines + a prompt
-- **Intelligent dispatch**: LLM reasons about dependencies, parallelism, rate limits
-- **Adapter-agnostic**: Supervisor runs on any adapter — can switch between claude/codex/opencode
-- **Observable**: Supervisor's reasoning is visible in its output events (web UI shows it thinking)
-- **Flexible**: Adding new dispatch strategies = editing the prompt, not Go code
-- **Cost**: Supervisor LLM calls add cost (~$0.01-0.05 per dispatch cycle with sonnet)
-- **Latency**: LLM reasoning adds 2-5s per dispatch decision vs <1ms for Go loop
-- **Risk**: LLM may make suboptimal dispatch decisions — mitigated by conventions in hydration
+- **No special infrastructure**: Supervisor is just another adapter session.
+- **Adapter-agnostic**: Works with any adapter that supports `svc.Run` (all of them).
+- **Stateless**: Each turn gets fresh hydration. No session state to corrupt or debug.
+- **Observable**: Supervisor's MCP tool calls are logged as regular job events. Visible in web UI.
+- **Flexible**: Changing dispatch strategy = editing the supervisor prompt.
+- **Cost**: ~$0.01-0.05 per dispatch cycle with sonnet.
+- **Latency**: 2-5s per dispatch decision vs <1ms for Go loop. Acceptable — dispatch is not latency-critical.

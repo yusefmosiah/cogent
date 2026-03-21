@@ -1,10 +1,8 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -32,25 +30,6 @@ var workRotation = []rotationEntry{
 
 // globalRotationIdx is incremented each time we dispatch without prior history.
 var globalRotationIdx int64
-
-// rotationIndexForAdapter returns the index of adapter in workRotation, or -1.
-func rotationIndexForAdapter(adapter string) int {
-	for i, e := range workRotation {
-		if e.adapter == adapter {
-			return i
-		}
-	}
-	return -1
-}
-
-func modelForAdapter(adapter string) string {
-	for _, e := range workRotation {
-		if e.adapter == adapter {
-			return e.model
-		}
-	}
-	return ""
-}
 
 // pickAdapterModel selects adapter+model for a work item.
 func pickAdapterModel(item core.WorkItemRecord, jobs []core.JobRecord, rotation []rotationEntry) (adapter, model string) {
@@ -131,21 +110,7 @@ func rotationIndexForEntry(adapter string, pool []rotationEntry) int {
 	return -1
 }
 
-func attestAdapterModel(workAdapter string) (adapter, model string) {
-	idx := rotationIndexForAdapter(workAdapter)
-	if idx < 0 {
-		for _, e := range workRotation {
-			if e.adapter != workAdapter {
-				return e.adapter, e.model
-			}
-		}
-		return workRotation[0].adapter, workRotation[0].model
-	}
-	next := workRotation[(idx+1)%len(workRotation)]
-	return next.adapter, next.model
-}
-
-func newSupervisorCommand(root *rootOptions) *cobra.Command {
+func newSupervisorCommand(_ *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "supervisor",
 		Short: "Supervisor commands (use 'fase serve --auto' for agentic supervisor)",
@@ -156,14 +121,15 @@ func newSupervisorCommand(root *rootOptions) *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		newSupervisorPauseCommand(root),
-		newSupervisorResumeCommand(root),
+		newSupervisorPauseCommand(),
+		newSupervisorResumeCommand(),
+		newSupervisorSendCommand(),
 	)
 
 	return cmd
 }
 
-func newSupervisorPauseCommand(root *rootOptions) *cobra.Command {
+func newSupervisorPauseCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "pause",
 		Short: "Pause dispatch in the running supervisor",
@@ -182,7 +148,7 @@ func newSupervisorPauseCommand(root *rootOptions) *cobra.Command {
 	}
 }
 
-func newSupervisorResumeCommand(root *rootOptions) *cobra.Command {
+func newSupervisorResumeCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume",
 		Short: "Resume dispatch in the running supervisor",
@@ -201,40 +167,25 @@ func newSupervisorResumeCommand(root *rootOptions) *cobra.Command {
 	}
 }
 
-// spawnRun launches `fase run --json` and extracts the job_id from the output.
-func spawnRun(bin, configPath, adapter, model, cwd, prompt string, extraEnv []string) (string, error) {
-	args := []string{"run", "--json", "--adapter", adapter, "--cwd", cwd, "--prompt", prompt}
-	if model != "" {
-		args = append(args, "--model", model)
+func newSupervisorSendCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "send [message]",
+		Short: "Send a message to the running supervisor",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := connectServe()
+			if err != nil {
+				return err
+			}
+			msg := strings.Join(args, " ")
+			data, err := c.doPost("/api/supervisor/send", map[string]string{"message": msg})
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(data)
+			return err
+		},
 	}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
-	}
-
-	runCmd := exec.Command(bin, args...)
-	runCmd.Dir = cwd
-	runCmd.Stderr = nil
-	runCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if len(extraEnv) > 0 {
-		runCmd.Env = append(os.Environ(), extraEnv...)
-	}
-	out, err := runCmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("fase run failed: %w", err)
-	}
-
-	var result struct {
-		Job struct {
-			JobID string `json:"job_id"`
-		} `json:"job"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return "", fmt.Errorf("failed to parse run output: %w", err)
-	}
-	if result.Job.JobID == "" {
-		return "", fmt.Errorf("run returned no job_id")
-	}
-	return result.Job.JobID, nil
 }
 
 func isTerminal(state string) bool {

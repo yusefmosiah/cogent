@@ -183,6 +183,8 @@ func newServeCommand(root *rootOptions) *cobra.Command {
 	var noUI bool
 	var noBrowser bool
 	var devAssets string
+	var supAdapter string
+	var supModel string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -199,7 +201,7 @@ Examples:
   fase serve --host 0.0.0.0           # accessible via Tailscale/LAN
   fase serve --no-browser             # don't open browser on start`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServe(cmd, root, port, host, auto, noUI, noBrowser, devAssets)
+			return runServe(cmd, root, port, host, auto, noUI, noBrowser, devAssets, supAdapter, supModel)
 		},
 	}
 
@@ -209,11 +211,13 @@ Examples:
 	cmd.Flags().BoolVar(&noUI, "no-ui", false, "skip web UI, run housekeeping only")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", true, "don't auto-open browser")
 	cmd.Flags().StringVar(&devAssets, "dev-assets", "", "serve UI from filesystem instead of embedded (for development)")
+	cmd.Flags().StringVar(&supAdapter, "supervisor-adapter", "claude", "adapter for the supervisor session (used with --auto)")
+	cmd.Flags().StringVar(&supModel, "supervisor-model", "claude-sonnet-4-6", "model for the supervisor session (used with --auto)")
 
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto, noUI, noBrowser bool, devAssets string) error {
+func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto, noUI, noBrowser bool, devAssets, supAdapter, supModel string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -253,8 +257,15 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// WebSocket hub — shared across all goroutines
 	hub := newWSHub()
 
+	// Agentic supervisor (ADR-0041) — created before API handlers so
+	// pause/resume endpoints have a reference. Goroutine started below.
+	var sup *agenticSupervisor
+	if auto {
+		sup = newAgenticSupervisor(svc, cwd, hub, supAdapter, supModel)
+	}
+
 	mux := http.NewServeMux()
-	registerAPIHandlers(mux, svc, cwd, hub)
+	registerAPIHandlers(mux, svc, cwd, hub, sup)
 
 	// MCP endpoint — same work graph tools as `fase mcp http`
 	mcpServer := mcpserver.New(svc)
@@ -304,9 +315,13 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 		runChangeWatcher(ctx, svc, hub)
 	}()
 
-	// --auto: placeholder for agentic supervisor (ADR-0041)
-	if auto {
-		fmt.Fprintf(cmd.OutOrStdout(), "WARNING: --auto requires the agentic supervisor (ADR-0041, not yet implemented). Dispatch manually with 'fase dispatch'.\n")
+	// Start agentic supervisor goroutine (ADR-0041)
+	if sup != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sup.run(ctx)
+		}()
 	}
 
 	// Start HTTP server
@@ -467,7 +482,7 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub) {
 	}
 }
 
-func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, hub *wsHub) {
+func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, hub *wsHub, sup *agenticSupervisor) {
 	// Work items list (legacy)
 	mux.HandleFunc("/api/work/items", func(w http.ResponseWriter, r *http.Request) {
 		includeArchived := r.URL.Query().Get("include_archived") == "1" || strings.EqualFold(r.URL.Query().Get("include_archived"), "true")
@@ -1300,13 +1315,18 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 		})
 	})
 
-	// Supervisor pause / resume — placeholder for agentic supervisor (ADR-0041)
+	// Supervisor pause / resume (ADR-0041)
 	mux.HandleFunc("/api/supervisor/pause", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
 			return
 		}
-		writeJSONHTTP(w, 409, map[string]string{"error": "agentic supervisor not yet implemented (ADR-0041)"})
+		if sup == nil {
+			writeJSONHTTP(w, 409, map[string]string{"error": "supervisor not running (start with --auto)"})
+			return
+		}
+		sup.pause()
+		writeJSONHTTP(w, 200, map[string]string{"status": "paused"})
 	})
 
 	mux.HandleFunc("/api/supervisor/resume", func(w http.ResponseWriter, r *http.Request) {
@@ -1314,7 +1334,36 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
 			return
 		}
-		writeJSONHTTP(w, 409, map[string]string{"error": "agentic supervisor not yet implemented (ADR-0041)"})
+		if sup == nil {
+			writeJSONHTTP(w, 409, map[string]string{"error": "supervisor not running (start with --auto)"})
+			return
+		}
+		sup.resume()
+		writeJSONHTTP(w, 200, map[string]string{"status": "resumed"})
+	})
+
+	mux.HandleFunc("/api/supervisor/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if sup == nil {
+			writeJSONHTTP(w, 409, map[string]string{"error": "supervisor not running (start with --auto)"})
+			return
+		}
+		var req struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONHTTP(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		if req.Message == "" {
+			writeJSONHTTP(w, 400, map[string]string{"error": "message must not be empty"})
+			return
+		}
+		sup.send(req.Message)
+		writeJSONHTTP(w, 200, map[string]string{"status": "sent"})
 	})
 
 	// Full diff

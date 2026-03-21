@@ -1359,8 +1359,8 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 	if mode == "" {
 		mode = "standard"
 	}
-	if mode != "thin" && mode != "standard" && mode != "deep" {
-		return nil, fmt.Errorf("%w: hydrate mode must be thin, standard, or deep", ErrInvalidInput)
+	if mode != "thin" && mode != "standard" && mode != "deep" && mode != "supervisor" {
+		return nil, fmt.Errorf("%w: hydrate mode must be thin, standard, deep, or supervisor", ErrInvalidInput)
 	}
 	result, err := s.Work(ctx, workID)
 	if err != nil {
@@ -1553,8 +1553,8 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 	if mode == "" {
 		mode = "standard"
 	}
-	if mode != "thin" && mode != "standard" && mode != "deep" {
-		return nil, fmt.Errorf("%w: hydrate mode must be thin, standard, or deep", ErrInvalidInput)
+	if mode != "thin" && mode != "standard" && mode != "deep" && mode != "supervisor" {
+		return nil, fmt.Errorf("%w: hydrate mode must be thin, standard, deep, or supervisor", ErrInvalidInput)
 	}
 
 	// Conventions — the core of project hydration.
@@ -1602,12 +1602,19 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 				"claimed_by": w.ClaimedBy,
 			})
 		case core.WorkExecutionStateReady:
-			readyWork = append(readyWork, map[string]any{
+			entry := map[string]any{
 				"work_id":  w.WorkID,
 				"title":    w.Title,
 				"kind":     w.Kind,
 				"priority": w.Priority,
-			})
+			}
+			if len(w.PreferredAdapters) > 0 {
+				entry["preferred_adapters"] = w.PreferredAdapters
+			}
+			if len(w.PreferredModels) > 0 {
+				entry["preferred_models"] = w.PreferredModels
+			}
+			readyWork = append(readyWork, entry)
 		case core.WorkExecutionStateBlocked:
 			blockedWork = append(blockedWork, map[string]any{
 				"work_id": w.WorkID,
@@ -1648,6 +1655,11 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 		conventionEntries = append(conventionEntries, entry)
 	}
 
+	effectiveMode := mode
+	if mode == "supervisor" {
+		effectiveMode = "standard"
+	}
+
 	result := ProjectHydrateResult{
 		"schema_version": "fase.project_briefing.v1",
 		"briefing_kind":  "project",
@@ -1667,36 +1679,44 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 		"blocked_work":         blockedWork,
 		"recent_completed":     recentCompleted,
 		"pending_attestations": pendingAttestations,
-		"contract": map[string]any{
-			"read_commands": []string{
-				"fase work show <work-id>",
-				"fase work notes <work-id>",
-				"fase work hydrate <work-id>",
-				"fase work list",
-				"fase work ready",
-				"fase project hydrate",
-			},
-			"write_commands": []string{
-				"fase work create",
-				"fase work update <work-id>",
-				"fase work note-add <work-id>",
-				"fase work attest <work-id>",
-				"fase dispatch [work-id]",
-			},
-			"rules": []string{
-				"CLI routes through fase serve — serve must be running for all commands.",
-				"All persistent state belongs in the FASE work queue (notes, updates, conventions).",
-				"Do not use Claude memory system — all state in FASE work queue.",
-				"Do not create memory files, CLAUDE.md, or .claude hidden state files.",
-				"One code-writer per environment, unlimited readers — plan/research/attest tasks can run concurrently.",
-				"Host agent role: delegate and review, never write code directly.",
-			},
-			"available_adapters": []string{
-				"claude (claude-sonnet-4-6, claude-haiku-4-5)",
-				"codex (gpt-5.4, gpt-5.4-mini)",
-				"opencode (zai-coding-plan/glm-5-turbo)",
-			},
+	}
+	_ = effectiveMode // reserved for future per-mode tuning
+
+	contract := map[string]any{
+		"read_commands": []string{
+			"fase work show <work-id>",
+			"fase work notes <work-id>",
+			"fase work hydrate <work-id>",
+			"fase work list",
+			"fase work ready",
+			"fase project hydrate",
 		},
+		"write_commands": []string{
+			"fase work create",
+			"fase work update <work-id>",
+			"fase work note-add <work-id>",
+			"fase work attest <work-id>",
+			"fase dispatch [work-id]",
+		},
+		"rules": []string{
+			"CLI routes through fase serve — serve must be running for all commands.",
+			"All persistent state belongs in the FASE work queue (notes, updates, conventions).",
+			"Do not use Claude memory system — all state in FASE work queue.",
+			"Do not create memory files, CLAUDE.md, or .claude hidden state files.",
+			"One code-writer per environment, unlimited readers — plan/research/attest tasks can run concurrently.",
+			"Host agent role: delegate and review, never write code directly.",
+		},
+		"available_adapters": []string{
+			"claude (claude-sonnet-4-6, claude-haiku-4-5)",
+			"codex (gpt-5.4, gpt-5.4-mini)",
+			"opencode (zai-coding-plan/glm-5-turbo)",
+		},
+	}
+	result["contract"] = contract
+
+	if mode == "supervisor" {
+		result["supervisor_role"] = supervisorRolePrompt()
+		result["dispatch_protocol"] = supervisorDispatchProtocol()
 	}
 
 	return result, nil
@@ -1839,7 +1859,73 @@ func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
 		b.WriteString("\n")
 	}
 
+	if role, ok := r["supervisor_role"].(string); ok {
+		b.WriteString("## Supervisor Role\n\n")
+		b.WriteString(role)
+		b.WriteString("\n\n")
+	}
+
+	if proto, ok := r["dispatch_protocol"].(map[string]any); ok {
+		renderProtoSection := func(title, key string) {
+			if steps := toSlice(proto[key]); len(steps) > 0 {
+				b.WriteString("### " + title + "\n\n")
+				for _, step := range steps {
+					if s, ok := step.(string); ok {
+						b.WriteString(s + "\n")
+					}
+				}
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("## Dispatch Protocol\n\n")
+		renderProtoSection("Dispatch Flow", "dispatch_flow")
+		renderProtoSection("Attestation Flow", "attestation_flow")
+		renderProtoSection("Error Handling", "error_handling")
+		renderProtoSection("Concurrency Rules", "concurrency_rules")
+	}
+
 	return b.String()
+}
+
+func supervisorRolePrompt() string {
+	return `You are the FASE supervisor. Your job is to manage the work queue:
+1. Dispatch ready work items to worker agents by choosing the right adapter and model.
+2. Monitor worker progress via events.
+3. Review and attest completed work.
+4. Ensure one code-writer runs at a time per the FASE concurrency model.
+
+You are NOT a worker — you never write code directly. You delegate to worker agents
+via the dispatch system and review their output.`
+}
+
+func supervisorDispatchProtocol() map[string]any {
+	return map[string]any{
+		"dispatch_flow": []string{
+			"1. Check ready_work for dispatchable items (highest priority first).",
+			"2. Check active_work — if any item is in_progress or claimed, wait for it to complete.",
+			"3. For the next ready item, select adapter+model based on preferred_adapters/preferred_models, or round-robin.",
+			"4. Claim the work item (fase work claim <work-id>).",
+			"5. Hydrate the worker briefing (fase work hydrate <work-id>).",
+			"6. Dispatch: spawn a worker session on the chosen adapter with the briefing as prompt.",
+			"7. Monitor events for completion or failure.",
+		},
+		"attestation_flow": []string{
+			"1. When a work item reaches awaiting_attestation, review the worker's output.",
+			"2. Check the diff, test results, and any findings noted by the worker.",
+			"3. If the work meets the objective, attest it (fase work attest <work-id> --verdict approve).",
+			"4. If the work needs revision, update it back to ready with feedback.",
+		},
+		"error_handling": []string{
+			"If a worker fails, the item returns to ready state — it will be redispatched.",
+			"If a worker stalls (no output for 10 minutes), housekeeping marks it failed.",
+			"If an adapter is unavailable, try the next adapter in rotation.",
+		},
+		"concurrency_rules": []string{
+			"One code-writing worker at a time per environment.",
+			"Plan, research, and attest tasks can run concurrently.",
+			"Use force dispatch only when you are certain there is no conflict.",
+		},
+	}
 }
 
 func toSlice(v any) []any {
