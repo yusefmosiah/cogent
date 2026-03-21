@@ -2,8 +2,8 @@
   "mcpServers": {
     "fase": {
       "command": "fase",
-      "args": ["mcp", "stdio"],
-      "description": "fase work graph: project hydration, work items, attestations, notes"
+      "args": ["mcp", "proxy"],
+      "description": "FASE work queue: project hydration, work items, attestations, notes"
     }
   }
 }
