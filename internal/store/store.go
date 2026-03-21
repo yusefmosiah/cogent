@@ -877,23 +877,7 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int, includeArchived bo
 		        OR wi.claimed_by = ''
 		        OR (wi.claimed_until IS NOT NULL AND wi.claimed_until <= ?)
 		    )
-		    AND wi.lock_state <> 'human_locked'
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM work_edges we
-		          JOIN work_items dep ON dep.work_id = we.from_work_id
-		         WHERE we.to_work_id = wi.work_id
-		           AND we.edge_type IN ('blocks', 'depends_on')
-		           AND dep.execution_state NOT IN ('done', 'cancelled')
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM work_edges we
-		          JOIN work_items newer ON newer.work_id = we.from_work_id
-		         WHERE we.to_work_id = wi.work_id
-		           AND we.edge_type = 'supersedes'
-		           AND newer.execution_state NOT IN ('failed', 'cancelled')
-		    )`,
+		    AND wi.lock_state <> 'human_locked'`,
 		now,
 		now,
 		limit,
@@ -2644,7 +2628,7 @@ func (s *Store) AttachArtifactToEvent(
 func (s *Store) bootstrap(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA foreign_keys = ON;`,
-		`PRAGMA busy_timeout = 5000;`,
+		`PRAGMA busy_timeout = 30000;`,
 		`PRAGMA journal_mode = WAL;`,
 		schema,
 	}
@@ -4084,7 +4068,7 @@ CREATE INDEX IF NOT EXISTS idx_private_notes_work_id ON private_notes(work_id, c
 func (s *Store) bootstrapPrivate(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA foreign_keys = ON;`,
-		`PRAGMA busy_timeout = 5000;`,
+		`PRAGMA busy_timeout = 30000;`,
 		`PRAGMA journal_mode = WAL;`,
 		privateSchema,
 	}

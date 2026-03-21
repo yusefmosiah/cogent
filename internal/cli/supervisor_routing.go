@@ -132,11 +132,16 @@ func (t *AdapterHealthTracker) score(adapter, model string, item core.WorkItemRe
 func kindAffinity(adapter, kind string) float64 {
 	switch kind {
 	case "implement":
-		if adapter == "claude" {
-			return 0.15
+		if adapter == "codex" {
+			return 0.2
 		}
 	case "attest":
-		return 0.1
+		if adapter == "opencode" {
+			return 0.15
+		}
+		if adapter == "claude" {
+			return 0.1
+		}
 	case "research", "plan":
 		if adapter == "opencode" {
 			return 0.1

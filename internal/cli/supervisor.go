@@ -29,10 +29,12 @@ type rotationEntry struct {
 }
 
 // workRotation is the round-robin pool for dispatch and attestation.
-// Order matters: attestation uses offset +1 from the work entry.
+// Includes multiple models per adapter for cost/capability tiering.
 var workRotation = []rotationEntry{
-	{adapter: "claude", model: "claude-sonnet-4-6"},
+	{adapter: "codex", model: "gpt-5.4"},
 	{adapter: "codex", model: "gpt-5.4-mini"},
+	{adapter: "claude", model: "claude-sonnet-4-6"},
+	{adapter: "claude", model: "claude-haiku-4-5"},
 	{adapter: "opencode", model: "zai-coding-plan/glm-5-turbo"},
 }
 

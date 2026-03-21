@@ -46,3 +46,25 @@ work_seed/
 .fase/serve.log
 .fase/usage.json
 .fase/adapter_health.json
+
+# fase local state — track public DB, ignore private DB and artifacts
+.fase/raw/
+.fase/jobs/
+.fase/transfers/
+.fase/debriefs/
+.fase/fase.db-shm
+.fase/fase.db-wal
+.fase/fase-private.db
+.fase/fase-private.db-shm
+.fase/fase-private.db-wal
+
+# legacy cagent state — preserved for compatibility
+.cagent/raw/
+.cagent/jobs/
+.cagent/transfers/
+.cagent/debriefs/
+.cagent/cagent.db-shm
+.cagent/cagent.db-wal
+.cagent/cagent-private.db
+.cagent/cagent-private.db-shm
+.cagent/cagent-private.db-wal

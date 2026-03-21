@@ -140,10 +140,12 @@ type workUpdateInput struct {
 }
 
 type workCreateInput struct {
-	Title     string `json:"title" jsonschema:"required,work item title"`
-	Objective string `json:"objective" jsonschema:"required,work item objective"`
-	Kind      string `json:"kind" jsonschema:"required,work item kind: implement, plan, or attest"`
-	Priority  int    `json:"priority,omitempty" jsonschema:"priority (higher is more urgent)"`
+	Title             string   `json:"title" jsonschema:"required,work item title"`
+	Objective         string   `json:"objective" jsonschema:"required,work item objective"`
+	Kind              string   `json:"kind" jsonschema:"required,work item kind: implement, plan, or attest"`
+	Priority          int      `json:"priority,omitempty" jsonschema:"priority (higher is more urgent)"`
+	PreferredAdapters []string `json:"preferred_adapters,omitempty" jsonschema:"preferred adapter names for dispatch"`
+	PreferredModels   []string `json:"preferred_models,omitempty" jsonschema:"preferred model IDs for dispatch"`
 }
 
 type workNoteAddInput struct {
@@ -251,10 +253,12 @@ func registerTools(server *mcp.Server, svc *service.Service) {
 		Description: "Create a new work item.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input workCreateInput) (*mcp.CallToolResult, any, error) {
 		work, err := svc.CreateWork(ctx, service.WorkCreateRequest{
-			Title:     input.Title,
-			Objective: input.Objective,
-			Kind:      input.Kind,
-			Priority:  input.Priority,
+			Title:             input.Title,
+			Objective:         input.Objective,
+			Kind:              input.Kind,
+			Priority:          input.Priority,
+			PreferredAdapters: input.PreferredAdapters,
+			PreferredModels:   input.PreferredModels,
 		})
 		if err != nil {
 			return nil, nil, err
