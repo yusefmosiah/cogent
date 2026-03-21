@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -221,6 +222,9 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Load .env from cwd if present — native adapter needs API keys.
+	loadDotEnv()
+
 	// Open service once — shared by all goroutines
 	svc, err := service.Open(ctx, root.configPath)
 	if err != nil {
@@ -373,6 +377,34 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 // - Reconcile expired leases (orphaned claims)
 // - Detect stalled jobs (no output for 10 minutes)
 // - Dispatch verification for completed jobs (from fase dispatch)
+// loadDotEnv reads .env from cwd and sets environment variables.
+// Existing vars are NOT overwritten. No dependency on external packages.
+func loadDotEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		// Strip surrounding quotes.
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
 func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub *wsHub) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -1240,7 +1272,11 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			req.WorkID = workID
 			work, err := svc.ClaimWork(r.Context(), req)
 			if err != nil {
-				writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+				if errors.Is(err, service.ErrBusy) {
+					writeJSONHTTP(w, 409, map[string]string{"error": err.Error()})
+				} else {
+					writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+				}
 				return
 			}
 			writeJSONHTTP(w, 200, work)
@@ -1257,7 +1293,11 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			req.WorkID = workID
 			work, err := svc.ReleaseWork(r.Context(), req)
 			if err != nil {
-				writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+				if errors.Is(err, service.ErrBusy) {
+					writeJSONHTTP(w, 409, map[string]string{"error": err.Error()})
+				} else {
+					writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+				}
 				return
 			}
 			writeJSONHTTP(w, 200, work)
