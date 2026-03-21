@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 	"strconv"
 	"strings"
 )
@@ -88,7 +89,7 @@ func newHTTPClient(httpClient HTTPDoer) HTTPDoer {
 	if httpClient != nil {
 		return httpClient
 	}
-	return &http.Client{}
+	return &http.Client{Timeout: 5 * time.Minute}
 }
 
 func newJSONRequest(ctx context.Context, method, rawURL string, body any) (*http.Request, error) {

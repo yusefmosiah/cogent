@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/yusefmosiah/fase/internal/adapterapi"
 )
@@ -97,24 +98,49 @@ func (s *nativeSession) activateTool(name string) {
 func (s *nativeSession) executeTools(ctx context.Context, calls []ToolCall) (Message, error) {
 	message := Message{Role: "user"}
 
-	for _, call := range calls {
-		// Activate tool schema on first use so it's sent in subsequent calls.
+	// Execute tool calls in parallel — results collected in order.
+	type toolResult struct {
+		callID string
+		output string
+	}
+	results := make([]toolResult, len(calls))
+	var wg sync.WaitGroup
+	for i, call := range calls {
 		s.activateTool(call.Name)
-
-		output, err := s.registry.Execute(ctx, call.Name, call.Arguments)
-		if err != nil {
-			s.toolErrors++
-			if s.toolErrors >= 5 {
-				output = fmt.Sprintf("tool_error: %v\n\nWARNING: %d consecutive tool errors. This tool may be unavailable. Stop retrying and work with what you have.", err, s.toolErrors)
-			} else {
+		wg.Add(1)
+		go func(idx int, c ToolCall) {
+			defer wg.Done()
+			output, err := s.registry.Execute(ctx, c.Name, c.Arguments)
+			if err != nil {
 				output = fmt.Sprintf("tool_error: %v", err)
 			}
-		} else {
-			s.toolErrors = 0
+			results[idx] = toolResult{callID: c.ID, output: output}
+		}(i, call)
+	}
+	wg.Wait()
+
+	// Check for consecutive errors.
+	allErrors := true
+	for _, r := range results {
+		if !strings.HasPrefix(r.output, "tool_error:") {
+			allErrors = false
+			break
+		}
+	}
+	if allErrors {
+		s.toolErrors += len(results)
+	} else {
+		s.toolErrors = 0
+	}
+
+	for _, r := range results {
+		output := r.output
+		if s.toolErrors >= 5 && strings.HasPrefix(output, "tool_error:") {
+			output += fmt.Sprintf("\n\nWARNING: %d consecutive tool errors. This tool may be unavailable. Stop retrying and work with what you have.", s.toolErrors)
 		}
 		message.Content = append(message.Content, ContentBlock{
 			Type:      "tool_result",
-			ToolUseID: call.ID,
+			ToolUseID: r.callID,
 			Text:      output,
 		})
 	}
