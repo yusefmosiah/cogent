@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yusefmosiah/fase/internal/core"
 	"github.com/yusefmosiah/fase/internal/service"
 )
 
@@ -85,15 +86,54 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 	sessionID := result.Session.SessionID
 	s.log("started", fmt.Sprintf("session=%s job=%s", sessionID, result.Job.JobID))
 
-	pending := s.waitForJob(ctx, ch, result.Job.JobID)
+	outcome := s.waitForJob(ctx, ch, result.Job.JobID)
+
+	// Backoff state: tracks consecutive unproductive turns.
+	consecutiveEmpty := 0
+	const maxBackoff = 5 * time.Minute
 
 	for {
-		// If events arrived during waitForJob, use them immediately.
-		// Otherwise block for the next signal.
+		// If the last turn was unproductive (error, rate-limited, or very fast
+		// with no tool calls), back off exponentially.
+		if outcome.unproductive {
+			consecutiveEmpty++
+			backoff := time.Duration(1<<min(consecutiveEmpty, 8)) * time.Second
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			s.log("backoff", fmt.Sprintf("unproductive turn (%s), waiting %s (streak: %d)",
+				outcome.reason, backoff, consecutiveEmpty))
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-s.hostCh:
+				// Host message breaks backoff immediately.
+				consecutiveEmpty = 0
+				s.log("turn", fmt.Sprintf("session=%s (host broke backoff)", sessionID))
+				sendResult, err := s.svc.Send(ctx, service.SendRequest{
+					SessionID: sessionID,
+					Adapter:   s.adapter,
+					Prompt:    fmt.Sprintf("Message from host: %s", msg),
+					Model:     s.model,
+				})
+				if err != nil {
+					s.log("error", fmt.Sprintf("send failed: %v — restarting", err))
+					s.restartAfterDelay(ctx, ch)
+					return
+				}
+				outcome = s.waitForJob(ctx, ch, sendResult.Job.JobID)
+				continue
+			case <-time.After(backoff):
+				// After backoff, wait for a real signal (don't immediately retry).
+			}
+		} else {
+			consecutiveEmpty = 0
+		}
+
+		// Collect pending events or wait for a signal.
 		var msg string
-		if len(pending) > 0 {
-			msg = formatEvents(pending)
-			pending = nil
+		if len(outcome.events) > 0 {
+			msg = formatEvents(outcome.events)
 		} else {
 			msg = s.waitForSignal(ctx, ch)
 		}
@@ -101,6 +141,7 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 			return
 		}
 		if s.isPaused() {
+			outcome = jobOutcome{}
 			continue
 		}
 
@@ -118,8 +159,15 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 			return
 		}
 
-		pending = s.waitForJob(ctx, ch, sendResult.Job.JobID)
+		outcome = s.waitForJob(ctx, ch, sendResult.Job.JobID)
 	}
+}
+
+// jobOutcome captures the result of waiting for a supervisor turn job.
+type jobOutcome struct {
+	events       []service.WorkEvent
+	unproductive bool   // true if the turn was rate-limited, errored, or empty
+	reason       string // human-readable reason for unproductive
 }
 
 // waitForSignal blocks until an event or host message arrives.
@@ -201,16 +249,17 @@ func formatEvents(events []service.WorkEvent) string {
 }
 
 // waitForJob polls until the supervisor's own turn job completes.
-// Collects events that arrive during the wait so they aren't lost.
-func (s *agenticSupervisor) waitForJob(ctx context.Context, ch chan service.WorkEvent, jobID string) []service.WorkEvent {
+// Returns a jobOutcome with collected events and whether the turn was unproductive.
+func (s *agenticSupervisor) waitForJob(ctx context.Context, ch chan service.WorkEvent, jobID string) jobOutcome {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	startTime := time.Now()
 
 	var collected []service.WorkEvent
 	for {
 		select {
 		case <-ctx.Done():
-			return collected
+			return jobOutcome{events: collected}
 		case ev := <-ch:
 			if ev.RequiresSupervisorAttention() {
 				collected = append(collected, ev)
@@ -221,10 +270,33 @@ func (s *agenticSupervisor) waitForJob(ctx context.Context, ch chan service.Work
 				continue
 			}
 			if status.Job.State.Terminal() {
-				return collected
+				return s.classifyOutcome(status, collected, startTime)
 			}
 		}
 	}
+}
+
+// classifyOutcome determines if the completed turn was productive.
+func (s *agenticSupervisor) classifyOutcome(status *service.StatusResult, events []service.WorkEvent, startTime time.Time) jobOutcome {
+	duration := time.Since(startTime)
+	out := jobOutcome{events: events}
+
+	// Check for failed job state.
+	if status.Job.State == core.JobStateFailed {
+		out.unproductive = true
+		out.reason = "job failed"
+		return out
+	}
+
+	// Very fast completion (< 10s) with no events suggests rate-limit or error.
+	// Normal supervisor turns take 15-30s as the LLM reads and calls tools.
+	if duration < 10*time.Second {
+		out.unproductive = true
+		out.reason = fmt.Sprintf("completed too fast (%s)", duration.Round(time.Second))
+		return out
+	}
+
+	return out
 }
 
 func (s *agenticSupervisor) restartAfterDelay(ctx context.Context, ch chan service.WorkEvent) {
