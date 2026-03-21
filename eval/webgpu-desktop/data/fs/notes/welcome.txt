@@ -1,4 +1,0 @@
-Welcome to the writable workspace.
-
-Try opening this file in the file browser, editing it, and saving changes back through the API.
-
