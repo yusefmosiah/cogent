@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/yusefmosiah/fase/internal/adapterapi"
 	"github.com/yusefmosiah/fase/internal/adapters/codex"
@@ -105,6 +106,29 @@ func (a *Adapter) start(ctx context.Context, cwd, model, profile, prompt string)
 			"id":         session.SessionID(),
 			"session_id": session.SessionID(),
 		})
+
+		// Heartbeat: for non-streaming providers (Bedrock), write periodic
+		// events so housekeeping doesn't kill the job for "no output".
+		heartbeatDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatDone:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					writeNativeEvent(stdoutW, map[string]any{
+						"type":       "heartbeat",
+						"session_id": session.SessionID(),
+					})
+				}
+			}
+		}()
+
+		defer close(heartbeatDone)
 
 		turnID, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput(prompt)})
 		if err != nil {
