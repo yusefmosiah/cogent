@@ -283,6 +283,33 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 		return mcpServer.MCP
 	}, nil))
 
+	// Channel send — push notifications to connected Claude Code session
+	mux.HandleFunc("/api/channel/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		var req struct {
+			Content string            `json:"content"`
+			Meta    map[string]string `json:"meta,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONHTTP(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		if req.Content == "" {
+			writeJSONHTTP(w, 400, map[string]string{"error": "content must not be empty"})
+			return
+		}
+		if err := mcpServer.SendChannelEvent(req.Content, req.Meta); err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		// Also broadcast to WebSocket for web UI visibility
+		hub.broadcast("channel_message", map[string]string{"content": req.Content})
+		writeJSONHTTP(w, 200, map[string]string{"status": "sent"})
+	})
+
 	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := wsUpgrade(w, r)

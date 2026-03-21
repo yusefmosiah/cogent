@@ -4,10 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -80,12 +85,24 @@ Use this in .mcp.json instead of 'fase mcp stdio'.`,
 	return cmd
 }
 
-// runMCPProxy proxies MCP JSON-RPC from stdin/stdout to an HTTP endpoint.
-// Each line from stdin is POSTed to the endpoint; the response is written to stdout.
+// runMCPProxy proxies MCP JSON-RPC between stdio and serve's HTTP endpoint.
+// Tool calls: stdin → HTTP POST → stdout (SSE events parsed and relayed).
+// Channel notifications: WebSocket /ws → stdout (push from serve to client).
 func runMCPProxy(ctx context.Context, endpoint string) error {
 	client := &http.Client{}
+
+	// Derive WebSocket URL from MCP endpoint for channel notifications.
+	wsURL := strings.Replace(strings.Replace(endpoint, "/mcp", "/ws", 1), "http://", "ws://", 1)
+	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+
+	// Start channel notification listener (serve → stdout).
+	go proxyChannelNotifications(ctx, wsURL)
+
+	// Proxy tool calls (stdin → HTTP → stdout).
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	var sessionID string
 
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -102,20 +119,181 @@ func runMCPProxy(ctx context.Context, endpoint string) error {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
+		if sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", sessionID)
+		}
 
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("proxy request: %w", err)
 		}
 
-		if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-			resp.Body.Close()
-			return fmt.Errorf("proxy response: %w", err)
+		// Capture session ID from response for subsequent requests.
+		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+			sessionID = sid
+		}
+
+		// Parse SSE response and relay as raw JSON lines.
+		if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+			relaySSEToStdout(resp.Body)
+		} else {
+			if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+				resp.Body.Close()
+				return fmt.Errorf("proxy response: %w", err)
+			}
+			fmt.Fprintln(os.Stdout)
 		}
 		resp.Body.Close()
-
-		// MCP streamable HTTP may not end with newline
-		fmt.Fprintln(os.Stdout)
 	}
 	return scanner.Err()
+}
+
+// relaySSEToStdout reads SSE events and writes the data lines to stdout.
+func relaySSEToStdout(body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			data := line[6:]
+			if data != "" && data != "[DONE]" {
+				fmt.Fprintln(os.Stdout, data)
+			}
+		}
+	}
+}
+
+// proxyChannelNotifications connects to serve's WebSocket and relays
+// channel_message events as JSON-RPC notifications to stdout.
+func proxyChannelNotifications(ctx context.Context, wsURL string) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		err := listenWebSocketChannels(ctx, wsURL)
+		if err != nil && ctx.Err() == nil {
+			// Reconnect after brief delay.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+}
+
+// listenWebSocketChannels opens a raw WebSocket to serve and relays
+// channel_message events as notifications/claude/channel to stdout.
+func listenWebSocketChannels(ctx context.Context, wsURL string) error {
+	// Minimal WebSocket client — just enough for text frames from serve.
+	dialer := &net.Dialer{}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return err
+	}
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		host += ":80"
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", host)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// WebSocket upgrade handshake.
+	key := "dGhlIHNhbXBsZSBub25jZQ==" // static key, fine for local
+	upgradeReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
+		u.RequestURI(), u.Host, key)
+	if _, err := conn.Write([]byte(upgradeReq)); err != nil {
+		return err
+	}
+
+	// Read upgrade response (discard).
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(line) == "" {
+			break // end of headers
+		}
+	}
+
+	// Read WebSocket frames.
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Read frame header (simplified — text frames only, no fragmentation).
+		header := make([]byte, 2)
+		if _, err := io.ReadFull(br, header); err != nil {
+			return err
+		}
+		masked := header[1]&0x80 != 0
+		payloadLen := int(header[1] & 0x7F)
+		switch payloadLen {
+		case 126:
+			ext := make([]byte, 2)
+			if _, err := io.ReadFull(br, ext); err != nil {
+				return err
+			}
+			payloadLen = int(ext[0])<<8 | int(ext[1])
+		case 127:
+			ext := make([]byte, 8)
+			if _, err := io.ReadFull(br, ext); err != nil {
+				return err
+			}
+			payloadLen = int(ext[4])<<24 | int(ext[5])<<16 | int(ext[6])<<8 | int(ext[7])
+		}
+
+		var maskKey [4]byte
+		if masked {
+			if _, err := io.ReadFull(br, maskKey[:]); err != nil {
+				return err
+			}
+		}
+
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(br, payload); err != nil {
+			return err
+		}
+		if masked {
+			for i := range payload {
+				payload[i] ^= maskKey[i%4]
+			}
+		}
+
+		// Parse the WebSocket message as a serve broadcast event.
+		var wsEvent struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(payload, &wsEvent); err != nil {
+			continue
+		}
+
+		if wsEvent.Type == "channel_message" {
+			// Extract content and relay as claude/channel notification.
+			var data struct {
+				Content string            `json:"content"`
+				Meta    map[string]string `json:"meta,omitempty"`
+			}
+			if err := json.Unmarshal(wsEvent.Data, &data); err != nil {
+				continue
+			}
+
+			notification := map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "notifications/claude/channel",
+				"params": map[string]any{
+					"content": data.Content,
+					"meta":    data.Meta,
+				},
+			}
+			notifJSON, _ := json.Marshal(notification)
+			fmt.Fprintln(os.Stdout, string(notifJSON))
+		}
+	}
 }
