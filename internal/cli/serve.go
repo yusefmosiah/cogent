@@ -220,7 +220,7 @@ Examples:
 	cmd.Flags().StringVar(&host, "host", "localhost", "HTTP bind host")
 	cmd.Flags().BoolVar(&auto, "auto", false, "auto-dispatch ready work items")
 	cmd.Flags().BoolVar(&noUI, "no-ui", false, "skip web UI, run housekeeping only")
-	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't auto-open browser")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", true, "don't auto-open browser")
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous jobs (with --auto)")
 	cmd.Flags().StringVar(&defaultAdapter, "default-adapter", "codex", "fallback adapter (with --auto)")
 	cmd.Flags().StringVar(&devAssets, "dev-assets", "", "serve UI from filesystem instead of embedded (for development)")

@@ -1953,18 +1953,13 @@ func (s *Service) ReadyWork(ctx context.Context, limit int, includeArchived bool
 	if err != nil {
 		return nil, err
 	}
-	snapshot, snapErr := s.catalogSnapshotOrSync(ctx)
-	diags := adapters.CatalogFromConfig(s.Config)
-	filtered := make([]core.WorkItemRecord, 0, len(items))
-	for _, item := range items {
-		if s.workHasAvailableRuntime(item, snapshot.Entries, diags, snapErr == nil) {
-			filtered = append(filtered, item)
-		}
-		if limit > 0 && len(filtered) >= limit {
-			break
-		}
+	// ADR-0040: supervisor owns dispatch decisions. Runtime filtering
+	// is no longer applied here — the supervisor scores and selects
+	// adapters/models based on work item preferences and health.
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
 	}
-	return filtered, nil
+	return items, nil
 }
 
 func (s *Service) ClaimWork(ctx context.Context, req WorkClaimRequest) (*core.WorkItemRecord, error) {
