@@ -1,41 +1,17 @@
 package pi
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/yusefmosiah/fase/internal/adapterapi"
 )
 
-type Adapter struct {
-	binary  string
-	enabled bool
-}
+type builder struct{}
 
-func New(binary string, enabled bool) *Adapter {
-	return &Adapter{
-		binary:  binary,
-		enabled: enabled,
-	}
-}
-
-func (a *Adapter) Name() string {
-	return "pi"
-}
-
-func (a *Adapter) Binary() string {
-	return a.binary
-}
-
-func (a *Adapter) Implemented() bool {
-	return true
-}
-
-func (a *Adapter) Capabilities() adapterapi.Capabilities {
-	return adapterapi.Capabilities{
+func New(binary string, enabled bool) adapterapi.Adapter {
+	return adapterapi.NewBaseAdapter("pi", binary, enabled, adapterapi.Capabilities{
 		HeadlessRun:      true,
 		StreamJSON:       true,
 		NativeResume:     true,
@@ -43,44 +19,26 @@ func (a *Adapter) Capabilities() adapterapi.Capabilities {
 		InteractiveMode:  true,
 		RPCMode:          true,
 		SessionExport:    true,
-	}
+	}, builder{})
 }
 
-func (a *Adapter) Detect(ctx context.Context) (adapterapi.Diagnosis, error) {
-	_, err := exec.LookPath(a.binary)
-	version, versionErr := adapterapi.DetectVersion(ctx, a.binary, "--version")
-	return adapterapi.Diagnosis{
-		Adapter:      a.Name(),
-		Binary:       a.binary,
-		Version:      version,
-		Available:    err == nil,
-		Enabled:      a.enabled,
-		Implemented:  a.Implemented(),
-		Capabilities: a.Capabilities(),
-	}, versionErr
-}
-
-func (a *Adapter) StartRun(ctx context.Context, req adapterapi.StartRunRequest) (*adapterapi.RunHandle, error) {
-	sessionPath, err := sessionPath(req.CanonicalSessionID)
+func (builder) StartArgs(req adapterapi.StartRunRequest) (adapterapi.RunSpec, error) {
+	sessionPath, err := resolveSessionPath(req.CanonicalSessionID)
 	if err != nil {
-		return nil, err
+		return adapterapi.RunSpec{}, err
 	}
-	return a.start(ctx, req.CWD, sessionPath, req.Model, req.Prompt)
+	return buildSpec(sessionPath, req.Model, req.Prompt), nil
 }
 
-func (a *Adapter) ContinueRun(ctx context.Context, req adapterapi.ContinueRunRequest) (*adapterapi.RunHandle, error) {
+func (builder) ContinueArgs(req adapterapi.ContinueRunRequest) (adapterapi.RunSpec, error) {
 	sessionPath, _ := req.NativeSessionMeta["session_path"].(string)
 	if sessionPath == "" {
-		return nil, fmt.Errorf("pi continuation requires native session metadata.session_path")
+		return adapterapi.RunSpec{}, fmt.Errorf("pi continuation requires native session metadata.session_path")
 	}
-	return a.start(ctx, req.CWD, sessionPath, req.Model, req.Prompt)
+	return buildSpec(sessionPath, req.Model, req.Prompt), nil
 }
 
-func (a *Adapter) start(ctx context.Context, cwd, sessionPath, model, prompt string) (*adapterapi.RunHandle, error) {
-	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create pi session directory: %w", err)
-	}
-
+func buildSpec(sessionPath, model, prompt string) adapterapi.RunSpec {
 	args := []string{
 		"--mode", "json",
 		"--print",
@@ -91,37 +49,15 @@ func (a *Adapter) start(ctx context.Context, cwd, sessionPath, model, prompt str
 	}
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, a.binary, args...)
-	cmd.Dir = cwd
-	adapterapi.PrepareCommand(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open pi stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open pi stderr: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start pi: %w", err)
-	}
-
-	return &adapterapi.RunHandle{
-		Cmd:    cmd,
-		Stdout: stdout,
-		Stderr: stderr,
+	return adapterapi.RunSpec{
+		Args: args,
 		NativeSessionMeta: map[string]any{
 			"session_path": sessionPath,
 		},
-		Cleanup: func() error {
-			return nil
-		},
-	}, nil
+	}
 }
 
-func sessionPath(sessionID string) (string, error) {
+func resolveSessionPath(sessionID string) (string, error) {
 	base := os.Getenv("PI_CODING_AGENT_DIR")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -130,6 +66,5 @@ func sessionPath(sessionID string) (string, error) {
 		}
 		base = filepath.Join(home, ".pi", "agent")
 	}
-
 	return filepath.Join(base, "sessions", "fase-"+sessionID+".jsonl"), nil
 }
