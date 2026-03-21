@@ -23,6 +23,7 @@ type anthropicRequest struct {
 	System           string             `json:"system,omitempty"`
 	Messages         []anthropicMessage `json:"messages,omitempty"`
 	Tools            []anthropicTool    `json:"tools,omitempty"`
+	MaxTokens        int                `json:"max_tokens"`
 	Stream           bool               `json:"stream,omitempty"`
 	AnthropicVersion string             `json:"anthropic_version,omitempty"`
 }
@@ -70,6 +71,7 @@ func (c *anthropicClient) Call(ctx context.Context, req LLMRequest) (*LLMRespons
 		System:           req.System,
 		Messages:         anthropicMessages(req.Messages),
 		Tools:            anthropicTools(req.Tools),
+		MaxTokens:        16384,
 		Stream:           req.Stream,
 		AnthropicVersion: c.provider.AnthropicVersion,
 	}
