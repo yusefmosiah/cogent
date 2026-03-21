@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -160,6 +162,13 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 		}
 
 		outcome = s.waitForJob(ctx, ch, sendResult.Job.JobID)
+
+		// Notify host after each productive turn.
+		if !outcome.unproductive {
+			if status, err := s.svc.Status(ctx, sendResult.Job.JobID); err == nil && status.Job.State == core.JobStateCompleted {
+				s.notifyHost(fmt.Sprintf("Supervisor turn completed (job %s)", sendResult.Job.JobID), "status_update")
+			}
+		}
 	}
 }
 
@@ -319,4 +328,21 @@ func (s *agenticSupervisor) restartAfterDelay(ctx context.Context, ch chan servi
 func (s *agenticSupervisor) log(event, message string) {
 	s.hub.broadcast("supervisor_"+event, map[string]string{"message": message})
 	fmt.Printf("supervisor: %s %s\n", event, message)
+}
+
+// notifyHost sends a channel notification to the host via serve's API.
+func (s *agenticSupervisor) notifyHost(message, msgType string) {
+	body, _ := json.Marshal(map[string]any{
+		"content": message,
+		"meta":    map[string]string{"source": "supervisor", "type": msgType},
+	})
+	info, err := loadServeInfo()
+	if err != nil {
+		return
+	}
+	url := fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port)
+	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+	if err == nil {
+		resp.Body.Close()
+	}
 }

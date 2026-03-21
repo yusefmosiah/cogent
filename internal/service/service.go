@@ -657,14 +657,30 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (*RunResult, error)
 
 	target, err := s.resolveContinuationTarget(ctx, session, req.Adapter)
 	if err != nil {
-		return nil, err
+		// For adapters that support ContinueRun without a native session
+		// (e.g., native adapter starts a fresh session each continuation),
+		// create a synthetic target from the session's origin adapter.
+		adapterName := req.Adapter
+		if adapterName == "" {
+			adapterName = session.OriginAdapter
+		}
+		_, _, resolveErr := s.resolveAdapter(ctx, adapterName)
+		if resolveErr != nil {
+			return nil, err // original error
+		}
+		target = core.NativeSessionRecord{
+			Adapter:   adapterName,
+			Resumable: true,
+		}
 	}
 
 	_, descriptor, err := s.resolveAdapter(ctx, target.Adapter)
 	if err != nil {
 		return nil, err
 	}
-	if !descriptor.Capabilities.NativeResume {
+	// Allow continuation for adapters with NativeResume OR adapters that
+	// handle ContinueRun by starting fresh (like native adapter).
+	if !descriptor.Capabilities.NativeResume && target.Adapter != "native" {
 		return nil, fmt.Errorf("%w: adapter %q does not support continuation", ErrUnsupported, target.Adapter)
 	}
 	if req.WorkID != "" {

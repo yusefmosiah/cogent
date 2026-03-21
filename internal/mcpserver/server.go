@@ -39,6 +39,7 @@ func New(svc *service.Service) *Server {
 	)
 	s := &Server{MCP: mcpServer, svc: svc, w: os.Stdout}
 	registerTools(mcpServer, svc)
+	registerChannelTools(mcpServer, s)
 	return s
 }
 
