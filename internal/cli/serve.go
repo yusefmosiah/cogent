@@ -186,6 +186,7 @@ func newServeCommand(root *rootOptions) *cobra.Command {
 	var devAssets string
 	var supAdapter string
 	var supModel string
+	var envFile string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -202,7 +203,7 @@ Examples:
   fase serve --host 0.0.0.0           # accessible via Tailscale/LAN
   fase serve --no-browser             # don't open browser on start`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServe(cmd, root, port, host, auto, noUI, noBrowser, devAssets, supAdapter, supModel)
+			return runServe(cmd, root, port, host, auto, noUI, noBrowser, devAssets, supAdapter, supModel, envFile)
 		},
 	}
 
@@ -214,16 +215,17 @@ Examples:
 	cmd.Flags().StringVar(&devAssets, "dev-assets", "", "serve UI from filesystem instead of embedded (for development)")
 	cmd.Flags().StringVar(&supAdapter, "supervisor-adapter", "claude", "adapter for the supervisor session (used with --auto)")
 	cmd.Flags().StringVar(&supModel, "supervisor-model", "claude-sonnet-4-6", "model for the supervisor session (used with --auto)")
+	cmd.Flags().StringVar(&envFile, "env", "", "path to .env file for API keys (default: .env in cwd)")
 
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto, noUI, noBrowser bool, devAssets, supAdapter, supModel string) error {
+func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto, noUI, noBrowser bool, devAssets, supAdapter, supModel, envFile string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Load .env from cwd if present — native adapter needs API keys.
-	loadDotEnv()
+	// Load .env — native adapter needs API keys.
+	loadDotEnv(envFile)
 
 	// Open service once — shared by all goroutines
 	svc, err := service.Open(ctx, root.configPath)
@@ -252,6 +254,10 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 		"port": actualPort,
 		"cwd":  cwd,
 		"auto": auto,
+	}
+	if envFile != "" {
+		absEnv, _ := filepath.Abs(envFile)
+		serveInfo["env_file"] = absEnv
 	}
 	serveJSON, _ := json.MarshalIndent(serveInfo, "", "  ")
 	servePath := filepath.Join(svc.Paths.StateDir, "serve.json")
@@ -377,10 +383,15 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 // - Reconcile expired leases (orphaned claims)
 // - Detect stalled jobs (no output for 10 minutes)
 // - Dispatch verification for completed jobs (from fase dispatch)
-// loadDotEnv reads .env from cwd and sets environment variables.
+// loadDotEnv reads a .env file and sets environment variables.
 // Existing vars are NOT overwritten. No dependency on external packages.
-func loadDotEnv() {
-	data, err := os.ReadFile(".env")
+// If path is empty, reads ".env" from cwd.
+func loadDotEnv(paths ...string) {
+	path := ".env"
+	if len(paths) > 0 && paths[0] != "" {
+		path = paths[0]
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}

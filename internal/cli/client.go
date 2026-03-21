@@ -3,16 +3,21 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/yusefmosiah/fase/internal/core"
 )
+
+// errServeBusy is returned when the serve responds with HTTP 409 (resource busy).
+var errServeBusy = errors.New("resource busy")
 
 // serveClient is a thin HTTP client that routes CLI commands through the
 // running fase serve process. It reads .fase/serve.json for discovery.
@@ -23,10 +28,20 @@ type serveClient struct {
 
 // serveInfo mirrors the JSON written by runServe in serve.go.
 type serveInfo struct {
-	PID  int    `json:"pid"`
-	Port int    `json:"port"`
-	CWD  string `json:"cwd"`
-	Auto bool   `json:"auto"`
+	PID       int    `json:"pid"`
+	Port      int    `json:"port"`
+	CWD       string `json:"cwd"`
+	Auto      bool   `json:"auto"`
+	EnvPath   string `json:"env_file,omitempty"`
+	StateDir  string `json:"-"` // populated from the directory containing serve.json
+}
+
+// EnvFile returns the configured .env path if set.
+func (s *serveInfo) EnvFile() (string, bool) {
+	if s != nil && s.EnvPath != "" {
+		return s.EnvPath, true
+	}
+	return "", false
 }
 
 // loadServeInfo reads .fase/serve.json, parses it, and verifies the PID is alive.
@@ -35,7 +50,12 @@ func loadServeInfo() (*serveInfo, error) {
 	if stateDir == "" {
 		return nil, fmt.Errorf("fase serve is not running — start it with 'fase serve'")
 	}
-	return loadServeInfoFrom(stateDir)
+	info, err := loadServeInfoFrom(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	info.StateDir = stateDir
+	return info, nil
 }
 
 // loadServeInfoFrom reads serve.json from a specific state directory.
@@ -160,6 +180,10 @@ func (c *serveClient) handleResponse(resp *http.Response) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		var ae apiError
 		if json.Unmarshal(data, &ae) == nil && ae.Error != "" {
+			// HTTP 409 or a "resource busy" message both indicate ErrBusy.
+			if resp.StatusCode == 409 || strings.HasPrefix(ae.Error, "resource busy") {
+				return nil, fmt.Errorf("%w: %s", errServeBusy, ae.Error)
+			}
 			return nil, fmt.Errorf("fase serve: %s", ae.Error)
 		}
 		return nil, fmt.Errorf("fase serve returned %d: %s", resp.StatusCode, string(data))

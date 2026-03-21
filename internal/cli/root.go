@@ -2339,7 +2339,16 @@ func newInternalRunJobCommand(root *rootOptions) *cobra.Command {
 		Short:  "Internal background worker entrypoint",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			loadDotEnv() // native adapter needs API keys from .env
+			// Load .env: check serve.json for explicit path, fall back to cwd/.env
+			if info, err := loadServeInfo(); err == nil {
+				if envPath, ok := info.EnvFile(); ok {
+					loadDotEnv(envPath)
+				} else {
+					loadDotEnv()
+				}
+			} else {
+				loadDotEnv()
+			}
 
 			svc, err := service.Open(context.Background(), root.configPath)
 			if err != nil {
