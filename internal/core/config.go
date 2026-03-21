@@ -31,6 +31,7 @@ type AdaptersConfig struct {
 	Pi       AdapterConfig `toml:"pi"`
 	Gemini   AdapterConfig `toml:"gemini"`
 	OpenCode AdapterConfig `toml:"opencode"`
+	Native   AdapterConfig `toml:"native"`
 }
 
 type AdapterConfig struct {
@@ -87,6 +88,7 @@ func DefaultConfig(paths Paths) Config {
 			Pi:       AdapterConfig{Binary: "pi", Enabled: true},
 			Gemini:   AdapterConfig{Binary: "gemini", Enabled: true},
 			OpenCode: AdapterConfig{Binary: "opencode", Enabled: true},
+			Native:   AdapterConfig{Binary: "codex", Enabled: true},
 		},
 	}
 }
@@ -105,6 +107,8 @@ func (c AdaptersConfig) ByName(name string) (AdapterConfig, bool) {
 		return c.OpenCode, true
 	case "pi":
 		return c.Pi, true
+	case "native":
+		return c.Native, true
 	default:
 		return AdapterConfig{}, false
 	}

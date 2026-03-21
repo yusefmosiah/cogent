@@ -297,6 +297,7 @@ func NewRootCommand() *cobra.Command {
 		newDispatchCommand(opts),
 		newProjectCommand(opts),
 		newMCPCommand(opts),
+		newLoginCommand(opts),
 		newVersionCommand(),
 	)
 
@@ -1460,8 +1461,10 @@ This guarantees every doc has a corresponding work item.`,
 				return err
 			}
 			var resp struct {
-				Doc    struct{ DocID string `json:"doc_id"` } `json:"doc"`
-				WorkID string                                 `json:"work_id"`
+				Doc struct {
+					DocID string `json:"doc_id"`
+				} `json:"doc"`
+				WorkID string `json:"work_id"`
 			}
 			if err := json.Unmarshal(data, &resp); err != nil {
 				return fmt.Errorf("decoding response: %w", err)

@@ -241,25 +241,25 @@ type HistorySearchResult struct {
 }
 
 type WorkCreateRequest struct {
-	Title                string                    `json:"title"`
-	Objective            string                    `json:"objective"`
-	Kind                 string                    `json:"kind"`
-	ParentWorkID         string                    `json:"parent_work_id,omitempty"`
-	LockState            core.WorkLockState        `json:"lock_state,omitempty"`
-	Priority             int                       `json:"priority,omitempty"`
-	Position             int                       `json:"position,omitempty"`
-	ConfigurationClass   string                    `json:"configuration_class,omitempty"`
-	BudgetClass          string                    `json:"budget_class,omitempty"`
-	RequiredCapabilities []string                  `json:"required_capabilities,omitempty"`
-	RequiredModelTraits  []string                  `json:"required_model_traits,omitempty"`
-	PreferredAdapters    []string                  `json:"preferred_adapters,omitempty"`
-	ForbiddenAdapters    []string                  `json:"forbidden_adapters,omitempty"`
-	PreferredModels      []string                  `json:"preferred_models,omitempty"`
-	AvoidModels          []string                  `json:"avoid_models,omitempty"`
+	Title                string                     `json:"title"`
+	Objective            string                     `json:"objective"`
+	Kind                 string                     `json:"kind"`
+	ParentWorkID         string                     `json:"parent_work_id,omitempty"`
+	LockState            core.WorkLockState         `json:"lock_state,omitempty"`
+	Priority             int                        `json:"priority,omitempty"`
+	Position             int                        `json:"position,omitempty"`
+	ConfigurationClass   string                     `json:"configuration_class,omitempty"`
+	BudgetClass          string                     `json:"budget_class,omitempty"`
+	RequiredCapabilities []string                   `json:"required_capabilities,omitempty"`
+	RequiredModelTraits  []string                   `json:"required_model_traits,omitempty"`
+	PreferredAdapters    []string                   `json:"preferred_adapters,omitempty"`
+	ForbiddenAdapters    []string                   `json:"forbidden_adapters,omitempty"`
+	PreferredModels      []string                   `json:"preferred_models,omitempty"`
+	AvoidModels          []string                   `json:"avoid_models,omitempty"`
 	RequiredAttestations []core.RequiredAttestation `json:"required_attestations,omitempty"`
-	Acceptance           map[string]any            `json:"acceptance,omitempty"`
-	Metadata             map[string]any            `json:"metadata,omitempty"`
-	HeadCommitOID        string                    `json:"head_commit_oid,omitempty"`
+	Acceptance           map[string]any             `json:"acceptance,omitempty"`
+	Metadata             map[string]any             `json:"metadata,omitempty"`
+	HeadCommitOID        string                     `json:"head_commit_oid,omitempty"`
 }
 
 type WorkListRequest struct {
@@ -271,18 +271,18 @@ type WorkListRequest struct {
 }
 
 type WorkUpdateRequest struct {
-	WorkID         string                 `json:"work_id,omitempty"`
+	WorkID         string                  `json:"work_id,omitempty"`
 	ExecutionState core.WorkExecutionState `json:"execution_state,omitempty"`
 	ApprovalState  core.WorkApprovalState  `json:"approval_state,omitempty"`
 	LockState      core.WorkLockState      `json:"lock_state,omitempty"`
-	Phase          string                 `json:"phase,omitempty"`
-	Message        string                 `json:"message,omitempty"`
-	JobID          string                 `json:"job_id,omitempty"`
-	SessionID      string                 `json:"session_id,omitempty"`
-	ArtifactID     string                 `json:"artifact_id,omitempty"`
-	Metadata       map[string]any         `json:"metadata,omitempty"`
-	CreatedBy      string                 `json:"created_by,omitempty"`
-	ForceDone      bool                   `json:"force_done,omitempty"`
+	Phase          string                  `json:"phase,omitempty"`
+	Message        string                  `json:"message,omitempty"`
+	JobID          string                  `json:"job_id,omitempty"`
+	SessionID      string                  `json:"session_id,omitempty"`
+	ArtifactID     string                  `json:"artifact_id,omitempty"`
+	Metadata       map[string]any          `json:"metadata,omitempty"`
+	CreatedBy      string                  `json:"created_by,omitempty"`
+	ForceDone      bool                    `json:"force_done,omitempty"`
 }
 
 type WorkNoteRequest struct {
@@ -4734,7 +4734,7 @@ func (s *Service) attestationChildRuntime(parent core.WorkItemRecord, workerAdap
 
 func alternateAdapter(workerAdapter string, cfg core.Config) string {
 	workerAdapter = strings.TrimSpace(workerAdapter)
-	for _, candidate := range []string{"claude", "codex", "factory", "gemini", "opencode", "pi"} {
+	for _, candidate := range []string{"claude", "codex", "factory", "gemini", "native", "opencode", "pi"} {
 		if candidate == workerAdapter {
 			continue
 		}

@@ -88,6 +88,8 @@ func discoverAdapter(ctx context.Context, runner Runner, adapter, binary string,
 		return discoverOpenCode(ctx, runner, binary, observedAt)
 	case "pi":
 		return discoverPi(ctx, runner, binary, observedAt)
+	case "native":
+		return discoverNative(ctx, runner, binary, observedAt)
 	case "factory":
 		return discoverFactory(ctx, runner, binary, observedAt)
 	default:
@@ -97,6 +99,64 @@ func discoverAdapter(ctx context.Context, runner Runner, adapter, binary string,
 			Message:  "no catalog discoverer implemented",
 		}}
 	}
+}
+
+func discoverNative(ctx context.Context, runner Runner, binary string, observedAt time.Time) ([]core.CatalogEntry, []core.CatalogIssue) {
+	entries := []core.CatalogEntry{
+		{
+			Adapter:      "native",
+			Provider:     "zai",
+			Model:        "glm-5-turbo",
+			Available:    os.Getenv("ZAI_API_KEY") != "",
+			AuthMethod:   "api_key",
+			BillingClass: "metered_api",
+			Source:       "env",
+			Provenance: core.CatalogProvenance{
+				Source:     "env",
+				ObservedAt: observedAt,
+			},
+		},
+		{
+			Adapter:      "native",
+			Provider:     "bedrock",
+			Model:        "claude-haiku-4-5",
+			Available:    os.Getenv("AWS_REGION") != "" && os.Getenv("AWS_BEARER_TOKEN_BEDROCK") != "",
+			AuthMethod:   "api_key",
+			BillingClass: "cloud_project",
+			Source:       "env",
+			Provenance: core.CatalogProvenance{
+				Source:     "env",
+				ObservedAt: observedAt,
+			},
+		},
+	}
+
+	output, err := runner.CombinedOutput(ctx, binary, "login", "status")
+	authMethod := "unknown"
+	available := false
+	if err == nil {
+		available = true
+		authMethod = "chatgpt"
+	}
+	entries = append(entries, core.CatalogEntry{
+		Adapter:      "native",
+		Provider:     "chatgpt",
+		Model:        "gpt-5.4-mini",
+		Available:    available,
+		AuthMethod:   authMethod,
+		BillingClass: "subscription",
+		Source:       "cli",
+		Provenance: core.CatalogProvenance{
+			Source:     "cli",
+			Command:    binary + " login status",
+			ObservedAt: observedAt,
+		},
+		Metadata: map[string]any{
+			"status_text": strings.TrimSpace(stripANSI(string(output))),
+		},
+	})
+
+	return entries, nil
 }
 
 func discoverCodex(ctx context.Context, runner Runner, binary string, observedAt time.Time) ([]core.CatalogEntry, []core.CatalogIssue) {

@@ -1,26 +1,33 @@
-package native_test
+package native
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yusefmosiah/fase/internal/adapterapi"
-	"github.com/yusefmosiah/fase/internal/adapters/native"
 )
 
-// TestLiveAdapter_StartSession verifies that the native adapter creates a
-// session emitting session.started and that the session ID is non-empty.
-func TestLiveAdapter_StartSession(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
+func TestLiveAdapterStartSession(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewLiveAdapter(nil, nil)
+	adapter.newClientFn = func(provider Provider, httpClient HTTPDoer) (LLMClient, error) {
+		return &scriptedClient{}, nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{})
+	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+		CWD:   t.TempDir(),
+		Model: "zai/glm-4.7",
+	})
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
@@ -32,407 +39,566 @@ func TestLiveAdapter_StartSession(t *testing.T) {
 
 	ev := drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
 	if ev.SessionID != session.SessionID() {
-		t.Fatalf("session ID mismatch: %s != %s", ev.SessionID, session.SessionID())
+		t.Fatalf("session ID mismatch: got %q want %q", ev.SessionID, session.SessionID())
 	}
-	t.Logf("session started: %s", session.SessionID())
 }
 
-// TestLiveAdapter_ResumeSession verifies that ResumeSession emits session.resumed
-// and preserves the provided session ID.
-func TestLiveAdapter_ResumeSession(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
+func TestLiveAdapterResumeSession(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewLiveAdapter(nil, nil)
+	adapter.newClientFn = func(provider Provider, httpClient HTTPDoer) (LLMClient, error) {
+		return &scriptedClient{}, nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	const nativeID = "nsess_RESUMETEST"
-	session, err := adapter.ResumeSession(ctx, nativeID, adapterapi.StartSessionRequest{})
+	session, err := adapter.ResumeSession(ctx, "nsess_resume", adapterapi.StartSessionRequest{
+		CWD:   t.TempDir(),
+		Model: "chatgpt/gpt-5.4-mini",
+	})
 	if err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
 	defer func() { _ = session.Close() }()
 
-	if session.SessionID() != nativeID {
-		t.Fatalf("session ID mismatch: got %s want %s", session.SessionID(), nativeID)
-	}
-
 	ev := drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionResumed)
-	if ev.SessionID != nativeID {
-		t.Fatalf("event session ID mismatch: %s != %s", ev.SessionID, nativeID)
+	if ev.SessionID != "nsess_resume" {
+		t.Fatalf("unexpected session ID: %q", ev.SessionID)
 	}
 }
 
-// TestLiveAdapter_StartTurn_Echo verifies that StartTurn with no model
-// routes to the echo worker and produces the correct event sequence:
-// turn.started → output.delta → turn.completed.
-func TestLiveAdapter_StartTurn_Echo(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
+func TestLiveSessionToolLoopCompletesTurn(t *testing.T) {
+	t.Parallel()
+
+	registry := MustNewToolRegistry(toolFromFunc(
+		"lookup",
+		"lookup a value",
+		jsonSchemaObject(map[string]any{
+			"query": map[string]any{"type": "string"},
+		}, []string{"query"}, false),
+		func(ctx context.Context, args json.RawMessage) (string, error) {
+			var input struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(args, &input); err != nil {
+				return "", err
+			}
+			return "lookup-result:" + input.Query, nil
+		},
+	))
+
+	client := &scriptedClient{
+		steps: []scriptStep{
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				if got := lastText(req.Messages); got != "find phase3" {
+					t.Fatalf("first request text = %q", got)
+				}
+				req.OnDelta("thinking ")
+				return &LLMResponse{
+					ID:         "resp-1",
+					TextBlocks: []string{"thinking "},
+					ToolCalls: []ToolCall{{
+						ID:        "call-1",
+						Name:      "lookup",
+						Arguments: mustJSONRaw(t, map[string]any{"query": "phase3"}),
+					}},
+					StopReason: "tool_use",
+				}, nil
+			},
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				if req.PreviousResponseID != "resp-1" {
+					t.Fatalf("expected previous response id resp-1, got %q", req.PreviousResponseID)
+				}
+				if len(req.Messages) != 3 {
+					t.Fatalf("expected 3 messages after tool result, got %d", len(req.Messages))
+				}
+				last := req.Messages[len(req.Messages)-1]
+				if last.Role != "user" || len(last.Content) != 1 || last.Content[0].Type != "tool_result" {
+					t.Fatalf("unexpected tool result message: %+v", last)
+				}
+				if last.Content[0].Text != "lookup-result:phase3" {
+					t.Fatalf("unexpected tool output: %q", last.Content[0].Text)
+				}
+				req.OnDelta("done")
+				return &LLMResponse{
+					ID:         "resp-2",
+					TextBlocks: []string{"done"},
+					StopReason: "end_turn",
+				}, nil
+			},
+		},
+	}
+
+	session := newNativeSession(context.Background(), nativeSessionConfig{
+		id:       "nsess_tool_loop",
+		provider: Provider{Name: providerChatGPT, APIFormat: apiFormatOpenAI},
+		client:   client,
+		registry: registry,
+	})
+	defer func() { _ = session.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
 
-	const prompt = "hello from conductor"
-	turnID, err := session.StartTurn(ctx, []adapterapi.Input{
-		adapterapi.TextInput(prompt),
-	})
+	turnID, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("find phase3")})
 	if err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	if turnID == "" {
-		t.Fatal("expected non-empty turn ID")
-	}
 
-	var gotDelta, gotCompleted bool
-	deadline := time.After(4 * time.Second)
-	for !gotDelta || !gotCompleted {
-		select {
-		case ev, ok := <-session.Events():
-			if !ok {
-				t.Fatal("event channel closed prematurely")
+	var deltas []string
+	for {
+		ev := nextEvent(t, ctx, session.Events())
+		switch ev.Kind {
+		case adapterapi.EventKindOutputDelta:
+			deltas = append(deltas, ev.Text)
+		case adapterapi.EventKindTurnCompleted:
+			if ev.TurnID != turnID {
+				t.Fatalf("turn ID mismatch: got %q want %q", ev.TurnID, turnID)
 			}
-			t.Logf("event: kind=%s turn=%s text=%q", ev.Kind, ev.TurnID, ev.Text)
-			switch ev.Kind {
-			case adapterapi.EventKindTurnStarted:
-				// StartTurn emits this before the goroutine; may see again from echo.
-			case adapterapi.EventKindOutputDelta:
-				if ev.TurnID != turnID {
-					t.Errorf("delta turn ID mismatch: %s != %s", ev.TurnID, turnID)
-				}
-				if ev.Text != prompt {
-					t.Errorf("unexpected delta text: %q", ev.Text)
-				}
-				gotDelta = true
-			case adapterapi.EventKindTurnCompleted:
-				if ev.TurnID != turnID {
-					t.Errorf("completed turn ID mismatch: %s != %s", ev.TurnID, turnID)
-				}
-				gotCompleted = true
-			case adapterapi.EventKindTurnFailed:
-				t.Fatalf("unexpected turn.failed: %s", ev.Text)
+			if got := fmt.Sprint(deltas); got != "[thinking  done]" {
+				t.Fatalf("unexpected deltas: %v", deltas)
 			}
-		case <-deadline:
-			t.Fatalf("timeout: gotDelta=%v gotCompleted=%v", gotDelta, gotCompleted)
+			if session.ActiveTurnID() != "" {
+				t.Fatalf("expected no active turn after completion, got %q", session.ActiveTurnID())
+			}
+			return
+		case adapterapi.EventKindTurnFailed:
+			t.Fatalf("unexpected failure: %s", ev.Text)
 		}
 	}
 }
 
-// TestLiveAdapter_MultipleTurns verifies that a session can handle sequential
-// turns correctly, each producing complete event sequences.
-func TestLiveAdapter_MultipleTurns(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
+func TestLiveSessionSteeringPrependsNextRequest(t *testing.T) {
+	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	toolStarted := make(chan struct{})
+	releaseTool := make(chan struct{})
 
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
+	registry := MustNewToolRegistry(toolFromFunc(
+		"wait_tool",
+		"wait for a signal",
+		nil,
+		func(ctx context.Context, args json.RawMessage) (string, error) {
+			close(toolStarted)
+			select {
+			case <-releaseTool:
+				return "tool-finished", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
+	))
+
+	client := &scriptedClient{
+		steps: []scriptStep{
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				return &LLMResponse{
+					ID: "resp-1",
+					ToolCalls: []ToolCall{{
+						ID:   "call-1",
+						Name: "wait_tool",
+					}},
+					StopReason: "tool_use",
+				}, nil
+			},
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				last := req.Messages[len(req.Messages)-1]
+				if len(last.Content) != 2 {
+					t.Fatalf("expected steer text + tool_result, got %+v", last.Content)
+				}
+				if last.Content[0].Type != "text" {
+					t.Fatalf("expected steer text block, got %+v", last.Content[0])
+				}
+				if want := "[fase:steer]\nSay exactly: STEERED\n[/fase:steer]"; last.Content[0].Text != want {
+					t.Fatalf("unexpected steer block: %q", last.Content[0].Text)
+				}
+				if last.Content[1].Type != "tool_result" || last.Content[1].Text != "tool-finished" {
+					t.Fatalf("unexpected tool result block: %+v", last.Content[1])
+				}
+				return &LLMResponse{ID: "resp-2", StopReason: "end_turn"}, nil
+			},
+		},
 	}
+
+	session := newNativeSession(context.Background(), nativeSessionConfig{
+		id:       "nsess_steer",
+		provider: Provider{Name: providerZAI, APIFormat: apiFormatAnthropic},
+		client:   client,
+		registry: registry,
+	})
 	defer func() { _ = session.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
 
-	for i := 0; i < 3; i++ {
-		turnID, err := session.StartTurn(ctx, []adapterapi.Input{
-			adapterapi.TextInput("ping"),
-		})
-		if err != nil {
-			t.Fatalf("StartTurn %d: %v", i, err)
+	turnID, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("wait")})
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+
+	select {
+	case <-toolStarted:
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for tool execution")
+	}
+
+	if err := session.Steer(ctx, turnID, []adapterapi.Input{adapterapi.TextInput("Say exactly: STEERED")}); err != nil {
+		t.Fatalf("Steer: %v", err)
+	}
+	close(releaseTool)
+
+	for {
+		ev := nextEvent(t, ctx, session.Events())
+		switch ev.Kind {
+		case adapterapi.EventKindTurnCompleted:
+			if ev.TurnID != turnID {
+				t.Fatalf("turn ID mismatch: got %q want %q", ev.TurnID, turnID)
+			}
+			return
+		case adapterapi.EventKindTurnFailed:
+			t.Fatalf("unexpected failure: %s", ev.Text)
 		}
-		t.Logf("turn %d started: %s", i, turnID)
-
-		drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnCompleted)
-		t.Logf("turn %d completed", i)
 	}
 }
 
-// TestLiveAdapter_CoAgent verifies that the conductor routes turns to an
-// external co-agent adapter when a model is specified.
-func TestLiveAdapter_CoAgent(t *testing.T) {
-	mock := &mockLiveAdapter{name: "mock"}
-	coAgents := map[string]adapterapi.LiveAgentAdapter{"mock": mock}
+func TestLiveSessionInterrupt(t *testing.T) {
+	t.Parallel()
 
-	adapter := native.NewLiveAdapter(nil, coAgents)
+	client := &scriptedClient{
+		steps: []scriptStep{
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		},
+	}
+
+	session := newNativeSession(context.Background(), nativeSessionConfig{
+		id:       "nsess_interrupt",
+		provider: Provider{Name: providerZAI, APIFormat: apiFormatAnthropic},
+		client:   client,
+		registry: MustNewToolRegistry(),
+	})
+	defer func() { _ = session.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
-		Model: "mock/test-model",
-	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
 
-	turnID, err := session.StartTurn(ctx, []adapterapi.Input{
-		adapterapi.TextInput("via co-agent"),
-	})
+	turnID, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("interrupt me")})
 	if err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	if turnID == "" {
-		t.Fatal("expected non-empty turn ID")
-	}
-
-	drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnCompleted)
-	t.Logf("co-agent turn completed: %s", turnID)
-
-	if mock.lastModel != "test-model" {
-		t.Errorf("co-agent got model %q, want %q", mock.lastModel, "test-model")
-	}
-}
-
-// TestLiveAdapter_UnknownCoAgent verifies that an unknown adapter name causes
-// StartTurn to fail cleanly with a turn.failed event.
-func TestLiveAdapter_UnknownCoAgent(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
-		Model: "nonexistent/some-model",
-	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
-
-	_, err = session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("hello")})
-	if err == nil {
-		t.Fatal("expected error for unknown co-agent, got nil")
-	}
-	t.Logf("got expected error: %v", err)
-}
-
-// TestLiveAdapter_Interrupt verifies that an active turn can be interrupted.
-func TestLiveAdapter_Interrupt(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
-
-	_, err = session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("interrupt me")})
-	if err != nil {
-		t.Fatalf("StartTurn: %v", err)
-	}
-
-	// Wait for turn.started before interrupting.
-	drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnStarted)
-
 	if err := session.Interrupt(ctx); err != nil {
-		// The echo worker may complete before the interrupt arrives — not fatal.
-		t.Logf("Interrupt: %v (may be ok if turn already completed)", err)
+		t.Fatalf("Interrupt: %v", err)
 	}
 
 	for {
-		select {
-		case ev, ok := <-session.Events():
-			if !ok {
-				t.Fatal("event channel closed unexpectedly")
+		ev := nextEvent(t, ctx, session.Events())
+		if ev.Kind == adapterapi.EventKindTurnInterrupted {
+			if ev.TurnID != turnID {
+				t.Fatalf("turn ID mismatch: got %q want %q", ev.TurnID, turnID)
 			}
-			t.Logf("event: kind=%s", ev.Kind)
-			switch ev.Kind {
-			case adapterapi.EventKindTurnCompleted,
-				adapterapi.EventKindTurnInterrupted,
-				adapterapi.EventKindTurnFailed:
-				t.Logf("turn ended: %s", ev.Kind)
-				return
-			}
-		case <-ctx.Done():
-			t.Fatal("timeout waiting for turn to end")
+			return
+		}
+		if ev.Kind == adapterapi.EventKindTurnFailed {
+			t.Fatalf("unexpected turn failure: %s", ev.Text)
 		}
 	}
 }
 
-// TestLiveAdapter_Close verifies that Close shuts down the session and causes
-// the event channel to be closed.
-func TestLiveAdapter_Close(t *testing.T) {
-	adapter := native.NewLiveAdapter(nil, nil)
+func TestLiveSessionOnlyOneActiveTurn(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	client := &scriptedClient{
+		steps: []scriptStep{
+			func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+				<-block
+				return &LLMResponse{StopReason: "end_turn"}, nil
+			},
+		},
+	}
+
+	session := newNativeSession(context.Background(), nativeSessionConfig{
+		id:       "nsess_single_turn",
+		provider: Provider{Name: providerZAI, APIFormat: apiFormatAnthropic},
+		client:   client,
+		registry: MustNewToolRegistry(),
+	})
+	defer func() { _ = session.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
+	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
+
+	if _, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("first")}); err != nil {
+		t.Fatalf("StartTurn first: %v", err)
 	}
+	if _, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("second")}); err == nil {
+		t.Fatal("expected second StartTurn to fail while first turn is active")
+	}
+
+	close(block)
+	drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnCompleted)
+}
+
+func TestLiveSessionMaxTokensFailsTurn(t *testing.T) {
+	t.Parallel()
+
+	session := newNativeSession(context.Background(), nativeSessionConfig{
+		id:       "nsess_max_tokens",
+		provider: Provider{Name: providerZAI, APIFormat: apiFormatAnthropic},
+		client: &scriptedClient{
+			steps: []scriptStep{
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					return &LLMResponse{StopReason: "max_tokens"}, nil
+				},
+			},
+		},
+		registry: MustNewToolRegistry(),
+	})
+	defer func() { _ = session.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
 
-	if err := session.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if _, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("overflow")}); err != nil {
+		t.Fatalf("StartTurn: %v", err)
 	}
 
-	deadline := time.After(2 * time.Second)
+	ev := drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnFailed)
+	if ev.Text == "" {
+		t.Fatal("expected max_tokens failure message")
+	}
+}
+
+func TestLiveAdapterNativeCoAgentSession(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewLiveAdapter(nil, nil)
+
+	var mu sync.Mutex
+	clients := []LLMClient{
+		&scriptedClient{
+			steps: []scriptStep{
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					if got := lastText(req.Messages); got != "delegate work" {
+						t.Fatalf("unexpected parent prompt: %q", got)
+					}
+					return &LLMResponse{
+						ID: "parent-1",
+						ToolCalls: []ToolCall{{
+							ID:   "call-spawn",
+							Name: "spawn_session",
+							Arguments: mustJSONRaw(t, map[string]any{
+								"adapter": "native",
+								"model":   "zai/glm-4.7",
+							}),
+						}},
+						StopReason: "tool_use",
+					}, nil
+				},
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					sessionID := toolResultJSONField(t, req.Messages[len(req.Messages)-1], "session_id")
+					if sessionID == "" {
+						t.Fatalf("expected spawned session_id in tool result: %+v", req.Messages[len(req.Messages)-1])
+					}
+					return &LLMResponse{
+						ID: "parent-2",
+						ToolCalls: []ToolCall{{
+							ID:   "call-send",
+							Name: "send_turn",
+							Arguments: mustJSONRaw(t, map[string]any{
+								"session_id": sessionID,
+								"input":      "child, say delegated result",
+							}),
+						}},
+						StopReason: "tool_use",
+					}, nil
+				},
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					last := req.Messages[len(req.Messages)-1]
+					if len(last.Content) != 1 || last.Content[0].Type != "tool_result" {
+						t.Fatalf("unexpected send_turn result message: %+v", last)
+					}
+					if !strings.Contains(last.Content[0].Text, "delegated result") {
+						t.Fatalf("expected delegated result in tool output: %s", last.Content[0].Text)
+					}
+					req.OnDelta("parent received delegated result")
+					return &LLMResponse{
+						ID:         "parent-3",
+						TextBlocks: []string{"parent received delegated result"},
+						StopReason: "end_turn",
+					}, nil
+				},
+			},
+		},
+		&scriptedClient{
+			steps: []scriptStep{
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					if got := lastText(req.Messages); got != "child, say delegated result" {
+						t.Fatalf("unexpected child prompt: %q", got)
+					}
+					req.OnDelta("delegated result")
+					return &LLMResponse{
+						ID:         "child-1",
+						TextBlocks: []string{"delegated result"},
+						StopReason: "end_turn",
+					}, nil
+				},
+			},
+		},
+	}
+	adapter.newClientFn = func(provider Provider, httpClient HTTPDoer) (LLMClient, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(clients) == 0 {
+			return nil, errors.New("unexpected client creation")
+		}
+		client := clients[0]
+		clients = clients[1:]
+		return client, nil
+	}
+	adapter.SetCoAgents(map[string]adapterapi.LiveAgentAdapter{"native": adapter})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+		CWD:   t.TempDir(),
+		Model: "zai/glm-4.7",
+	})
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
+
+	turnID, err := session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput("delegate work")})
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+
+	var deltas []string
 	for {
-		select {
-		case _, ok := <-session.Events():
-			if !ok {
-				t.Log("event channel closed after session.Close()")
-				return
+		ev := nextEvent(t, ctx, session.Events())
+		switch ev.Kind {
+		case adapterapi.EventKindOutputDelta:
+			deltas = append(deltas, ev.Text)
+		case adapterapi.EventKindTurnCompleted:
+			if ev.TurnID != turnID {
+				t.Fatalf("unexpected turn ID: got %q want %q", ev.TurnID, turnID)
 			}
-			// Drain session.closed or other tail events.
-		case <-deadline:
-			t.Fatal("timeout waiting for event channel to close after Close()")
+			if strings.Join(deltas, "") != "parent received delegated result" {
+				t.Fatalf("unexpected parent deltas: %v", deltas)
+			}
+			return
+		case adapterapi.EventKindTurnFailed:
+			t.Fatalf("unexpected failure: %s", ev.Text)
 		}
 	}
 }
 
-// TestParseModel verifies the adapter/model string parsing.
-func TestParseModel(t *testing.T) {
-	tests := []struct {
-		input       string
-		wantAdapter string
-		wantModel   string
-	}{
-		{"", "", ""},
-		{"claude/claude-opus-4-6", "claude", "claude-opus-4-6"},
-		{"opencode/anthropic/claude-opus-4-6", "opencode", "anthropic/claude-opus-4-6"},
-		{"codex", "codex", ""},
-		{"codex/gpt-5.4-mini", "codex", "gpt-5.4-mini"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			gotAdapter, gotModel := native.ParseModelForTest(tt.input)
-			if gotAdapter != tt.wantAdapter || gotModel != tt.wantModel {
-				t.Errorf("ParseModel(%q) = (%q, %q), want (%q, %q)",
-					tt.input, gotAdapter, gotModel, tt.wantAdapter, tt.wantModel)
-			}
-		})
-	}
+type scriptStep func(ctx context.Context, req LLMRequest) (*LLMResponse, error)
+
+type scriptedClient struct {
+	mu    sync.Mutex
+	steps []scriptStep
+	calls int
 }
 
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
+func (c *scriptedClient) Call(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+	c.mu.Lock()
+	callIndex := c.calls
+	c.calls++
+	var step scriptStep
+	if callIndex < len(c.steps) {
+		step = c.steps[callIndex]
+	}
+	c.mu.Unlock()
 
-// drainUntil reads events until the target kind is found.
+	if step == nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, errors.New("unexpected client call")
+		}
+	}
+	return step(ctx, req)
+}
+
 func drainUntil(t *testing.T, ctx context.Context, ch <-chan adapterapi.Event, kind adapterapi.EventKind) adapterapi.Event {
 	t.Helper()
 	for {
-		select {
-		case ev, ok := <-ch:
-			if !ok {
-				t.Fatalf("event channel closed before receiving %s", kind)
-			}
-			t.Logf("event: kind=%s session=%s turn=%s text=%q", ev.Kind, ev.SessionID, ev.TurnID, ev.Text)
-			if ev.Kind == kind {
-				return ev
-			}
-		case <-ctx.Done():
-			t.Fatalf("timeout waiting for %s event", kind)
+		ev := nextEvent(t, ctx, ch)
+		if ev.Kind == kind {
+			return ev
 		}
 	}
 }
 
-// -----------------------------------------------------------------------
-// Mock co-agent adapter
-// -----------------------------------------------------------------------
-
-// mockLiveAdapter is a test double backed by mock sessions (echo with prefix).
-type mockLiveAdapter struct {
-	name      string
-	lastModel string
-}
-
-func (m *mockLiveAdapter) Name() string { return m.name }
-
-func (m *mockLiveAdapter) StartSession(_ context.Context, req adapterapi.StartSessionRequest) (adapterapi.LiveSession, error) {
-	m.lastModel = req.Model
-	return newMockSession(), nil
-}
-
-func (m *mockLiveAdapter) ResumeSession(_ context.Context, _ string, req adapterapi.StartSessionRequest) (adapterapi.LiveSession, error) {
-	m.lastModel = req.Model
-	return newMockSession(), nil
-}
-
-// mockSession mimics an external adapter session:
-// emits session.started immediately, then echoes turns with a "[mock:]" prefix.
-type mockSession struct {
-	sessionID string
-	eventCh   chan adapterapi.Event
-	turnSeq   atomic.Int64
-
-	activeMu   sync.Mutex
-	activeTurn string
-
-	closeOnce sync.Once
-}
-
-func newMockSession() *mockSession {
-	id := fmt.Sprintf("mock-%d", time.Now().UnixNano())
-	s := &mockSession{
-		sessionID: id,
-		eventCh:   make(chan adapterapi.Event, 64),
+func nextEvent(t *testing.T, ctx context.Context, ch <-chan adapterapi.Event) adapterapi.Event {
+	t.Helper()
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("event channel closed unexpectedly")
+		}
+		return ev
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for event")
+		return adapterapi.Event{}
 	}
-	s.eventCh <- adapterapi.Event{Kind: adapterapi.EventKindSessionStarted, SessionID: id}
-	return s
 }
 
-func (s *mockSession) SessionID() string { return s.sessionID }
-
-func (s *mockSession) ActiveTurnID() string {
-	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
-	return s.activeTurn
+func mustJSONRaw(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return data
 }
 
-func (s *mockSession) StartTurn(_ context.Context, input []adapterapi.Input) (string, error) {
-	turnID := fmt.Sprintf("mturn-%d", s.turnSeq.Add(1))
-	s.activeMu.Lock()
-	s.activeTurn = turnID
-	s.activeMu.Unlock()
-
-	go func() {
-		s.eventCh <- adapterapi.Event{Kind: adapterapi.EventKindTurnStarted, SessionID: s.sessionID, TurnID: turnID}
-		for _, inp := range input {
-			if inp.Text != "" {
-				s.eventCh <- adapterapi.Event{
-					Kind:      adapterapi.EventKindOutputDelta,
-					SessionID: s.sessionID,
-					TurnID:    turnID,
-					Text:      "[mock:" + inp.Text + "]",
-				}
-			}
+func toolResultJSONField(t *testing.T, msg Message, key string) string {
+	t.Helper()
+	for _, block := range msg.Content {
+		if block.Type != "tool_result" || strings.TrimSpace(block.Text) == "" {
+			continue
 		}
-		s.activeMu.Lock()
-		if s.activeTurn == turnID {
-			s.activeTurn = ""
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(block.Text), &payload); err != nil {
+			t.Fatalf("decode tool result JSON: %v", err)
 		}
-		s.activeMu.Unlock()
-		s.eventCh <- adapterapi.Event{Kind: adapterapi.EventKindTurnCompleted, SessionID: s.sessionID, TurnID: turnID}
-	}()
-
-	return turnID, nil
+		if value, _ := payload[key].(string); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
-func (s *mockSession) Steer(_ context.Context, _ string, _ []adapterapi.Input) error { return nil }
-func (s *mockSession) Interrupt(_ context.Context) error                             { return nil }
-func (s *mockSession) Events() <-chan adapterapi.Event                               { return s.eventCh }
-func (s *mockSession) Close() error {
-	s.closeOnce.Do(func() { close(s.eventCh) })
-	return nil
+func lastText(messages []Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	last := messages[len(messages)-1]
+	for _, block := range last.Content {
+		if block.Type == "text" {
+			return block.Text
+		}
+	}
+	return ""
 }

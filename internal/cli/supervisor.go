@@ -21,6 +21,9 @@ type rotationEntry struct {
 
 // workRotation is the round-robin pool for dispatch.
 var workRotation = []rotationEntry{
+	{adapter: "native", model: "chatgpt/gpt-5.4-mini"},
+	{adapter: "native", model: "zai/glm-5-turbo"},
+	{adapter: "native", model: "bedrock/claude-haiku-4-5"},
 	{adapter: "codex", model: "gpt-5.4"},
 	{adapter: "codex", model: "gpt-5.4-mini"},
 	{adapter: "claude", model: "claude-sonnet-4-6"},
