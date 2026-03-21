@@ -1,9 +1,1 @@
-{
-  "mcpServers": {
-    "fase": {
-      "command": "fase",
-      "args": ["mcp", "proxy"],
-      "description": "FASE work queue: project hydration, work items, attestations, notes"
-    }
-  }
-}
+{"mcpServers":{"fase":{"command":"fase","args":["mcp","proxy"]}}}

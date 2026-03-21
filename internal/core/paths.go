@@ -35,8 +35,13 @@ func ResolvePaths() (Paths, error) {
 }
 
 // ResolveRepoStateDir finds the git repo root from cwd and returns the
-// repository-local .fase state directory.
+// repository-local .fase state directory. If FASE_STATE_DIR is set, it
+// is returned directly so that isolated environments (e.g. tests) always
+// resolve to the configured state directory.
 func ResolveRepoStateDir() string {
+	if envDir := os.Getenv("FASE_STATE_DIR"); envDir != "" {
+		return envDir
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		return ""
