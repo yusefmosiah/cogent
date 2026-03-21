@@ -31,6 +31,7 @@ type Provider struct {
 	ModelID          string
 	AnthropicVersion string
 	ModelInPath      bool
+	ForceNoStream    bool // Bedrock: streaming uses binary EventStream, not SSE
 }
 
 // ParseProviderModel resolves provider configuration from a "provider/model" ref.
@@ -59,9 +60,10 @@ func ParseProviderModel(model string) (Provider, error) {
 			APIFormat:        apiFormatAnthropic,
 			BaseURL:          fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region),
 			AuthFunc:         BearerAuthFromEnv("AWS_BEARER_TOKEN_BEDROCK"),
-			ModelID:          modelID,
+			ModelID:          bedrockModelID(modelID),
 			AnthropicVersion: bedrockAnthropicVersion,
 			ModelInPath:      true,
+			ForceNoStream:    true,
 		}, nil
 	case providerChatGPT:
 		return Provider{
@@ -99,6 +101,19 @@ func (p Provider) authHeader(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("provider %q has no auth function", p.Name)
 	}
 	return p.AuthFunc(ctx)
+}
+
+// bedrockModelID maps user-friendly model names to Bedrock model identifiers.
+func bedrockModelID(name string) string {
+	mapping := map[string]string{
+		"claude-haiku-4-5":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		"claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+		"claude-opus-4-6":   "us.anthropic.claude-opus-4-6-v1",
+	}
+	if mapped, ok := mapping[name]; ok {
+		return mapped
+	}
+	return name // pass through if already a full Bedrock ID
 }
 
 func (p Provider) anthropicEndpoint(stream bool) (string, error) {

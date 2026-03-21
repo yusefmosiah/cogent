@@ -62,18 +62,25 @@ type anthropicUsage struct {
 }
 
 func (c *anthropicClient) Call(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
-	endpoint, err := c.provider.anthropicEndpoint(req.Stream)
+	// Bedrock uses binary EventStream for streaming, not SSE.
+	// Force non-streaming and use the /invoke endpoint instead.
+	useStream := req.Stream && !c.provider.ForceNoStream
+
+	endpoint, err := c.provider.anthropicEndpoint(useStream)
 	if err != nil {
 		return nil, err
 	}
 	payload := anthropicRequest{
-		Model:            c.provider.ModelID,
 		System:           req.System,
 		Messages:         anthropicMessages(req.Messages),
 		Tools:            anthropicTools(req.Tools),
-		MaxTokens:        16384,
-		Stream:           req.Stream,
+		MaxTokens:        65536,
 		AnthropicVersion: c.provider.AnthropicVersion,
+	}
+	// Bedrock: model goes in URL path, not body. Stream flag not in body.
+	if !c.provider.ModelInPath {
+		payload.Model = c.provider.ModelID
+		payload.Stream = useStream
 	}
 	httpReq, err := newJSONRequest(ctx, http.MethodPost, endpoint, payload)
 	if err != nil {
@@ -85,7 +92,7 @@ func (c *anthropicClient) Call(ctx context.Context, req LLMRequest) (*LLMRespons
 	}
 	httpReq.Header.Set("Authorization", authHeader)
 	httpReq.Header.Set("Accept", "application/json")
-	if req.Stream {
+	if useStream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 
@@ -99,7 +106,7 @@ func (c *anthropicClient) Call(ctx context.Context, req LLMRequest) (*LLMRespons
 		return nil, fmt.Errorf("anthropic call: status %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	if req.Stream {
+	if useStream {
 		return parseAnthropicStream(resp, req.OnDelta)
 	}
 	return parseAnthropicResponse(resp)
