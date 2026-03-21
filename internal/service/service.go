@@ -5225,6 +5225,59 @@ func (s *Service) CountActiveRoots(ctx context.Context) (int, error) {
 	return len(activeRoots), nil
 }
 
+// RenderWorkerBriefingMarkdown converts a worker briefing to a compact markdown
+// document. Much more token-efficient than JSON for LLM consumption.
+func RenderWorkerBriefingMarkdown(r WorkHydrateResult) string {
+	var b strings.Builder
+
+	// Assignment
+	if a, ok := r["assignment"].(map[string]any); ok {
+		b.WriteString("# Assignment\n\n")
+		if title, _ := a["title"].(string); title != "" {
+			fmt.Fprintf(&b, "**%s**\n", title)
+		}
+		if wid, _ := a["work_id"].(string); wid != "" {
+			fmt.Fprintf(&b, "Work ID: `%s`\n", wid)
+		}
+		if kind, _ := a["kind"].(string); kind != "" {
+			fmt.Fprintf(&b, "Kind: %s\n", kind)
+		}
+		if obj, _ := a["objective"].(string); obj != "" {
+			fmt.Fprintf(&b, "\n%s\n", obj)
+		}
+	}
+
+	// Notes (conventions, findings from prior work)
+	if ev, ok := r["evidence"].(map[string]any); ok {
+		if notes := toSlice(ev["latest_notes"]); len(notes) > 0 {
+			b.WriteString("\n## Notes\n\n")
+			for _, n := range notes {
+				if note, ok := n.(map[string]any); ok {
+					ntype, _ := note["note_type"].(string)
+					body, _ := note["body"].(string)
+					if body != "" {
+						fmt.Fprintf(&b, "**[%s]** %s\n\n", ntype, body)
+					}
+				}
+			}
+		}
+	}
+
+	// Contract
+	if wc, ok := r["worker_contract"].(map[string]any); ok {
+		if rules := toSlice(wc["rules"]); len(rules) > 0 {
+			b.WriteString("\n## Rules\n\n")
+			for _, rule := range rules {
+				if s, ok := rule.(string); ok {
+					fmt.Fprintf(&b, "- %s\n", s)
+				}
+			}
+		}
+	}
+
+	return b.String()
+}
+
 func hydrationLimits(mode string) (updates, notes, attestations, artifacts, jobs int) {
 	switch mode {
 	case "thin":

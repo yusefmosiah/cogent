@@ -862,7 +862,7 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			writeJSONHTTP(w, 500, map[string]string{"error": fmt.Sprintf("hydrate work: %v", err)})
 			return
 		}
-		briefingJSON, _ := json.Marshal(briefing)
+		briefingJSON := []byte(service.RenderWorkerBriefingMarkdown(briefing))
 
 		// Claim and run
 		_, _ = svc.ClaimWork(r.Context(), service.WorkClaimRequest{
