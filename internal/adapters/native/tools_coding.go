@@ -75,9 +75,14 @@ func newReadFileTool(cwd string) Tool {
 			if err != nil {
 				return "", err
 			}
+			content := string(data)
+			const maxFileContent = 100 * 1024 // 100KB
+			if len(content) > maxFileContent {
+				content = content[:maxFileContent] + fmt.Sprintf("\n\n[file truncated — %d bytes total, showing first 100KB]", len(data))
+			}
 			return jsonString(map[string]any{
 				"path":    resolved,
-				"content": string(data),
+				"content": content,
 			})
 		},
 	)
@@ -417,10 +422,16 @@ func newBashTool(cwd string) Tool {
 				}
 			}
 
+			outputStr := string(output)
+			const maxBashOutput = 50 * 1024 // 50KB
+			if len(outputStr) > maxBashOutput {
+				outputStr = outputStr[:maxBashOutput] + fmt.Sprintf("\n\n[output truncated — %d bytes total, showing first 50KB]", len(output))
+			}
+
 			result := map[string]any{
 				"command":   in.Command,
 				"cwd":       cwd,
-				"output":    string(output),
+				"output":    outputStr,
 				"exit_code": exitCode,
 				"timed_out": runCtx.Err() == context.DeadlineExceeded,
 			}
