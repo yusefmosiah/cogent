@@ -2593,10 +2593,9 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 	}
 	s.Events.Publish(ev)
 
-	// Send email notification on terminal state transitions.
-	// Use background context — the HTTP request context may be cancelled.
-	// Only send on done or failed — awaiting_attestation is too noisy.
-	if work.ExecutionState.Terminal() {
+	// Send email notification only on successful completion.
+	// Failures should be retried/fixed automatically, not emailed.
+	if string(work.ExecutionState) == "done" {
 		s.sendWorkNotification(context.Background(), work, req.Message)
 	}
 
