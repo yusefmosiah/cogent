@@ -333,6 +333,20 @@ type WorkAttestRequest struct {
 	SignerPubkey            string         `json:"signer_pubkey,omitempty"`
 }
 
+type WorkCheckRequest struct {
+	WorkID       string           `json:"work_id,omitempty"`
+	Result       string           `json:"result"` // "pass" or "fail"
+	CheckerModel string           `json:"checker_model,omitempty"`
+	WorkerModel  string           `json:"worker_model,omitempty"`
+	Report       core.CheckReport `json:"report"`
+	CreatedBy    string           `json:"created_by,omitempty"`
+}
+
+type WorkCheckResult struct {
+	CheckRecord core.CheckRecord    `json:"check_record"`
+	Work        core.WorkItemRecord `json:"work"`
+}
+
 type WorkShowResult struct {
 	Work         core.WorkItemRecord       `json:"work"`
 	Children     []core.WorkItemRecord     `json:"children,omitempty"`
@@ -2991,6 +3005,88 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 // SignAttestationRecord updates an attestation record with a cryptographic signature.
 func (s *Service) SignAttestationRecord(ctx context.Context, attestationID, signature string) error {
 	return s.store.UpdateAttestationSignature(ctx, attestationID, signature)
+}
+
+// WorkCheck stores a check record and transitions the work state.
+// Result "pass" moves to awaiting_attestation; "fail" returns to ready for rework.
+func (s *Service) WorkCheck(ctx context.Context, req WorkCheckRequest) (*WorkCheckResult, error) {
+	if req.WorkID == "" {
+		return nil, fmt.Errorf("%w: work_id is required", ErrInvalidInput)
+	}
+	if req.Result != "pass" && req.Result != "fail" {
+		return nil, fmt.Errorf("%w: result must be 'pass' or 'fail'", ErrInvalidInput)
+	}
+
+	work, err := s.store.GetWorkItem(ctx, req.WorkID)
+	if err != nil {
+		return nil, normalizeStoreError("work", req.WorkID, err)
+	}
+
+	// Truncate test output to 50KB
+	const maxTestOutput = 50 * 1024
+	if len(req.Report.TestOutput) > maxTestOutput {
+		req.Report.TestOutput = req.Report.TestOutput[:maxTestOutput] + "\n[truncated]"
+	}
+
+	// Save artifacts to .fase/artifacts/<work-id>/
+	artifactDir := filepath.Join(s.Paths.StateDir, "artifacts", req.WorkID)
+	if err := os.MkdirAll(artifactDir, 0o755); err == nil {
+		if req.Report.TestOutput != "" {
+			_ = os.WriteFile(filepath.Join(artifactDir, "go-test-output.txt"), []byte(req.Report.TestOutput), 0o644)
+		}
+		if req.Report.DiffStat != "" {
+			_ = os.WriteFile(filepath.Join(artifactDir, "diff-stat.txt"), []byte(req.Report.DiffStat), 0o644)
+		}
+		if req.Report.CheckerNotes != "" {
+			_ = os.WriteFile(filepath.Join(artifactDir, "checker-notes.md"), []byte(req.Report.CheckerNotes), 0o644)
+		}
+	}
+
+	now := time.Now().UTC()
+	rec := core.CheckRecord{
+		CheckID:      core.GenerateID("chk"),
+		WorkID:       req.WorkID,
+		CheckerModel: req.CheckerModel,
+		WorkerModel:  req.WorkerModel,
+		Result:       req.Result,
+		Report:       req.Report,
+		CreatedAt:    now,
+	}
+	if err := s.store.CreateCheckRecord(ctx, rec); err != nil {
+		return nil, fmt.Errorf("store check record: %w", err)
+	}
+
+	// Transition work state
+	var nextState core.WorkExecutionState
+	var message string
+	if req.Result == "pass" {
+		nextState = core.WorkExecutionStateAwaitingAttestation
+		message = fmt.Sprintf("check passed (tests: %d passed, %d failed) — awaiting attestation",
+			req.Report.TestsPassed, req.Report.TestsFailed)
+	} else {
+		nextState = core.WorkExecutionStateReady
+		notes := req.Report.CheckerNotes
+		if notes == "" {
+			notes = fmt.Sprintf("tests: %d passed, %d failed", req.Report.TestsPassed, req.Report.TestsFailed)
+		}
+		message = "check failed — returning to ready for rework: " + notes
+	}
+
+	updatedWork, err := s.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         req.WorkID,
+		ExecutionState: nextState,
+		Message:        message,
+		CreatedBy:      firstNonEmpty(req.CreatedBy, "checker"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update work after check: %w", err)
+	}
+	_ = work
+
+	return &WorkCheckResult{
+		CheckRecord: rec,
+		Work:        *updatedWork,
+	}, nil
 }
 
 func (s *Service) AddWorkNote(ctx context.Context, req WorkNoteRequest) (*core.WorkNoteRecord, error) {
