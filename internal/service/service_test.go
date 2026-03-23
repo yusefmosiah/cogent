@@ -1839,6 +1839,114 @@ func waitForTerminalStatus(t *testing.T, svc *Service, jobID string) *StatusResu
 	return nil
 }
 
+// TestCheckRecordFlow tests CreateCheckRecord, GetCheckRecord, ListCheckRecords,
+// and CreateCheckRecordDirect through the service layer end-to-end.
+func TestCheckRecordFlow(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "check record test",
+		Objective: "verify check record CRUD",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	// Create a passing check record.
+	pass, err := svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID:       work.WorkID,
+		Result:       "pass",
+		CheckerModel: "claude-haiku-4-5",
+		WorkerModel:  "glm-5-turbo",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  3,
+			CheckerNotes: "all good",
+		},
+		CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRecord pass: %v", err)
+	}
+	if pass.CheckID == "" {
+		t.Fatal("expected non-empty check_id")
+	}
+	if pass.Result != "pass" {
+		t.Fatalf("expected result=pass, got %q", pass.Result)
+	}
+	if pass.Report.BuildOK != true {
+		t.Fatal("expected build_ok=true")
+	}
+	if pass.Report.TestsPassed != 3 {
+		t.Fatalf("expected tests_passed=3, got %d", pass.Report.TestsPassed)
+	}
+
+	// Create a failing check record.
+	fail, err := svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID:    work.WorkID,
+		Result:    "fail",
+		CreatedBy: "test",
+		Report:    core.CheckReport{BuildOK: false, TestsFailed: 1},
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRecord fail: %v", err)
+	}
+	if fail.Result != "fail" {
+		t.Fatalf("expected result=fail, got %q", fail.Result)
+	}
+
+	// GetCheckRecord round-trips all fields.
+	got, err := svc.GetCheckRecord(ctx, pass.CheckID)
+	if err != nil {
+		t.Fatalf("GetCheckRecord: %v", err)
+	}
+	if got.CheckID != pass.CheckID {
+		t.Fatalf("expected check_id=%q, got %q", pass.CheckID, got.CheckID)
+	}
+	if got.Report.CheckerNotes != "all good" {
+		t.Fatalf("expected checker_notes='all good', got %q", got.Report.CheckerNotes)
+	}
+
+	// ListCheckRecords returns both records newest-first.
+	records, err := svc.ListCheckRecords(ctx, work.WorkID, 10)
+	if err != nil {
+		t.Fatalf("ListCheckRecords: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(records))
+	}
+	// Newest first — fail was created after pass.
+	if records[0].Result != "fail" {
+		t.Fatalf("expected newest record to be fail, got %q", records[0].Result)
+	}
+
+	// CreateCheckRecordDirect is the native adapter bridge — same semantics.
+	direct, err := svc.CreateCheckRecordDirect(ctx, work.WorkID, "pass", "glm-5-turbo", "gpt-5.4-mini", core.CheckReport{
+		BuildOK:      true,
+		TestsPassed:  5,
+		CheckerNotes: "via direct bridge",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRecordDirect: %v", err)
+	}
+	if direct.Result != "pass" {
+		t.Fatalf("expected result=pass from direct bridge, got %q", direct.Result)
+	}
+
+	// Validation: empty work_id is rejected.
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{WorkID: "", Result: "pass"})
+	if err == nil {
+		t.Fatal("expected error for empty work_id")
+	}
+
+	// Validation: invalid result is rejected.
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{WorkID: work.WorkID, Result: "unknown"})
+	if err == nil {
+		t.Fatal("expected error for invalid result")
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	stateDir := t.TempDir()
