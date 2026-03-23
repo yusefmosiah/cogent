@@ -494,7 +494,8 @@ func openWithStateDirOverride(ctx context.Context, configPath, stateDirOverride 
 	}, nil
 }
 
-// sendWorkNotification sends an email when work items reach terminal states.
+// sendWorkNotification sends an email when work items transition to done.
+// It renders the checker's CheckReport as HTML with inline screenshots.
 func (s *Service) sendWorkNotification(ctx context.Context, work core.WorkItemRecord, message string) {
 	apiKey := os.Getenv("RESEND_API_KEY")
 	to := os.Getenv("EMAIL_TO")
@@ -502,17 +503,83 @@ func (s *Service) sendWorkNotification(ctx context.Context, work core.WorkItemRe
 		return
 	}
 
-	status := string(work.ExecutionState)
-	subject := fmt.Sprintf("[FASE] %s: %s", status, work.Title)
-	html := fmt.Sprintf(`<h2>%s</h2>
-<p><strong>Status:</strong> %s</p>
-<p><strong>Work ID:</strong> %s</p>
-<p><strong>Kind:</strong> %s</p>
-<p><strong>Message:</strong> %s</p>`,
-		work.Title, status, work.WorkID, work.Kind, message)
+	subject := fmt.Sprintf("[FASE] done: %s", work.Title)
 
-	attachments := s.collectPlaywrightAttachments(ctx, work.WorkID)
+	// Try to find the latest passing check record to render as proof.
+	checkRecords, err := s.store.ListCheckRecords(ctx, work.WorkID, 10)
+	var html string
+	var attachments []notify.ResendEmailAttachment
+
+	if err == nil {
+		// Find the most recent passing check record.
+		for _, cr := range checkRecords {
+			if cr.Result == "pass" {
+				html = notify.BuildCheckReportEmail(&work, cr)
+				attachments = s.collectCheckArtifacts(ctx, work.WorkID, cr)
+				break
+			}
+		}
+	}
+
+	if html == "" {
+		// Fallback: basic completion email without check report.
+		attestations, _ := s.store.ListAttestationRecords(ctx, "work", work.WorkID, 10)
+		html = notify.BuildWorkCompletionEmail(&work, message, attestations, true)
+		attachments = s.collectPlaywrightAttachments(ctx, work.WorkID)
+	}
+
 	notify.SendEmail(ctx, apiKey, to, subject, html, attachments)
+}
+
+// collectCheckArtifacts collects screenshots from the check report's artifact paths
+// and from .fase/artifacts/<work-id>/screenshots/ in the project root.
+func (s *Service) collectCheckArtifacts(ctx context.Context, workID string, cr core.CheckRecord) []notify.ResendEmailAttachment {
+	var attachments []notify.ResendEmailAttachment
+
+	// Collect screenshots referenced directly in the check report.
+	for _, screenshotPath := range cr.Report.Screenshots {
+		data, err := os.ReadFile(screenshotPath)
+		if err != nil {
+			continue
+		}
+		attachments = append(attachments, notify.ResendEmailAttachment{
+			Filename:    filepath.Base(screenshotPath),
+			Content:     base64.StdEncoding.EncodeToString(data),
+			ContentType: "image/png",
+		})
+	}
+	if len(attachments) > 0 {
+		return attachments
+	}
+
+	// Fallback: look in .fase/artifacts/<work-id>/screenshots/ under the project root.
+	projectRoot := s.findProjectRoot(ctx, workID)
+	if projectRoot != "" {
+		screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+		if found := collectScreenshots(screenshotDir); len(found) > 0 {
+			return found
+		}
+	}
+
+	// Final fallback: Playwright test-results directories.
+	return s.collectPlaywrightAttachments(ctx, workID)
+}
+
+// findProjectRoot finds the git root from the job CWD for a work item.
+func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
+	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
+	if err != nil || len(jobs) == 0 {
+		return ""
+	}
+	cwd := verifyRepoPath(jobs)
+	if cwd == "" || cwd == "." {
+		return ""
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // collectPlaywrightAttachments looks up the job CWD for the work item and
@@ -563,6 +630,80 @@ func collectScreenshots(dir string) []notify.ResendEmailAttachment {
 
 func (s *Service) Close() error {
 	return s.store.Close()
+}
+
+// ── Check Records ────────────────────────────────────────────────────────────
+
+type CheckRecordCreateRequest struct {
+	WorkID       string
+	CheckerModel string
+	WorkerModel  string
+	Result       string // "pass" or "fail"
+	Report       core.CheckReport
+	CreatedBy    string
+}
+
+// CreateCheckRecord stores a checker's report and publishes an event to wake the supervisor.
+func (s *Service) CreateCheckRecord(ctx context.Context, req CheckRecordCreateRequest) (core.CheckRecord, error) {
+	if req.WorkID == "" {
+		return core.CheckRecord{}, fmt.Errorf("%w: work_id must not be empty", ErrInvalidInput)
+	}
+	if req.Result != "pass" && req.Result != "fail" {
+		return core.CheckRecord{}, fmt.Errorf("%w: result must be 'pass' or 'fail'", ErrInvalidInput)
+	}
+	rec := core.CheckRecord{
+		CheckID:      core.GenerateID("chk"),
+		WorkID:       req.WorkID,
+		CheckerModel: req.CheckerModel,
+		WorkerModel:  req.WorkerModel,
+		Result:       req.Result,
+		Report:       req.Report,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := s.store.CreateCheckRecord(ctx, rec); err != nil {
+		return core.CheckRecord{}, err
+	}
+	s.Events.Publish(WorkEvent{
+		Kind:   WorkEventCheckRecorded,
+		WorkID: req.WorkID,
+		State:  req.Result,
+		Actor:  actorFromCreatedBy(req.CreatedBy),
+		Cause:  CauseCheckRecorded,
+		Metadata: map[string]string{
+			"check_id": rec.CheckID,
+			"result":   req.Result,
+		},
+	})
+	return rec, nil
+}
+
+func (s *Service) GetCheckRecord(ctx context.Context, checkID string) (core.CheckRecord, error) {
+	rec, err := s.store.GetCheckRecord(ctx, checkID)
+	if err != nil {
+		return core.CheckRecord{}, normalizeStoreError("check_record", checkID, err)
+	}
+	return rec, nil
+}
+
+func (s *Service) ListCheckRecords(ctx context.Context, workID string, limit int) ([]core.CheckRecord, error) {
+	return s.store.ListCheckRecords(ctx, workID, limit)
+}
+
+// SendSpecEscalationEmail emails the human when a work item has failed checks 3+ times.
+func (s *Service) SendSpecEscalationEmail(ctx context.Context, workID, summary, recommendation string) {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	to := os.Getenv("EMAIL_TO")
+	if apiKey == "" || to == "" {
+		return
+	}
+	work, err := s.store.GetWorkItem(ctx, workID)
+	if err != nil {
+		return
+	}
+	checkRecords, _ := s.store.ListCheckRecords(ctx, workID, 10)
+	subject := fmt.Sprintf("[FASE] spec question: %s", work.Title)
+	html := notify.BuildSpecEscalationEmail(&work, checkRecords, summary, recommendation)
+	notify.SendEmail(ctx, apiKey, to, subject, html, nil)
 }
 
 // Edge operations — direct, no proposal ceremony.

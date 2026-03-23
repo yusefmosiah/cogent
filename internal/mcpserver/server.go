@@ -172,6 +172,44 @@ type readyWorkInput struct {
 	Limit int `json:"limit,omitempty" jsonschema:"max items to return"`
 }
 
+type checkRecordCreateInput struct {
+	WorkID       string   `json:"work_id" jsonschema:"required,work item ID"`
+	Result       string   `json:"result" jsonschema:"required,check result: pass or fail"`
+	BuildOK      bool     `json:"build_ok" jsonschema:"whether the build succeeded"`
+	TestsPassed  int      `json:"tests_passed,omitempty" jsonschema:"number of tests that passed"`
+	TestsFailed  int      `json:"tests_failed,omitempty" jsonschema:"number of tests that failed"`
+	TestOutput   string   `json:"test_output,omitempty" jsonschema:"test output (truncated to 50KB)"`
+	DiffStat     string   `json:"diff_stat,omitempty" jsonschema:"git diff --stat output"`
+	Screenshots  []string `json:"screenshots,omitempty" jsonschema:"absolute paths to screenshots in .fase/artifacts/<work-id>/screenshots/"`
+	Videos       []string `json:"videos,omitempty" jsonschema:"absolute paths to video recordings"`
+	CheckerNotes string   `json:"checker_notes,omitempty" jsonschema:"free-form observations from the checker"`
+	CheckerModel string   `json:"checker_model,omitempty" jsonschema:"model that performed the check"`
+	WorkerModel  string   `json:"worker_model,omitempty" jsonschema:"model that did the work"`
+}
+
+type checkRecordShowInput struct {
+	CheckID string `json:"check_id" jsonschema:"required,check record ID"`
+}
+
+type checkRecordListInput struct {
+	WorkID string `json:"work_id" jsonschema:"required,work item ID"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max records to return (default 10)"`
+}
+
+type sessionSendInput struct {
+	SessionID string `json:"session_id" jsonschema:"required,session ID to send the message to"`
+	Prompt    string `json:"prompt" jsonschema:"required,message to send to the session"`
+	WorkID    string `json:"work_id,omitempty" jsonschema:"associated work item ID"`
+	Adapter   string `json:"adapter,omitempty" jsonschema:"adapter to use (default: same as session's adapter)"`
+	Model     string `json:"model,omitempty" jsonschema:"model to use"`
+}
+
+type sendEscalationEmailInput struct {
+	WorkID         string `json:"work_id" jsonschema:"required,work item ID"`
+	Summary        string `json:"summary" jsonschema:"required,summary of what keeps going wrong"`
+	Recommendation string `json:"recommendation" jsonschema:"required,supervisor's recommendation for spec change"`
+}
+
 func registerTools(server *mcp.Server, svc *service.Service) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "project_hydrate",
@@ -340,6 +378,84 @@ func registerTools(server *mcp.Server, svc *service.Service) {
 			return nil, nil, err
 		}
 		return jsonResult(items)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_record_create",
+		Description: "Submit a check record for a work item. Called by checkers to record their verification results (build status, test results, screenshots, notes).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input checkRecordCreateInput) (*mcp.CallToolResult, any, error) {
+		rec, err := svc.CreateCheckRecord(ctx, service.CheckRecordCreateRequest{
+			WorkID:       input.WorkID,
+			CheckerModel: input.CheckerModel,
+			WorkerModel:  input.WorkerModel,
+			Result:       input.Result,
+			Report: core.CheckReport{
+				BuildOK:      input.BuildOK,
+				TestsPassed:  input.TestsPassed,
+				TestsFailed:  input.TestsFailed,
+				TestOutput:   input.TestOutput,
+				DiffStat:     input.DiffStat,
+				Screenshots:  input.Screenshots,
+				Videos:       input.Videos,
+				CheckerNotes: input.CheckerNotes,
+			},
+			CreatedBy: "mcp",
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(rec)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_record_show",
+		Description: "Show a check record by ID, including the full report with test results, diff stat, and checker notes.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input checkRecordShowInput) (*mcp.CallToolResult, any, error) {
+		rec, err := svc.GetCheckRecord(ctx, input.CheckID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(rec)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_record_list",
+		Description: "List check records for a work item, newest first. Use this to read check reports and count failures.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input checkRecordListInput) (*mcp.CallToolResult, any, error) {
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+		records, err := svc.ListCheckRecords(ctx, input.WorkID, limit)
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(records)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "session_send",
+		Description: "Send a message to an existing session (e.g., send failure context back to a worker). The session must support continuation.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input sessionSendInput) (*mcp.CallToolResult, any, error) {
+		result, err := svc.Send(ctx, service.SendRequest{
+			SessionID: input.SessionID,
+			Prompt:    input.Prompt,
+			WorkID:    input.WorkID,
+			Adapter:   input.Adapter,
+			Model:     input.Model,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(result)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "send_escalation_email",
+		Description: "Email the human when a work item has failed verification 3+ times. Include a summary of what keeps going wrong and a recommendation for how to fix the spec.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input sendEscalationEmailInput) (*mcp.CallToolResult, any, error) {
+		svc.SendSpecEscalationEmail(ctx, input.WorkID, input.Summary, input.Recommendation)
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Escalation email sent."}}}, nil, nil
 	})
 }
 

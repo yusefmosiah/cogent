@@ -4092,11 +4092,14 @@ func (s *Store) GetCheckRecord(ctx context.Context, checkID string) (core.CheckR
 	return scanCheckRecord(row)
 }
 
-func (s *Store) ListCheckRecords(ctx context.Context, workID string) ([]core.CheckRecord, error) {
+func (s *Store) ListCheckRecords(ctx context.Context, workID string, limit int) ([]core.CheckRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT check_id, work_id, checker_model, worker_model, result, report_json, created_at
-		   FROM check_records WHERE work_id = ? ORDER BY created_at DESC`,
-		workID)
+		   FROM check_records WHERE work_id = ? ORDER BY created_at DESC LIMIT ?`,
+		workID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list check records: %w", err)
 	}
@@ -4146,6 +4149,7 @@ func scanCheckRecord(scanner checkRecordScanner) (core.CheckRecord, error) {
 	rec.CreatedAt = parsed
 	return rec, nil
 }
+
 
 // ── Private DB ──────────────────────────────────────────────
 
