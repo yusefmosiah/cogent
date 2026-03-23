@@ -3992,6 +3992,18 @@ CREATE TABLE IF NOT EXISTS doc_content (
 );
 
 CREATE INDEX IF NOT EXISTS idx_doc_content_work_id ON doc_content(work_id);
+
+CREATE TABLE IF NOT EXISTS check_records (
+	check_id     TEXT PRIMARY KEY,
+	work_id      TEXT NOT NULL REFERENCES work_items(work_id) ON DELETE CASCADE,
+	checker_model TEXT,
+	worker_model  TEXT,
+	result        TEXT NOT NULL,
+	report_json   TEXT NOT NULL DEFAULT '{}',
+	created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_check_records_work_id_created_at ON check_records(work_id, created_at DESC);
 `
 
 // ── Doc Content ─────────────────────────────────────────────
@@ -4047,6 +4059,68 @@ func (s *Store) GetDocContentByPath(ctx context.Context, path string) (*core.Doc
 	d.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return &d, nil
+}
+
+// ── Check Records ─────────────────────────────────────────────
+
+func (s *Store) CreateCheckRecord(ctx context.Context, rec core.CheckRecord) error {
+	reportJSON, err := marshalJSON(rec.Report)
+	if err != nil {
+		return fmt.Errorf("marshal check report: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO check_records (check_id, work_id, checker_model, worker_model, result, report_json, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.CheckID, rec.WorkID, rec.CheckerModel, rec.WorkerModel, rec.Result,
+		reportJSON, rec.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) GetCheckRecord(ctx context.Context, checkID string) (core.CheckRecord, error) {
+	var rec core.CheckRecord
+	var reportJSON, createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT check_id, work_id, checker_model, worker_model, result, report_json, created_at
+		   FROM check_records WHERE check_id = ?`, checkID).
+		Scan(&rec.CheckID, &rec.WorkID, &rec.CheckerModel, &rec.WorkerModel, &rec.Result, &reportJSON, &createdAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.CheckRecord{}, ErrNotFound
+		}
+		return core.CheckRecord{}, fmt.Errorf("scan check record: %w", err)
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if err := json.Unmarshal([]byte(reportJSON), &rec.Report); err != nil {
+		return core.CheckRecord{}, fmt.Errorf("decode check report: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) ListCheckRecords(ctx context.Context, workID string, limit int) ([]core.CheckRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT check_id, work_id, checker_model, worker_model, result, report_json, created_at
+		   FROM check_records WHERE work_id = ? ORDER BY created_at DESC LIMIT ?`,
+		workID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []core.CheckRecord
+	for rows.Next() {
+		var rec core.CheckRecord
+		var reportJSON, createdAt string
+		if err := rows.Scan(&rec.CheckID, &rec.WorkID, &rec.CheckerModel, &rec.WorkerModel, &rec.Result, &reportJSON, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan check record: %w", err)
+		}
+		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		_ = json.Unmarshal([]byte(reportJSON), &rec.Report)
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }
 
 // ── Private DB ──────────────────────────────────────────────

@@ -270,6 +270,11 @@ func formatEvents(events []service.WorkEvent) string {
 			b.WriteString("\n")
 		case service.WorkEventReleased:
 			fmt.Fprintf(&b, "[released] %s (%s)\n", title, ev.WorkID)
+		case service.WorkEventCheckRecorded:
+			result := ev.Metadata["result"]
+			checkID := ev.Metadata["check_id"]
+			fmt.Fprintf(&b, "[check:%s] %s (%s) check_id=%s — use check_record_show to read the report\n",
+				result, title, ev.WorkID, checkID)
 		}
 	}
 	return b.String()

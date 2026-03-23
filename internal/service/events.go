@@ -8,12 +8,13 @@ import (
 type WorkEventKind string
 
 const (
-	WorkEventCreated    WorkEventKind = "work_created"
-	WorkEventUpdated    WorkEventKind = "work_updated"
-	WorkEventClaimed    WorkEventKind = "work_claimed"
-	WorkEventReleased   WorkEventKind = "work_released"
-	WorkEventAttested   WorkEventKind = "work_attested"
-	WorkEventLeaseRenew WorkEventKind = "work_lease_renewed"
+	WorkEventCreated       WorkEventKind = "work_created"
+	WorkEventUpdated       WorkEventKind = "work_updated"
+	WorkEventClaimed       WorkEventKind = "work_claimed"
+	WorkEventReleased      WorkEventKind = "work_released"
+	WorkEventAttested      WorkEventKind = "work_attested"
+	WorkEventLeaseRenew    WorkEventKind = "work_lease_renewed"
+	WorkEventCheckRecorded WorkEventKind = "check_recorded"
 )
 
 // EventActor identifies who caused the event.
@@ -36,6 +37,7 @@ const (
 	CauseWorkerProgress      EventCause = "worker_progress"
 	CauseWorkerTerminal      EventCause = "worker_terminal"
 	CauseAttestationRecorded EventCause = "attestation_recorded"
+	CauseCheckRecorded       EventCause = "check_recorded"
 	CauseParentTransition    EventCause = "parent_transition"
 	CauseHousekeepingStall   EventCause = "housekeeping_stall"
 	CauseHousekeepingOrphan  EventCause = "housekeeping_orphan"

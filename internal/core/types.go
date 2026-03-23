@@ -483,3 +483,26 @@ type PromotionRecord struct {
 	PromotedAt        time.Time      `json:"promoted_at"`
 	Metadata          map[string]any `json:"metadata,omitempty"`
 }
+
+// CheckReport is the structured evidence produced by a checker agent.
+type CheckReport struct {
+	BuildOK      bool     `json:"build_ok"`
+	TestsPassed  int      `json:"tests_passed"`
+	TestsFailed  int      `json:"tests_failed"`
+	TestOutput   string   `json:"test_output,omitempty"`  // truncated to 50KB
+	DiffStat     string   `json:"diff_stat,omitempty"`
+	Screenshots  []string `json:"screenshots,omitempty"` // paths in .fase/artifacts/<work-id>/
+	Videos       []string `json:"videos,omitempty"`
+	CheckerNotes string   `json:"checker_notes,omitempty"`
+}
+
+// CheckRecord stores the result of a checker agent's review of a work item.
+type CheckRecord struct {
+	CheckID      string      `json:"check_id"`
+	WorkID       string      `json:"work_id"`
+	CheckerModel string      `json:"checker_model,omitempty"`
+	WorkerModel  string      `json:"worker_model,omitempty"`
+	Result       string      `json:"result"` // "pass" or "fail"
+	Report       CheckReport `json:"report"`
+	CreatedAt    time.Time   `json:"created_at"`
+}
