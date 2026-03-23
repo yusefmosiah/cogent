@@ -1553,6 +1553,66 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 		})
 	})
 
+	// Check record endpoints — same service methods as MCP tools and native adapter
+	mux.HandleFunc("/api/check/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		var req struct {
+			WorkID       string           `json:"work_id"`
+			Result       string           `json:"result"`
+			CheckerModel string           `json:"checker_model"`
+			WorkerModel  string           `json:"worker_model"`
+			Report       core.CheckReport `json:"report"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONHTTP(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		record, err := svc.CreateCheckRecord(r.Context(), service.CheckRecordCreateRequest{
+			WorkID:       req.WorkID,
+			Result:       req.Result,
+			CheckerModel: req.CheckerModel,
+			WorkerModel:  req.WorkerModel,
+			Report:       req.Report,
+			CreatedBy:    "cli",
+		})
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, record)
+	})
+
+	mux.HandleFunc("/api/check/list", func(w http.ResponseWriter, r *http.Request) {
+		workID := r.URL.Query().Get("work_id")
+		if workID == "" {
+			writeJSONHTTP(w, 400, map[string]string{"error": "work_id required"})
+			return
+		}
+		records, err := svc.ListCheckRecords(r.Context(), workID, 20)
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, records)
+	})
+
+	mux.HandleFunc("/api/check/show", func(w http.ResponseWriter, r *http.Request) {
+		checkID := r.URL.Query().Get("check_id")
+		if checkID == "" {
+			writeJSONHTTP(w, 400, map[string]string{"error": "check_id required"})
+			return
+		}
+		record, err := svc.GetCheckRecord(r.Context(), checkID)
+		if err != nil {
+			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSONHTTP(w, 200, record)
+	})
+
 	// Git status — tracked changes + untracked files
 	mux.HandleFunc("/api/git/status", func(w http.ResponseWriter, r *http.Request) {
 		result := map[string]any{}
