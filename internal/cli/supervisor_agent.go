@@ -196,21 +196,17 @@ type jobOutcome struct {
 	reason       string // human-readable reason for unproductive
 }
 
-// waitForSignal blocks until an event, host message, or poll timer fires.
-// The poll timer ensures the supervisor checks the queue periodically even
-// when worker completion events don't propagate through the EventBus.
+// waitForSignal blocks until an event or host message arrives.
+// syncWorkStateFromJob and refreshAttestationParentState now publish WorkEvents
+// with correct Actor/Cause fields, so worker completion reliably wakes the supervisor.
 func (s *agenticSupervisor) waitForSignal(ctx context.Context, ch chan service.WorkEvent) string {
 	var events []service.WorkEvent
-	pollTimer := time.NewTimer(2 * time.Minute)
-	defer pollTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ""
 		case msg := <-s.hostCh:
 			return fmt.Sprintf("Message from host: %s", msg)
-		case <-pollTimer.C:
-			return "Poll: 2 minutes since last turn. Check ready_work and dispatch if anything is available."
 		case ev := <-ch:
 			if !ev.RequiresSupervisorAttention() {
 				continue
