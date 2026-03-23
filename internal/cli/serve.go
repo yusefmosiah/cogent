@@ -496,7 +496,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 					continue
 				}
 
-				if isJobStalled(jobDir, 10*time.Minute) && !isTerminal(jobState) {
+				if isJobStalled(jobDir, 30*time.Minute) && !isTerminal(jobState) {
 					// Only fail the work item if this stalled job is still
 					// the current job. A newer dispatch may have replaced it.
 					workResult, wErr := svc.Work(ctx, workID)
