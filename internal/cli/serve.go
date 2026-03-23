@@ -1230,6 +1230,23 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 				return
 			}
 			writeJSONHTTP(w, 200, map[string]any{"attestation": record, "work": work})
+		case "check":
+			if r.Method != http.MethodPost {
+				writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
+				return
+			}
+			var req service.WorkCheckRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONHTTP(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
+				return
+			}
+			req.WorkID = workID
+			result, err := svc.WorkCheck(r.Context(), req)
+			if err != nil {
+				writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSONHTTP(w, 200, result)
 		case "block":
 			if r.Method != http.MethodPost {
 				writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})

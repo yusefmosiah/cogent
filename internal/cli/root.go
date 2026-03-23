@@ -161,6 +161,20 @@ type workApproveOptions struct {
 	message string
 }
 
+type workCheckOptions struct {
+	result       string
+	checkerModel string
+	workerModel  string
+	testOutput   string
+	testsPassed  int
+	testsFailed  int
+	buildOK      bool
+	diffStat     string
+	checkerNotes string
+	screenshots  string // comma-separated paths
+	videos       string // comma-separated paths
+}
+
 type workHydrateOptions struct {
 	mode    string
 	debrief bool
@@ -925,6 +939,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	proposalCreateOpts := &workProposalCreateOptions{}
 	attestOpts := &workAttestOptions{}
 	approveOpts := &workApproveOptions{}
+	checkOpts := &workCheckOptions{}
 	hydrateOpts := &workHydrateOptions{mode: "standard"}
 	promoteOpts := &workPromoteOptions{environment: "staging"}
 	projectionOpts := &workProjectionOptions{format: "markdown"}
@@ -2327,7 +2342,75 @@ This guarantees every doc has a corresponding work item.`,
 
 	edgeCmd.AddCommand(edgeAddCmd, edgeRmCmd, edgeLsCmd)
 
-	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, blockCmd, archiveCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, verifyCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd)
+	checkCmd := &cobra.Command{
+		Use:   "check <work-id>",
+		Short: "Submit a check record and transition work state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			req := service.WorkCheckRequest{
+				WorkID:       args[0],
+				Result:       checkOpts.result,
+				CheckerModel: checkOpts.checkerModel,
+				WorkerModel:  checkOpts.workerModel,
+				CreatedBy:    "cli",
+				Report: core.CheckReport{
+					BuildOK:      checkOpts.buildOK,
+					TestsPassed:  checkOpts.testsPassed,
+					TestsFailed:  checkOpts.testsFailed,
+					TestOutput:   checkOpts.testOutput,
+					DiffStat:     checkOpts.diffStat,
+					CheckerNotes: checkOpts.checkerNotes,
+					Screenshots:  splitCSV(checkOpts.screenshots),
+					Videos:       splitCSV(checkOpts.videos),
+				},
+			}
+			if c, serveErr := connectServe(); serveErr == nil {
+				data, err := c.doPost("/api/work/"+args[0]+"/check", req)
+				if err != nil {
+					return err
+				}
+				var result service.WorkCheckResult
+				if err := json.Unmarshal(data, &result); err != nil {
+					return fmt.Errorf("decoding response: %w", err)
+				}
+				if root.jsonOutput {
+					return writeJSON(cmd.OutOrStdout(), result)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "check %s: %s\n", result.CheckRecord.CheckID, result.CheckRecord.Result)
+				fmt.Fprintf(cmd.OutOrStdout(), "work %s → %s\n", result.Work.WorkID, result.Work.ExecutionState)
+				return nil
+			}
+			svc, err := service.Open(context.Background(), root.configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = svc.Close() }()
+			result, err := svc.WorkCheck(context.Background(), req)
+			if err != nil {
+				return mapServiceError(err)
+			}
+			if root.jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), result)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "check %s: %s\n", result.CheckRecord.CheckID, result.CheckRecord.Result)
+			fmt.Fprintf(cmd.OutOrStdout(), "work %s → %s\n", result.Work.WorkID, result.Work.ExecutionState)
+			return nil
+		},
+	}
+	checkCmd.Flags().StringVar(&checkOpts.result, "result", "", "check result: pass or fail")
+	checkCmd.Flags().StringVar(&checkOpts.checkerModel, "checker-model", "", "model that ran the check")
+	checkCmd.Flags().StringVar(&checkOpts.workerModel, "worker-model", "", "model that did the work")
+	checkCmd.Flags().BoolVar(&checkOpts.buildOK, "build-ok", false, "whether the build succeeded")
+	checkCmd.Flags().IntVar(&checkOpts.testsPassed, "tests-passed", 0, "number of tests that passed")
+	checkCmd.Flags().IntVar(&checkOpts.testsFailed, "tests-failed", 0, "number of tests that failed")
+	checkCmd.Flags().StringVar(&checkOpts.testOutput, "test-output", "", "test output (truncated to 50KB)")
+	checkCmd.Flags().StringVar(&checkOpts.diffStat, "diff-stat", "", "git diff --stat output")
+	checkCmd.Flags().StringVar(&checkOpts.checkerNotes, "notes", "", "checker's free-form observations")
+	checkCmd.Flags().StringVar(&checkOpts.screenshots, "screenshots", "", "comma-separated screenshot paths")
+	checkCmd.Flags().StringVar(&checkOpts.videos, "videos", "", "comma-separated video paths")
+	_ = checkCmd.MarkFlagRequired("result")
+
+	cmd.AddCommand(createCmd, showCmd, listCmd, readyCmd, claimCmd, claimNextCmd, releaseCmd, renewLeaseCmd, updateCmd, blockCmd, archiveCmd, retryCmd, lockCmd, unlockCmd, approveCmd, rejectCmd, promoteCmd, notesCmd, noteAddCmd, privateNoteCmd, docSetCmd, childrenCmd, discoverCmd, attestCmd, verifyCmd, hydrateCmd, proposalCmd, projectionCmd, edgeCmd, checkCmd)
 	return cmd
 }
 
