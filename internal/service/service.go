@@ -2880,7 +2880,7 @@ func (s *Service) buildCheckerBriefing(work core.WorkItemRecord) string {
 Work ID: %s
 Title: %s
 
-You are a checker. Your job is to verify the worker's output independently.
+You are a checker. Your job is to verify the worker's output independently and submit a check record.
 
 ## Your Tasks
 
@@ -2889,15 +2889,29 @@ You are a checker. Your job is to verify the worker's output independently.
 3. Review the diff: git diff main...HEAD --stat
 4. Note any issues, warnings, or test failures
 
+## Submitting Your Check Record
+
+After completing your review, submit a check record using ONE of the following methods:
+
+### Method A — MCP tool (preferred for claude adapters with MCP access):
+Call the check_record_create MCP tool with:
+  - work_id: %s
+  - result: "pass" or "fail"
+  - build_ok: true/false
+  - tests_passed: <count>
+  - tests_failed: <count>
+  - checker_notes: "<your observations>"
+
+### Method B — CLI (for all adapters with bash access):
+  Pass:  fase check create %s --result pass  --build-ok --tests-passed <N> --notes "<summary>"
+  Fail:  fase check create %s --result fail           --tests-failed <N> --notes "<what failed>"
+
 ## Rules
 
 - You are read-only. Do NOT modify code.
-- Record your findings as work notes: fase work note-add %s --note-type finding --body "<your findings>"
-- After completing your review, update the work state:
-  - If tests pass and build is clean: fase work update %s --execution-state done --message "<summary>"
-  - If there are failures: fase work update %s --execution-state failed --message "<what failed>"
 - Do NOT call fase work attest.
 - Do NOT create new work items.
+- Do NOT call fase work update — use check_record_create or fase check create instead.
 
 ## Work Objective
 
