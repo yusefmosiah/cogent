@@ -1,12 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -42,6 +44,38 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// WAL mode + busy_timeout handles reads, but writes need immediate locking
 	// to avoid corruption from multiple processes.
 	connStr := path + "?_txlock=immediate&_busy_timeout=60000"
+
+	// Open with integrity check; auto-recover if corrupted.
+	db, err := openAndCheck(ctx, path, connStr)
+	if err != nil {
+		return nil, err
+	}
+
+	store := &Store{db: db, path: path}
+	if err := store.bootstrap(ctx); err != nil {
+		_ = db.Close()
+		// Bootstrap failure may indicate corruption missed by quick_check.
+		if isCorruptionErr(err) {
+			fmt.Fprintf(os.Stderr, "store: bootstrap detected corruption, attempting recovery...\n")
+			db2, recErr := recoverAndOpen(ctx, path, connStr)
+			if recErr != nil {
+				return nil, fmt.Errorf("open sqlite: bootstrap failed (%v), recovery failed (%v)", err, recErr)
+			}
+			store2 := &Store{db: db2, path: path}
+			if err2 := store2.bootstrap(ctx); err2 != nil {
+				_ = db2.Close()
+				return nil, fmt.Errorf("open sqlite: bootstrap failed after recovery: %w", err2)
+			}
+			return store2, nil
+		}
+		return nil, err
+	}
+
+	return store, nil
+}
+
+// openAndCheck opens the database and runs a quick integrity check.
+func openAndCheck(ctx context.Context, path, connStr string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -49,13 +83,58 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	store := &Store{db: db, path: path}
-	if err := store.bootstrap(ctx); err != nil {
+	var result string
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check(1)").Scan(&result); err != nil || result != "ok" {
 		_ = db.Close()
-		return nil, err
+		if err != nil && !isCorruptionErr(err) {
+			return nil, fmt.Errorf("open sqlite: integrity check: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "store: corruption detected (quick_check=%q), recovering...\n", result)
+		return recoverAndOpen(ctx, path, connStr)
+	}
+	return db, nil
+}
+
+// recoverAndOpen uses sqlite3 .recover to salvage data from a corrupt database.
+func recoverAndOpen(ctx context.Context, path, connStr string) (*sql.DB, error) {
+	corruptPath := path + ".corrupt-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(path, corruptPath); err != nil {
+		return nil, fmt.Errorf("rename corrupt database: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "store: corrupt database moved to %s\n", corruptPath)
+
+	cmd := exec.CommandContext(ctx, "sqlite3", corruptPath, ".recover")
+	dump, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("recover corrupt database: %w", err)
 	}
 
-	return store, nil
+	importCmd := exec.CommandContext(ctx, "sqlite3", path)
+	importCmd.Stdin = bytes.NewReader(dump)
+	if out, err := importCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("import recovered database: %w (output: %s)", err, string(out))
+	}
+
+	fmt.Fprintf(os.Stderr, "store: database recovered successfully\n")
+	db, err := sql.Open("sqlite", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open recovered database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
+// isCorruptionErr checks if an error indicates SQLite database corruption.
+func isCorruptionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "malformed") ||
+		strings.Contains(msg, "corrupt") ||
+		strings.Contains(msg, "disk image is malformed") ||
+		strings.Contains(msg, "(11)")
 }
 
 // OpenWithPrivate opens both the public and private databases.
@@ -92,7 +171,11 @@ func OpenWithPrivate(ctx context.Context, publicPath, privatePath string) (*Stor
 }
 
 func (s *Store) Close() error {
+	// Checkpoint WAL before closing to prevent corruption on unclean shutdown.
+	// TRUNCATE mode checkpoints and removes the WAL file entirely.
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	if s.privateDB != nil {
+		_, _ = s.privateDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 		_ = s.privateDB.Close()
 	}
 	return s.db.Close()
@@ -100,6 +183,15 @@ func (s *Store) Close() error {
 
 func (s *Store) Path() string {
 	return s.path
+}
+
+// CheckpointWAL forces a passive WAL checkpoint to flush pending writes to the
+// main database file. Called periodically by housekeeping and on shutdown.
+func (s *Store) CheckpointWAL() {
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	if s.privateDB != nil {
+		_, _ = s.privateDB.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	}
 }
 
 func (s *Store) HasPrivate() bool {
@@ -2635,6 +2727,7 @@ func (s *Store) bootstrap(ctx context.Context) error {
 		`PRAGMA foreign_keys = ON;`,
 		`PRAGMA busy_timeout = 30000;`,
 		`PRAGMA journal_mode = WAL;`,
+		`PRAGMA synchronous = NORMAL;`,
 		schema,
 	}
 
@@ -4177,6 +4270,7 @@ func (s *Store) bootstrapPrivate(ctx context.Context) error {
 		`PRAGMA foreign_keys = ON;`,
 		`PRAGMA busy_timeout = 30000;`,
 		`PRAGMA journal_mode = WAL;`,
+		`PRAGMA synchronous = NORMAL;`,
 		privateSchema,
 	}
 	for _, stmt := range statements {

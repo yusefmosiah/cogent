@@ -539,6 +539,10 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Periodic WAL checkpoint to prevent unbounded WAL growth
+			// and ensure durability even if the process crashes.
+			svc.CheckpointWAL()
+
 			// Reconcile expired leases (safe every tick)
 			_, _ = svc.ReconcileExpiredLeases(ctx)
 

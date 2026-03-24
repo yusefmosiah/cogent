@@ -706,6 +706,11 @@ func (s *Service) Close() error {
 	return s.store.Close()
 }
 
+// CheckpointWAL forces a WAL checkpoint on the database to ensure durability.
+func (s *Service) CheckpointWAL() {
+	s.store.CheckpointWAL()
+}
+
 // ── Check Records ────────────────────────────────────────────────────────────
 
 type CheckRecordCreateRequest struct {

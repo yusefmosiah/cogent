@@ -180,12 +180,8 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 
 		outcome = s.waitForJob(ctx, ch, sendResult.Job.JobID)
 
-		// Notify host after each productive turn.
-		if !outcome.unproductive {
-			if status, err := s.svc.Status(ctx, sendResult.Job.JobID); err == nil && status.Job.State == core.JobStateCompleted {
-				s.notifyHost(fmt.Sprintf("Supervisor turn completed (job %s)", sendResult.Job.JobID), "status_update")
-			}
-		}
+		// Only notify host on meaningful turns (dispatches, attestations, failures).
+		// Skip "still waiting" and monitoring-only turns to reduce noise.
 	}
 }
 

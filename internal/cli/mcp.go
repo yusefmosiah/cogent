@@ -30,7 +30,15 @@ func newMCPCommand(root *rootOptions) *cobra.Command {
 	stdioCmd := &cobra.Command{
 		Use:   "stdio",
 		Short: "Run MCP server over stdio (for Claude Code and other MCP clients)",
+		Long: `WARNING: 'fase mcp stdio' opens the database directly. If 'fase serve' is
+also running, this creates concurrent writers which can corrupt the database.
+Use 'fase mcp proxy' instead — it routes through serve's HTTP API.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Warn if serve is already running — concurrent DB access causes corruption.
+			if info, err := loadServeInfo(); err == nil {
+				fmt.Fprintf(os.Stderr, "WARNING: fase serve is running (pid %d, port %d). Using 'fase mcp stdio' "+
+					"alongside serve risks database corruption. Use 'fase mcp proxy' instead.\n", info.PID, info.Port)
+			}
 			svc, err := service.Open(context.Background(), root.configPath)
 			if err != nil {
 				return err
