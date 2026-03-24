@@ -147,3 +147,33 @@ func newCheckShowCommand(root *rootOptions) *cobra.Command {
 		},
 	}
 }
+
+func newNotifyCommand(_ *rootOptions) *cobra.Command {
+	var msgType string
+	cmd := &cobra.Command{
+		Use:   "notify [message]",
+		Short: "Send a notification to the host",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := connectServe()
+			if err != nil {
+				return err
+			}
+			msg := strings.Join(args, " ")
+			if msgType == "" {
+				msgType = "info"
+			}
+			data, err := c.doPost("/api/channel/send", map[string]any{
+				"content": msg,
+				"meta":    map[string]string{"source": "worker", "type": msgType},
+			})
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(data)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&msgType, "type", "info", "message type: info, status_update, escalation")
+	return cmd
+}

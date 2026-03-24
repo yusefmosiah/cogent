@@ -1726,7 +1726,7 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 		fmt.Sprintf("REQUIRED on success: %s", updateDoneCmd),
 		fmt.Sprintf("REQUIRED on failure: %s", updateFailCmd),
 		"You MUST call one of the above before exiting. The supervisor cannot see your work otherwise.",
-		"REQUIRED: Call notify_host with a summary of what you did before exiting. Include: what files you changed, whether tests pass, and any issues found. This is how the supervisor and host know your work is done.",
+		"REQUIRED: Notify the host/supervisor with a summary before exiting. Use either the notify_host MCP tool OR 'fase notify \"your summary here\"' CLI command. Include: what files you changed, whether tests pass, and any issues found.",
 		"Record notes for findings, risks, and open questions.",
 		"Run verification (tests, builds) and report results as notes.",
 		"If the work involves a web UI: you MUST add e2e tests (default: Playwright) covering all interactive features (buttons, drag, resize, navigation). Backend tests alone are insufficient — they cannot catch broken UI behavior.",
