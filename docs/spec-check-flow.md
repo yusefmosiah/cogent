@@ -1,5 +1,7 @@
 # Check Flow Spec
 
+> **Contract Note**: The canonical work execution states are defined in `internal/core/types.go` (see `WorkExecutionState` constants). This document describes the original design intent; the runtime code is the authoritative source. See the README for the precedence rule.
+
 ## Flow
 
 ```
@@ -31,6 +33,8 @@ ready → doing → checking → report → done
 
 ## States
 
+> **Historical note**: This table shows the original design from the spec. The canonical states are defined in `internal/core/types.go`. The code includes `checking` (the canonical handoff state) and may include deprecated aliases for backward compatibility. Always reference `internal/core/types.go` for the authoritative state list.
+
 | State | Meaning | Who transitions |
 |-------|---------|-----------------|
 | `ready` | Available for dispatch | Supervisor |
@@ -39,7 +43,7 @@ ready → doing → checking → report → done
 | `done` | Supervisor approved, merged, emailed | Supervisor |
 | `failed` | Unrecoverable failure | Supervisor |
 
-No `awaiting_attestation`. No `report` state — the report is data on the check record, not a state.
+The original spec design called for removing `awaiting_attestation` in favor of `checking`. The code implements `checking` as the canonical verification handoff state.
 
 ## Check Record
 

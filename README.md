@@ -14,6 +14,16 @@ The core invariant: **agents may always stop, the system may always resume.**
 
 Attestation is the centerpiece. Work is not "done" because an agent says so — it's done when durable evidence from tests, scripts, agent reviewers, and human review satisfies the attestation policy. Docs are projections of the work graph, not independent stores.
 
+### Contract Precedence
+
+When runtime code, committed documentation, and persisted work-graph state disagree, **runtime code is the canonical source of truth**. This applies to:
+
+- **Work execution states**: The authoritative state values are defined in `internal/core/types.go` (see `WorkExecutionState` constants). Historical or proposal docs that list different states are either updated to match or marked as superseded.
+- **CLI/API contracts**: The runtime implementation defines the authoritative surface; docs are derivatives.
+- **Attestation semantics**: The code's `AttestationRecord` structure and guard logic define the contract.
+
+Workers should reference `fase work update --execution-state` with the values from `internal/core/types.go` for valid states. Any doc that contradicts the code's state definitions should be treated as historical.
+
 Key specs:
 - [docs/fase-v0-local-control-plane.md](docs/fase-v0-local-control-plane.md) — product direction and v0 scope
 - [docs/fase-work-runtime.md](docs/fase-work-runtime.md) — work runtime design

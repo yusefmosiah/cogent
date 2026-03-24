@@ -3,6 +3,8 @@
 **Work ID:** `work_01KMF31JMH9SCZRH8E9PM72DKZ`
 **Date:** 2026-03-24
 
+> **Contract Note**: This is a proposal document analyzing state machine alternatives. The canonical work execution states are defined in `internal/core/types.go` (see `WorkExecutionState` constants). The code is the authoritative source; this doc captures analysis toward potential future simplification. See the README for the precedence rule.
+
 ---
 
 ## (A) Map of the Current System As-Is

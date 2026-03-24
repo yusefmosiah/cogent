@@ -1226,6 +1226,14 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	updateCmd := &cobra.Command{
 		Use:   "update <work-id>",
 		Short: "Append a structured work update and mutate current work state",
+		Example: `  # Transition work to checking (worker finished implementation)
+  fase work update work_123 --execution-state checking --message "Implementation complete"
+
+  # Mark work as done (requires all attestations resolved)
+  fase work update work_123 --execution-state done --message "All checks passed"
+
+  # Valid execution states: ready, claimed, in_progress, checking, blocked, done, failed, cancelled, archived
+  # Note: awaiting_attestation is deprecated; use checking instead`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkCapability(core.CapWorkUpdate); err != nil {
