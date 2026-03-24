@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -23,10 +24,11 @@ import (
 	"github.com/yusefmosiah/fase/internal/adapterapi"
 	"github.com/yusefmosiah/fase/internal/adapters"
 	catalogpkg "github.com/yusefmosiah/fase/internal/catalog"
+	"github.com/yusefmosiah/fase/internal/channelmeta"
 	"github.com/yusefmosiah/fase/internal/core"
 	debriefpkg "github.com/yusefmosiah/fase/internal/debrief"
-	"github.com/yusefmosiah/fase/internal/notify"
 	"github.com/yusefmosiah/fase/internal/events"
+	"github.com/yusefmosiah/fase/internal/notify"
 	"github.com/yusefmosiah/fase/internal/pricing"
 	"github.com/yusefmosiah/fase/internal/store"
 	transferpkg "github.com/yusefmosiah/fase/internal/transfer"
@@ -4674,35 +4676,51 @@ func (s *Service) startPreparedJobLifecycle(
 // Best-effort: failures are silently dropped since the host can still
 // observe job state via polling.
 func (s *Service) reportJobCompletion(message string) {
-	// Find serve port from serve.json
-	stateDir := s.Paths.StateDir
-	serveJSONPath := filepath.Join(stateDir, "serve.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.postServeChannelEvent(ctx, message, channelmeta.JobCompletionMeta())
+}
+
+func (s *Service) postServeChannelEvent(ctx context.Context, message string, meta map[string]string) error {
+	serveJSONPath := filepath.Join(s.Paths.StateDir, "serve.json")
 	data, err := os.ReadFile(serveJSONPath)
 	if err != nil {
-		return
+		return err
 	}
 	var info struct {
 		Port int `json:"port"`
 	}
-	if err := json.Unmarshal(data, &info); err != nil || info.Port == 0 {
-		return
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
 	}
-	body, _ := json.Marshal(map[string]any{
+	if info.Port == 0 {
+		return fmt.Errorf("serve.json missing port")
+	}
+
+	body, err := json.Marshal(map[string]any{
 		"content": message,
-		"meta":    map[string]string{"source": "job_runner", "type": "job_completed"},
+		"meta":    meta,
 	})
-	apiURL := fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, apiURL,
-		strings.NewReader(string(body)))
 	if err != nil {
-		return
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port), bytes.NewReader(body))
+	if err != nil {
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("channel send failed: %s", strings.TrimSpace(string(limited)))
+	}
+	return nil
 }
 
 func (s *Service) failPreparedJobLifecycle(ctx context.Context, job *core.JobRecord, turn *core.TurnRecord, message string) error {

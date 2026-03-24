@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/yusefmosiah/fase/internal/channelmeta"
 )
 
 type reportInput struct {
@@ -21,12 +22,9 @@ func registerChannelTools(server *mcp.Server, mcpSrv *Server) {
 		if msg == "" {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "error: message must not be empty"}}}, nil, nil
 		}
-		msgType := input.Type
-		if msgType == "" {
-			msgType = "info"
-		}
+		msgType := channelmeta.NormalizeWorkerReportType(input.Type)
 
-		if err := mcpSrv.SendChannelEvent(msg, map[string]string{"source": "agent", "type": msgType}); err != nil {
+		if err := mcpSrv.SendChannelEvent(msg, channelmeta.WorkerReportMeta(msgType)); err != nil {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "error: " + err.Error()}}}, nil, nil
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Report sent."}}}, nil, nil
