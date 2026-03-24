@@ -1,6 +1,6 @@
 # Model Selection Strategy
 
-**Status**: Current as of 2026-03-22. Update when provider budgets change.
+**Status**: Current as of 2026-03-24. Update when provider budgets change.
 
 ## Overview
 
@@ -85,11 +85,10 @@ The automated checker pool (`dispatchChecker` in `service/service.go:2827`) sele
 var checkerModels = []struct{ adapter, model string }{
     {"claude", "claude-opus-4-6"},
     {"claude", "claude-sonnet-4-6"},
-    {"native", "bedrock/claude-sonnet-4-6"},
 }
 ```
 
-All checkers use Claude adapters (MCP tool access required for `check_record_create`). GLM cannot be a checker.
+All checkers use `claude` adapter — MCP tool access is required for `check_record_create`. Bedrock native adapter was removed from the checker pool (2026-03-24) because native Bedrock models cannot use MCP tools. GLM cannot be a checker either (no MCP, no vision).
 
 ## Dispatch Selection Logic
 
@@ -115,26 +114,37 @@ var workRotation = []rotationEntry{
 }
 ```
 
-**Note**: This rotation includes OpenAI models. The supervisor should apply role-based overrides (see below) to avoid burning OpenAI budget on workers.
+**Note**: This rotation includes OpenAI models. The supervisor must avoid dispatching workers via `chatgpt/*` entries — reserve those for the supervisor itself only. Use `preferred_adapters`/`preferred_models` overrides or update `workRotation` to remove OpenAI worker entries.
 
 ## Provider Failover
 
 When a provider is depleted, the supervisor (acting as queue manager) should:
 
-1. **Detect depletion**: rate-limit errors show as failed jobs or error turn outcomes
-2. **Apply fallback**: route work to the next available provider in priority order
-3. **Notify host**: escalate via `notifyHost()` if all providers for a role are depleted
+1. **Detect depletion**: rate-limit errors show as failed jobs or error turn outcomes (job state `failed`, error message contains rate-limit or quota language)
+2. **Apply fallback**: route work to the next available provider in priority order via `preferred_adapters`/`preferred_models` on the work item or dispatch call
+3. **Notify host**: escalate via `send_escalation_email` if all providers for a role are depleted
 
 **Failover chains by role:**
 
 ```
-Worker:         glm-5-turbo → claude-haiku → bedrock/claude-haiku → sonnet (expensive)
-Supervisor:     claude-sonnet → gpt-5.4-mini → pause+notify
-E2E Attestation: claude-opus → gpt-5.4 → bedrock/claude-opus → block (cannot degrade)
-Planning:       claude-opus → gpt-5.4 → bedrock/claude-opus
+Worker:          native/zai/glm-5-turbo → claude/claude-haiku-4-5 → native/bedrock/claude-haiku-4-5 → claude/claude-sonnet-4-6 (expensive last resort)
+Supervisor:      claude/claude-sonnet-4-6 → native/chatgpt/gpt-5.4-mini → pause + notify host
+E2E Attestation: claude/claude-opus-4-6 → native/chatgpt/gpt-5.4 → native/bedrock/claude-opus-4-6 → block (cannot degrade to non-vision model)
+Planning:        claude/claude-opus-4-6 → native/chatgpt/gpt-5.4 → native/bedrock/claude-opus-4-6
+Non-E2E Attest:  claude/claude-haiku-4-5 → native/zai/glm-5-turbo → native/bedrock/claude-haiku-4-5
 ```
 
-**Current gap**: Provider failover is not yet automated in code. The supervisor LLM applies failover via prompt instructions. A `work_01KMC3TFM90ZXXTZZV4ESP417N` fix item exists for stall detection; provider failover should be tracked separately.
+**Supervisor dispatch rules** (applied at dispatch time):
+
+| Signal | Action |
+|--------|--------|
+| Job failed with rate-limit error | Re-dispatch same work with next provider in failover chain |
+| Same provider fails twice in a row | Mark provider depleted for this session; skip in dispatch |
+| Work item requires multimodal (e2e attest) | Never route to GLM, even if Claude/GPT depleted |
+| OpenAI budget conserved | Never use `chatgpt/*` models as workers; supervisor only |
+| All providers for a role exhausted | Call `send_escalation_email`; block work items of that role |
+
+**Current state**: Provider failover is not yet automated in Go code (`supervisor.go` / `service.go`). The supervisor LLM applies failover via prompt instructions from this document. The stall-detection fix (`work_01KMC3TFM90ZXXTZZV4ESP417N`) is a prerequisite for reliable automated failover.
 
 ## Model Capabilities Reference
 
@@ -182,8 +192,10 @@ fase work update <id> --preferred-adapters native --preferred-models zai/glm-5-t
 
 The dispatch logic respects these fields (priority #1 in selection).
 
-## Open Questions
+## Decisions (resolved)
 
-1. **Automated failover**: Should `dispatchChecker` / the supervisor loop detect rate-limit errors and retry with a different model? Currently the supervisor LLM handles this via instruction, but a Go-level circuit breaker would be more reliable.
-2. **OpenAI in workRotation**: The rotation pool includes `chatgpt/gpt-5.4-mini` as a worker. Should it be removed from the pool and reserved only for the supervisor? This would require updating `workRotation` in `supervisor.go`.
-3. **Bedrock as default**: Bedrock is pay-per-use with no hard limit. Should it be promoted higher in the rotation as a safety net when cloud provider limits are hit?
+1. **Automated failover** (resolved 2026-03-24): The supervisor LLM applies failover via prompt instructions using the failover chains above. A Go-level circuit breaker is tracked as future work, blocked on `work_01KMC3TFM90ZXXTZZV4ESP417N` (stall detection). Until then, the supervisor must detect rate-limit errors in job outcomes and re-dispatch with the next provider.
+
+2. **OpenAI in workRotation** (resolved 2026-03-24): **Remove `chatgpt/*` entries from `workRotation`** — OpenAI budget must be conserved for the supervisor (gpt-5.4-mini). Workers must never use ChatGPT models. Implementation work item needed to update `workRotation` in `internal/cli/supervisor.go`.
+
+3. **Bedrock as default** (resolved 2026-03-24): Bedrock stays as **failover tier 3**, not promoted to primary. Pay-per-use cost is acceptable as fallback but GLM is unlimited and free — GLM should remain the primary worker pool. Bedrock is promoted only when both GLM and claude.ai are unavailable.
