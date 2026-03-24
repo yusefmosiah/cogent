@@ -2945,7 +2945,6 @@ func (s *Service) SetWorkLock(ctx context.Context, workID string, lockState core
 var checkerModels = []struct{ adapter, model string }{
 	{"claude", "claude-opus-4-6"},
 	{"claude", "claude-sonnet-4-6"},
-	{"native", "bedrock/claude-sonnet-4-6"},
 }
 
 // dispatchChecker spawns a checker job for the given work item.
