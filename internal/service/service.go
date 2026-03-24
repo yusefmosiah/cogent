@@ -4310,6 +4310,8 @@ func (s *Service) applySupersedeProposal(ctx context.Context, proposal core.Work
 // This is the explicit audited escalation path for VAL-CONTRACT-003: post-freeze changes
 // may only make the contract stricter, and must flow through this explicit path rather than
 // silent in-place mutation.
+// Per ADR-0036: escalation fields (EscalatedAt, EscalationBy, EscalationReason) are set on
+// newly added attestation slots to distinguish them from original slots.
 func (s *Service) applyEscalateContractProposal(ctx context.Context, proposal core.WorkProposalRecord, now time.Time) error {
 	targetID := proposal.TargetWorkID
 	if targetID == "" {
@@ -4337,6 +4339,29 @@ func (s *Service) applyEscalateContractProposal(ctx context.Context, proposal co
 		return fmt.Errorf("%w: contract escalation must add stricter requirements, not weaken existing contract", ErrInvalidInput)
 	}
 
+	// Build a set of existing attestation keys to identify which are new (need escalation fields)
+	existingKeys := make(map[string]bool)
+	for _, att := range work.RequiredAttestations {
+		key := att.VerifierKind + ":" + att.Method
+		existingKeys[key] = true
+	}
+
+	// Set escalation fields on new attestation slots only (per ADR-0036)
+	// Original slots retain nil escalation fields; new slots get them populated
+	escalationTime := now
+	escalationBy := proposal.CreatedBy
+	escalationReason := proposal.Rationale
+
+	for i := range newAttestations {
+		key := newAttestations[i].VerifierKind + ":" + newAttestations[i].Method
+		if !existingKeys[key] {
+			// This is a new attestation slot - set escalation fields
+			newAttestations[i].EscalatedAt = &escalationTime
+			newAttestations[i].EscalationBy = escalationBy
+			newAttestations[i].EscalationReason = escalationReason
+		}
+	}
+
 	// Apply the stricter requirements and record the escalation
 	work.RequiredAttestations = newAttestations
 	work.UpdatedAt = now
@@ -4357,12 +4382,8 @@ func (s *Service) applyEscalateContractProposal(ctx context.Context, proposal co
 
 // isStricterContract checks if new requirements are stricter than existing ones.
 // A stricter contract adds more required attestations or makes non-blocking ones blocking.
+// Per ADR-0036: "A stricter contract adds more required attestations or makes non-blocking ones blocking"
 func isStricterContract(existing, proposed []core.RequiredAttestation) bool {
-	if len(proposed) <= len(existing) {
-		// Cannot be stricter if we're not adding more requirements
-		return false
-	}
-
 	// Build a map of existing requirements by verifier_kind + method
 	existingReqs := make(map[string]core.RequiredAttestation)
 	for _, att := range existing {
@@ -4370,7 +4391,11 @@ func isStricterContract(existing, proposed []core.RequiredAttestation) bool {
 		existingReqs[key] = att
 	}
 
-	// Check that all existing requirements are still present (possibly with more blocking=true)
+	// Track if we found any stricter changes (new requirements or blocking-flag tightening)
+	hasNewRequirement := false
+	hasBlockingTightening := false
+
+	// Check that all proposed requirements are accounted for
 	for _, newAtt := range proposed {
 		key := newAtt.VerifierKind + ":" + newAtt.Method
 		if existingAtt, exists := existingReqs[key]; exists {
@@ -4378,19 +4403,31 @@ func isStricterContract(existing, proposed []core.RequiredAttestation) bool {
 			// (i.e., if it was blocking, it should still be blocking)
 			if !existingAtt.Blocking && newAtt.Blocking {
 				// Making a non-blocking requirement blocking is stricter - OK
-				continue
-			}
-			// If existing was blocking and new is also blocking, that's fine
-			// If existing was not blocking and new is not blocking, that's OK (added new non-blocking)
-			// But if existing was blocking and new is not blocking - that's weaker, not allowed
-			if existingAtt.Blocking && !newAtt.Blocking {
+				hasBlockingTightening = true
+			} else if existingAtt.Blocking && !newAtt.Blocking {
+				// Weakening: blocking → non-blocking is NOT allowed
 				return false
 			}
+			// If both are blocking or both are non-blocking, that's fine (no change)
+		} else {
+			// New requirement - OK (adding new requirements is stricter)
+			hasNewRequirement = true
 		}
-		// New requirement - OK (adding new requirements is stricter)
 	}
 
-	return true
+	// Must have at least one stricter change: either new requirements or blocking-flag tightening
+	// Also ensure we didn't remove any existing requirements
+	if len(proposed) < len(existing) {
+		// Proposed has fewer requirements than existing - we removed something (weakening)
+		return false
+	}
+
+	// If same length, must have at least one blocking-flag tightening
+	if len(proposed) == len(existing) && !hasBlockingTightening {
+		return false
+	}
+
+	return hasNewRequirement || hasBlockingTightening
 }
 
 // summaryAttestations extracts RequiredAttestations from a proposal patch.

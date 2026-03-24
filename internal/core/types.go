@@ -337,10 +337,15 @@ const (
 )
 
 type RequiredAttestation struct {
-	VerifierKind string         `json:"verifier_kind,omitempty"`
-	Method       string         `json:"method,omitempty"`
-	Blocking     bool           `json:"blocking,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	VerifierKind      string         `json:"verifier_kind,omitempty"`
+	Method            string         `json:"method,omitempty"`
+	Blocking          bool           `json:"blocking,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+	// Escalation fields — nil on original slots, set on escalated slots
+	// Per ADR-0036: these fields distinguish original requirements from post-freeze escalations
+	EscalatedAt      *time.Time `json:"escalated_at,omitempty"`
+	EscalationBy     string     `json:"escalation_by,omitempty"`
+	EscalationReason string     `json:"escalation_reason,omitempty"`
 }
 
 type WorkItemRecord struct {
