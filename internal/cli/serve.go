@@ -362,7 +362,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runChangeWatcher(ctx, svc, hub)
+		runChangeWatcher(ctx, svc, hub, cwd)
 	}()
 
 	// Start agentic supervisor goroutine (ADR-0041)
@@ -648,7 +648,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 	}
 }
 
-func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub) {
+func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub, repoRoot string) {
 	ch := svc.Events.Subscribe()
 	defer svc.Events.Unsubscribe(ch)
 
@@ -669,6 +669,28 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub) {
 					hub.broadcast("job_started", event)
 				case "done":
 					hub.broadcast("job_completed", event)
+					// Merge worktree branch into main after attestation pass.
+					if ev.WorkID != "" && repoRoot != "" {
+						go func(workID string) {
+							worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
+							if _, statErr := os.Stat(worktreeDir); statErr == nil {
+								if mergeErr := mergeWorktree(repoRoot, workID); mergeErr != nil {
+									fmt.Fprintf(os.Stderr, "worktree merge failed for %s: %v — cleaning up\n", workID, mergeErr)
+									cleanupWorktree(repoRoot, workID)
+								}
+							}
+						}(ev.WorkID)
+					}
+				case "failed", "cancelled":
+					// Cleanup worktree without merging on failure.
+					if ev.WorkID != "" && repoRoot != "" {
+						go func(workID string) {
+							worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
+							if _, statErr := os.Stat(worktreeDir); statErr == nil {
+								cleanupWorktree(repoRoot, workID)
+							}
+						}(ev.WorkID)
+					}
 				}
 			}
 
@@ -959,14 +981,15 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			return
 		}
 
-		// Concurrency guard
+		// Concurrency guard — worktrees allow parallel workers, cap at 4.
+		const maxParallelWorkers = 4
 		if !req.Force {
 			inProgress, _ := svc.ListWork(r.Context(), service.WorkListRequest{
-				Limit:          10,
+				Limit:          maxParallelWorkers + 1,
 				ExecutionState: string(core.WorkExecutionStateInProgress),
 			})
-			if len(inProgress) > 0 {
-				writeJSONHTTP(w, 409, map[string]string{"error": fmt.Sprintf("concurrency guard: %d work item(s) already in progress (use force to override)", len(inProgress))})
+			if len(inProgress) >= maxParallelWorkers {
+				writeJSONHTTP(w, 409, map[string]string{"error": fmt.Sprintf("concurrency guard: %d work item(s) already in progress (max %d, use force to override)", len(inProgress), maxParallelWorkers)})
 				return
 			}
 		}
