@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1017,6 +1019,130 @@ func TestWorkArchiveCommands(t *testing.T) {
 	}
 }
 
+func TestDispatchCompletionNotificationReachesMCPProxy(t *testing.T) {
+	binary := buildFaseBinary(t)
+
+	projectDir := t.TempDir()
+	configDir := t.TempDir()
+	stateDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	fakeBinary, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake_clis", "claude"))
+	if err != nil {
+		t.Fatalf("resolve fake claude path: %v", err)
+	}
+	if err := os.Chmod(fakeBinary, 0o755); err != nil {
+		t.Fatalf("chmod fake claude: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	configBody := []byte("[store]\nstate_dir = \"" + stateDir + "\"\n\n[adapters.claude]\nbinary = \"" + fakeBinary + "\"\nenabled = true\n")
+	if err := os.WriteFile(configPath, configBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	env := append(os.Environ(),
+		"FASE_CAPABILITY_ENFORCEMENT=audit",
+		"FASE_AGENT_TOKEN=",
+		"FASE_CONFIG_DIR="+configDir,
+		"FASE_STATE_DIR="+stateDir,
+		"FASE_CACHE_DIR="+cacheDir,
+	)
+
+	serveCmd := exec.Command(binary, "--config", configPath, "serve", "--no-ui", "--no-browser")
+	serveCmd.Dir = projectDir
+	serveCmd.Env = env
+	var serveLogs bytes.Buffer
+	serveCmd.Stdout = &serveLogs
+	serveCmd.Stderr = &serveLogs
+	if err := serveCmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		if serveCmd.Process != nil {
+			_ = serveCmd.Process.Kill()
+			_, _ = serveCmd.Process.Wait()
+		}
+	})
+
+	waitForFile(t, filepath.Join(stateDir, "serve.json"), 10*time.Second, func() string {
+		return serveLogs.String()
+	})
+
+	proxyCmd := exec.Command(binary, "--config", configPath, "mcp", "proxy")
+	proxyCmd.Dir = projectDir
+	proxyCmd.Env = env
+	proxyStdin, err := proxyCmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("proxy stdin pipe: %v", err)
+	}
+	proxyStdout, err := proxyCmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("proxy stdout pipe: %v", err)
+	}
+	var proxyStderr bytes.Buffer
+	proxyCmd.Stderr = &proxyStderr
+	if err := proxyCmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = proxyStdin.Close()
+		if proxyCmd.Process != nil {
+			_ = proxyCmd.Process.Kill()
+			_, _ = proxyCmd.Process.Wait()
+		}
+	})
+
+	proxyLines := make(chan string, 32)
+	go func() {
+		scanner := bufio.NewScanner(proxyStdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			proxyLines <- scanner.Text()
+		}
+		close(proxyLines)
+	}()
+
+	workOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "create", "--title", "Proxy relay test", "--objective", "Verify completion notification relay", "--kind", "plan")
+	var work cliWorkItem
+	if err := json.Unmarshal([]byte(workOutput), &work); err != nil {
+		t.Fatalf("unmarshal work create: %v\n%s", err, workOutput)
+	}
+
+	dispatchOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "dispatch", work.WorkID, "--adapter", "claude")
+	var dispatch struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal([]byte(dispatchOutput), &dispatch); err != nil {
+		t.Fatalf("unmarshal dispatch output: %v\n%s", err, dispatchOutput)
+	}
+	if dispatch.JobID == "" {
+		t.Fatalf("dispatch returned no job id: %s", dispatchOutput)
+	}
+
+	waitForJobStateWithEnv(t, binary, configPath, projectDir, env, dispatch.JobID, map[string]bool{"completed": true})
+
+	line := waitForProxyNotification(t, proxyLines, 15*time.Second, dispatch.JobID, func() string {
+		return "proxy stderr:\n" + proxyStderr.String() + "\nserve logs:\n" + serveLogs.String()
+	})
+
+	var notification struct {
+		Params struct {
+			Content string            `json:"content"`
+			Meta    map[string]string `json:"meta"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &notification); err != nil {
+		t.Fatalf("unmarshal proxy notification: %v\n%s", err, line)
+	}
+	if notification.Params.Meta["source"] != "job_runner" {
+		t.Fatalf("expected job_runner source, got %#v", notification.Params.Meta)
+	}
+	if notification.Params.Meta["type"] != "job_completed" {
+		t.Fatalf("expected job_completed type, got %#v", notification.Params.Meta)
+	}
+}
+
 func buildFaseBinary(t *testing.T) string {
 	t.Helper()
 
@@ -1179,8 +1305,20 @@ func runFase(t *testing.T, binary, configPath string, args ...string) string {
 	cmd.Env = append(os.Environ(),
 		"FASE_CAPABILITY_ENFORCEMENT=audit",
 		"FASE_AGENT_TOKEN=",
-
 	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run fase %v: %v\n%s", args, err, output)
+	}
+	return string(output)
+}
+
+func runFaseWithEnv(t *testing.T, binary, configPath, dir string, env []string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command(binary, append([]string{"--config", configPath}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run fase %v: %v\n%s", args, err, output)
@@ -1195,7 +1333,6 @@ func runFaseExpectError(t *testing.T, binary, configPath string, args ...string)
 	cmd.Env = append(os.Environ(),
 		"FASE_CAPABILITY_ENFORCEMENT=audit",
 		"FASE_AGENT_TOKEN=",
-
 	)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
@@ -1224,4 +1361,70 @@ func waitForJobState(t *testing.T, binary, configPath, jobID string, allowed map
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("job %s did not reach expected state set %v", jobID, allowed)
+}
+
+func waitForJobStateWithEnv(t *testing.T, binary, configPath, dir string, env []string, jobID string, allowed map[string]bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		output := runFaseWithEnv(t, binary, configPath, dir, env, "--json", "status", jobID)
+		var status cliStatusResult
+		if err := json.Unmarshal([]byte(output), &status); err != nil {
+			t.Fatalf("unmarshal status: %v\n%s", err, output)
+		}
+		if allowed[status.Job.State] {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not reach expected state set %v", jobID, allowed)
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration, logs func() string) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s\n%s", path, logs())
+}
+
+func waitForProxyNotification(t *testing.T, lines <-chan string, timeout time.Duration, jobID string, logs func() string) string {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatalf("proxy exited before notification arrived\n%s", logs())
+			}
+			if !strings.Contains(line, `"method":"notifications/claude/channel"`) {
+				continue
+			}
+			var notification struct {
+				Params struct {
+					Content string            `json:"content"`
+					Meta    map[string]string `json:"meta"`
+				} `json:"params"`
+			}
+			if err := json.Unmarshal([]byte(line), &notification); err != nil {
+				continue
+			}
+			if notification.Params.Meta["source"] == "job_runner" &&
+				notification.Params.Meta["type"] == "job_completed" &&
+				strings.Contains(notification.Params.Content, "[job "+jobID+"] job.completed:") {
+				return line
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for proxy notification for %s\n%s", jobID, logs())
+		}
+	}
 }

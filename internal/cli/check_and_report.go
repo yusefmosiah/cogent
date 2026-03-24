@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/yusefmosiah/fase/internal/channelmeta"
 )
 
 func newCheckCommand(root *rootOptions) *cobra.Command {
@@ -160,12 +161,10 @@ func newReportCommand(_ *rootOptions) *cobra.Command {
 				return err
 			}
 			msg := strings.Join(args, " ")
-			if msgType == "" {
-				msgType = "info"
-			}
+			msgType = channelmeta.NormalizeWorkerReportType(msgType)
 			data, err := c.doPost("/api/channel/send", map[string]any{
 				"content": msg,
-				"meta":    map[string]string{"source": "worker", "type": msgType},
+				"meta":    channelmeta.WorkerReportMeta(msgType),
 			})
 			if err != nil {
 				return err
