@@ -1726,6 +1726,7 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 		fmt.Sprintf("REQUIRED on success: %s", updateDoneCmd),
 		fmt.Sprintf("REQUIRED on failure: %s", updateFailCmd),
 		"You MUST call one of the above before exiting. The supervisor cannot see your work otherwise.",
+		"REQUIRED: Call notify_host with a summary of what you did before exiting. Include: what files you changed, whether tests pass, and any issues found. This is how the supervisor and host know your work is done.",
 		"Record notes for findings, risks, and open questions.",
 		"Run verification (tests, builds) and report results as notes.",
 		"If the work involves a web UI: you MUST add e2e tests (default: Playwright) covering all interactive features (buttons, drag, resize, navigation). Backend tests alone are insufficient — they cannot catch broken UI behavior.",
@@ -2226,6 +2227,7 @@ func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
 		b.WriteString("## Dispatch Protocol\n\n")
 		renderProtoSection("Dispatch Flow", "dispatch_flow")
 		renderProtoSection("Attestation Flow", "attestation_flow")
+		renderProtoSection("Communication", "communication")
 		renderProtoSection("Error Handling", "error_handling")
 		renderProtoSection("Concurrency Rules", "concurrency_rules")
 		renderProtoSection("Work Creation Rules", "work_creation_rules")
@@ -2263,9 +2265,15 @@ func supervisorDispatchProtocol() map[string]any {
 			"4. If the work meets the objective, attest it (fase work attest <work-id> --verdict approve).",
 			"5. If the work needs revision, update it back to ready with feedback.",
 		},
+		"communication": []string{
+			"REQUIRED: After each action (dispatch, attest, merge), call notify_host with a structured status update.",
+			"Format: '[action] work_title — result. Details.' Example: '[dispatched] Fix RSS sources — sent to claude/haiku. [attested] Search fix — passed, merging.'",
+			"On errors or repeated failures, call notify_host with type=escalation.",
+			"The host relies on these messages to monitor progress without checking the dashboard.",
+		},
 		"error_handling": []string{
 			"If a worker fails, the item returns to ready state — it will be redispatched.",
-			"If a worker stalls (no output for 10 minutes), housekeeping marks it failed.",
+			"If a worker stalls (no output for 30 minutes), housekeeping notifies you.",
 			"If an adapter is unavailable, try the next adapter in rotation.",
 		},
 		"concurrency_rules": []string{
