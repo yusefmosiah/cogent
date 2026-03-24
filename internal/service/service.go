@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -4537,7 +4538,40 @@ func (s *Service) startPreparedJobLifecycle(
 		return message, err
 	}
 
+	// Report job completion to supervisor/host via channel notification.
+	// This ensures the dispatch loop always gets notified, even if the
+	// worker LLM didn't call report itself.
+	reportMsg := fmt.Sprintf("[job %s] %s: %s (work: %s)", job.JobID, terminalEvent, message, job.WorkID)
+	s.reportJobCompletion(reportMsg)
+
 	return message, runErr
+}
+
+// reportJobCompletion sends a channel notification about job completion.
+// Uses serve's HTTP API to reach the host via the MCP proxy channel.
+func (s *Service) reportJobCompletion(message string) {
+	// Find serve port from serve.json
+	stateDir := s.Paths.StateDir
+	serveJSONPath := filepath.Join(stateDir, "serve.json")
+	data, err := os.ReadFile(serveJSONPath)
+	if err != nil {
+		return
+	}
+	var info struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil || info.Port == 0 {
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"content": message,
+		"meta":    map[string]string{"source": "job_runner", "type": "job_completed"},
+	})
+	url := fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port)
+	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 func (s *Service) failPreparedJobLifecycle(ctx context.Context, job *core.JobRecord, turn *core.TurnRecord, message string) error {
