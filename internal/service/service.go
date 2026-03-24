@@ -2961,24 +2961,25 @@ func (s *Service) dispatchChecker(ctx context.Context, work core.WorkItemRecord)
 	// Use the last job's CWD as the worktree path.
 	// Fallback: repo root derived from state dir (strip ".fase" suffix).
 	cwd := filepath.Dir(s.Paths.StateDir)
-	workerAdapter := ""
 	workerModel := ""
 	if len(jobs) > 0 {
 		lastJob := jobs[0]
 		if lastJob.CWD != "" {
 			cwd = lastJob.CWD
 		}
-		workerAdapter = lastJob.Adapter
+		_ = lastJob.Adapter // kept for future use
 		if m, ok := lastJob.Summary["model"].(string); ok {
 			workerModel = m
 		}
 	}
 
-	// Pick a checker adapter+model that differs from the worker's last model.
+	// Pick a checker model that differs from the worker's last model.
+	// Only require the model to differ — same adapter is fine (avoids
+	// skipping claude/opus just because the worker also used claude adapter).
 	checkerAdapter := checkerModels[0].adapter
 	checkerModel := checkerModels[0].model
 	for _, cm := range checkerModels {
-		if cm.adapter != workerAdapter && cm.model != workerModel {
+		if cm.model != workerModel {
 			checkerAdapter = cm.adapter
 			checkerModel = cm.model
 			break
