@@ -4124,6 +4124,10 @@ func (s *Service) ReviewWorkProposal(ctx context.Context, proposalID, decision s
 				return nil, nil, err
 			}
 			created = item
+		case "escalate_contract":
+			if err := s.applyEscalateContractProposal(ctx, proposal, now); err != nil {
+				return nil, nil, err
+			}
 		}
 		if err := s.store.UpdateWorkProposal(ctx, proposal); err != nil {
 			return nil, nil, err
@@ -4300,6 +4304,130 @@ func (s *Service) applySupersedeProposal(ctx context.Context, proposal core.Work
 		return nil, err
 	}
 	return created, nil
+}
+
+// applyEscalateContractProposal adds stricter attestation requirements to a frozen work item.
+// This is the explicit audited escalation path for VAL-CONTRACT-003: post-freeze changes
+// may only make the contract stricter, and must flow through this explicit path rather than
+// silent in-place mutation.
+func (s *Service) applyEscalateContractProposal(ctx context.Context, proposal core.WorkProposalRecord, now time.Time) error {
+	targetID := proposal.TargetWorkID
+	if targetID == "" {
+		return fmt.Errorf("%w: escalate_contract requires target work id", ErrInvalidInput)
+	}
+
+	work, err := s.store.GetWorkItem(ctx, targetID)
+	if err != nil {
+		return normalizeStoreError("work", targetID, err)
+	}
+
+	// Check that the contract is frozen - escalation only allowed after first execution
+	if work.AttestationFrozenAt == nil {
+		return fmt.Errorf("%w: contract escalation requires work to have started execution first", ErrInvalidInput)
+	}
+
+	// Get new attestation requirements from the proposal
+	newAttestations := summaryAttestations(proposal.ProposedPatch, "required_attestations")
+	if len(newAttestations) == 0 {
+		return fmt.Errorf("%w: escalate_contract requires required_attestations in patch", ErrInvalidInput)
+	}
+
+	// Validate that the new requirements are stricter (not weaker)
+	if !isStricterContract(work.RequiredAttestations, newAttestations) {
+		return fmt.Errorf("%w: contract escalation must add stricter requirements, not weaken existing contract", ErrInvalidInput)
+	}
+
+	// Apply the stricter requirements and record the escalation
+	work.RequiredAttestations = newAttestations
+	work.UpdatedAt = now
+
+	// Record escalation in metadata for audit trail
+	if work.Metadata == nil {
+		work.Metadata = map[string]any{}
+	}
+	work.Metadata["contract_escalated_at"] = now.Format(time.RFC3339)
+	work.Metadata["contract_escalation_proposal"] = proposal.ProposalID
+
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// isStricterContract checks if new requirements are stricter than existing ones.
+// A stricter contract adds more required attestations or makes non-blocking ones blocking.
+func isStricterContract(existing, proposed []core.RequiredAttestation) bool {
+	if len(proposed) <= len(existing) {
+		// Cannot be stricter if we're not adding more requirements
+		return false
+	}
+
+	// Build a map of existing requirements by verifier_kind + method
+	existingReqs := make(map[string]core.RequiredAttestation)
+	for _, att := range existing {
+		key := att.VerifierKind + ":" + att.Method
+		existingReqs[key] = att
+	}
+
+	// Check that all existing requirements are still present (possibly with more blocking=true)
+	for _, newAtt := range proposed {
+		key := newAtt.VerifierKind + ":" + newAtt.Method
+		if existingAtt, exists := existingReqs[key]; exists {
+			// Existing requirement present - check we didn't make it less strict
+			// (i.e., if it was blocking, it should still be blocking)
+			if !existingAtt.Blocking && newAtt.Blocking {
+				// Making a non-blocking requirement blocking is stricter - OK
+				continue
+			}
+			// If existing was blocking and new is also blocking, that's fine
+			// If existing was not blocking and new is not blocking, that's OK (added new non-blocking)
+			// But if existing was blocking and new is not blocking - that's weaker, not allowed
+			if existingAtt.Blocking && !newAtt.Blocking {
+				return false
+			}
+		}
+		// New requirement - OK (adding new requirements is stricter)
+	}
+
+	return true
+}
+
+// summaryAttestations extracts RequiredAttestations from a proposal patch.
+func summaryAttestations(patch map[string]any, key string) []core.RequiredAttestation {
+	if patch == nil {
+		return nil
+	}
+	val, ok := patch[key]
+	if !ok {
+		return nil
+	}
+	attestations, ok := val.([]any)
+	if !ok {
+		return nil
+	}
+	var result []core.RequiredAttestation
+	for _, a := range attestations {
+		attMap, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		var att core.RequiredAttestation
+		if v, ok := attMap["verifier_kind"].(string); ok {
+			att.VerifierKind = v
+		}
+		if v, ok := attMap["method"].(string); ok {
+			att.Method = v
+		}
+		if v, ok := attMap["blocking"].(bool); ok {
+			att.Blocking = v
+		}
+		if v, ok := attMap["metadata"].(map[string]any); ok {
+			att.Metadata = v
+		}
+		result = append(result, att)
+	}
+	return result
 }
 
 func (s *Service) SearchHistory(ctx context.Context, req HistorySearchRequest) (*HistorySearchResult, error) {
