@@ -584,17 +584,30 @@ func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
 }
 
 // collectPlaywrightAttachments looks up the job CWD for the work item and
-// returns any PNG screenshots found in mind-graph/test-results/.
+// returns any PNG screenshots found in .fase/artifacts/<work-id>/screenshots/ or test-results directories.
 func (s *Service) collectPlaywrightAttachments(ctx context.Context, workID string) []notify.ResendEmailAttachment {
+	// First, try to find screenshots in the persistent artifacts directory.
 	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
 	if err != nil || len(jobs) == 0 {
 		return nil
 	}
 	cwd := verifyRepoPath(jobs)
+	if cwd != "" && cwd != "." {
+		// Try project root .fase/artifacts/<work-id>/screenshots/ first
+		out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+		if err == nil {
+			projectRoot := strings.TrimSpace(string(out))
+			screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+			if attachments := collectScreenshots(screenshotDir); len(attachments) > 0 {
+				return attachments
+			}
+		}
+	}
+
+	// Fallback: check multiple possible locations in the job CWD for Playwright artifacts.
 	if cwd == "" || cwd == "." {
 		return nil
 	}
-	// Check multiple possible locations for Playwright artifacts.
 	for _, subdir := range []string{"test-results", "tests/test-results", "mind-graph/test-results"} {
 		dir := filepath.Join(cwd, subdir)
 		if attachments := collectScreenshots(dir); len(attachments) > 0 {
@@ -652,6 +665,13 @@ func (s *Service) CreateCheckRecord(ctx context.Context, req CheckRecordCreateRe
 	if req.Result != "pass" && req.Result != "fail" {
 		return core.CheckRecord{}, fmt.Errorf("%w: result must be 'pass' or 'fail'", ErrInvalidInput)
 	}
+
+	// Persist screenshots from the check to the artifacts directory
+	// This ensures they remain available even after the worktree is cleaned
+	if len(req.Report.Screenshots) > 0 {
+		req.Report.Screenshots = s.persistCheckScreenshots(ctx, req.WorkID, req.Report.Screenshots)
+	}
+
 	rec := core.CheckRecord{
 		CheckID:      core.GenerateID("chk"),
 		WorkID:       req.WorkID,
@@ -688,6 +708,77 @@ func (s *Service) GetCheckRecord(ctx context.Context, checkID string) (core.Chec
 
 func (s *Service) ListCheckRecords(ctx context.Context, workID string, limit int) ([]core.CheckRecord, error) {
 	return s.store.ListCheckRecords(ctx, workID, limit)
+}
+
+// persistCheckScreenshots copies screenshot files from their source paths to the persistent
+// artifacts directory (.fase/artifacts/<work-id>/screenshots/) and returns the new paths.
+// This ensures screenshots remain available even after the worker's worktree is cleaned up.
+func (s *Service) persistCheckScreenshots(ctx context.Context, workID string, srcPaths []string) []string {
+	if len(srcPaths) == 0 {
+		return srcPaths
+	}
+
+	// Find the project root by looking at recent jobs for the work
+	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
+	if err != nil || len(jobs) == 0 {
+		// Can't find project root, return original paths
+		return srcPaths
+	}
+	cwd := verifyRepoPath(jobs)
+	if cwd == "" || cwd == "." {
+		return srcPaths
+	}
+
+	// Get the project root
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return srcPaths
+	}
+	projectRoot := strings.TrimSpace(string(out))
+
+	// Create the destination directory
+	destDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		// If we can't create the directory, just return original paths
+		return srcPaths
+	}
+
+	// Copy each screenshot file
+	var newPaths []string
+	for _, srcPath := range srcPaths {
+		// Skip invalid paths
+		if strings.TrimSpace(srcPath) == "" {
+			continue
+		}
+
+		// Read the source file
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			// If we can't read the file, include the original path anyway
+			// (it might still be accessible when needed)
+			newPaths = append(newPaths, srcPath)
+			continue
+		}
+
+		// Extract the filename
+		filename := filepath.Base(srcPath)
+		if filename == "" || filename == "." {
+			filename = "screenshot.png"
+		}
+
+		// Write to destination
+		destPath := filepath.Join(destDir, filename)
+		if err := os.WriteFile(destPath, data, 0644); err != nil {
+			// If we can't write the file, include the original path
+			newPaths = append(newPaths, srcPath)
+			continue
+		}
+
+		// Use the new persistent path
+		newPaths = append(newPaths, destPath)
+	}
+
+	return newPaths
 }
 
 // CreateCheckRecordDirect is an acyclic bridge for the native adapter's in-process tool registration.
@@ -2287,6 +2378,13 @@ func supervisorDispatchProtocol() map[string]any {
 			"On errors or repeated failures, report with type=escalation.",
 			"Use the report MCP tool or 'fase report \"message\"' CLI command.",
 		},
+		"model_preferences": []string{
+			"Workers: prefer zai/glm-5-turbo (fast, unlimited) or claude/claude-haiku-4-5 (quality). Use claude/claude-sonnet-4-6 for complex work.",
+			"Attestation: use claude-opus-4-6 or claude-sonnet-4-6 — strong models that can verify correctness.",
+			"AVOID bedrock adapter unless explicitly requested — use claude adapter for Claude models instead.",
+			"AVOID codex/chatgpt for workers unless other adapters are unavailable.",
+			"For UI/Playwright work: must use a multimodal model (Claude or GPT, not GLM).",
+		},
 		"error_handling": []string{
 			"If a worker fails: the item returns to ready state. Do not immediately redispatch — let the queue settle first.",
 			"If a worker stalls (no output for 30 minutes): housekeeping notifies you. Investigate before redispatching.",
@@ -2912,7 +3010,12 @@ You are a checker. Your job is to verify the worker's output independently and s
 1. Run the test suite: go test ./...
 2. Check that the build is clean: go build ./...
 3. Review the diff: git diff main...HEAD --stat
-4. Note any issues, warnings, or test failures
+4. Run Playwright tests (if the project has them): Use the run_playwright tool or 'npx playwright test --screenshot on'
+5. Note any issues, warnings, test failures, or visual regressions
+
+## Collecting Screenshots
+
+After running Playwright tests (if applicable), collect the screenshot paths. The run_playwright tool returns screenshots in its output. Include these paths in your check record via the screenshots parameter.
 
 ## Submitting Your Check Record
 
@@ -2925,6 +3028,7 @@ Call the check_record_create MCP tool with:
   - build_ok: true/false
   - tests_passed: <count>
   - tests_failed: <count>
+  - screenshots: [<list of absolute paths to PNG/JPG files>] (optional)
   - checker_notes: "<your observations>"
 
 ### Method B — CLI (for all adapters with bash access):
@@ -4565,6 +4669,8 @@ func (s *Service) startPreparedJobLifecycle(
 
 // reportJobCompletion sends a channel notification about job completion.
 // Uses serve's HTTP API to reach the host via the MCP proxy channel.
+// Best-effort: failures are silently dropped since the host can still
+// observe job state via polling.
 func (s *Service) reportJobCompletion(message string) {
 	// Find serve port from serve.json
 	stateDir := s.Paths.StateDir
@@ -4583,8 +4689,15 @@ func (s *Service) reportJobCompletion(message string) {
 		"content": message,
 		"meta":    map[string]string{"source": "job_runner", "type": "job_completed"},
 	})
-	url := fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port)
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+	apiURL := fmt.Sprintf("http://localhost:%d/api/channel/send", info.Port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, apiURL,
+		strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}

@@ -289,6 +289,9 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 
 	// MCP endpoint — same work graph tools as `fase mcp http`
 	mcpServer := mcpserver.New(svc)
+	// Route channel notifications through the WebSocket hub so the MCP proxy
+	// can relay them as notifications/claude/channel to Claude Code.
+	mcpServer.SetBroadcastFunc(hub.broadcast)
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
 		return mcpServer.MCP
 	}, nil))
@@ -311,16 +314,12 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 			writeJSONHTTP(w, 400, map[string]string{"error": "content must not be empty"})
 			return
 		}
+		// SendChannelEvent routes via hub.broadcast (registered above), which
+		// the MCP proxy's WebSocket listener relays to Claude Code.
 		if err := mcpServer.SendChannelEvent(req.Content, req.Meta); err != nil {
 			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
-		// Broadcast to WebSocket — proxy relays as claude/channel notification.
-		broadcastData := map[string]any{"content": req.Content}
-		if len(req.Meta) > 0 {
-			broadcastData["meta"] = req.Meta
-		}
-		hub.broadcast("channel_message", broadcastData)
 		writeJSONHTTP(w, 200, map[string]string{"status": "sent"})
 	})
 

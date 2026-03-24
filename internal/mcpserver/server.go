@@ -18,10 +18,14 @@ type Server struct {
 	MCP *mcp.Server
 	svc *service.Service
 
-	// mu protects writes to the stdio connection so channel notifications
+	// mu protects w, broadcastFn, and stdio writes so channel notifications
 	// don't interleave with MCP protocol messages.
 	mu sync.Mutex
 	w  io.Writer
+
+	// broadcastFn, when set, routes channel events through the WebSocket hub
+	// (serve mode). When nil, events are written to w directly (stdio mode).
+	broadcastFn func(string, any)
 }
 
 // New creates an MCP server backed by the given service.
@@ -50,6 +54,16 @@ func (s *Server) SetWriter(w io.Writer) {
 	s.w = w
 }
 
+// SetBroadcastFunc registers a broadcast function for serve mode. When set,
+// SendChannelEvent routes channel events through this function (which should
+// call hub.broadcast) instead of writing to w. The MCP proxy's WebSocket
+// listener then relays them as notifications/claude/channel to Claude Code.
+func (s *Server) SetBroadcastFunc(fn func(string, any)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.broadcastFn = fn
+}
+
 // channelNotification is a JSON-RPC notification for claude/channel.
 type channelNotification struct {
 	JSONRPC string              `json:"jsonrpc"`
@@ -63,7 +77,26 @@ type channelNotifyParams struct {
 }
 
 // SendChannelEvent pushes a channel event to the connected Claude Code session.
+// In serve mode (broadcastFn set): routes via WebSocket hub so the MCP proxy
+// can relay it as notifications/claude/channel. In stdio mode: writes directly.
 func (s *Server) SendChannelEvent(content string, meta map[string]string) error {
+	s.mu.Lock()
+	fn := s.broadcastFn
+	s.mu.Unlock()
+
+	if fn != nil {
+		// Serve/proxy mode: broadcast via WebSocket hub. The proxy's
+		// listenWebSocketChannels goroutine converts channel_message events
+		// to notifications/claude/channel on its stdout.
+		payload := map[string]any{"content": content}
+		if len(meta) > 0 {
+			payload["meta"] = meta
+		}
+		fn("channel_message", payload)
+		return nil
+	}
+
+	// Stdio mode: write JSON-RPC notification directly to the transport writer.
 	msg := channelNotification{
 		JSONRPC: "2.0",
 		Method:  "notifications/claude/channel",
