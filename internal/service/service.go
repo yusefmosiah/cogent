@@ -7760,6 +7760,10 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 	// Only publish if the state actually changed — prevents stale event replay
 	// when syncWorkStateFromJob is called repeatedly for the same terminal job.
 	if string(work.ExecutionState) != prevState {
+		actor := ActorService
+		if job.Label == "supervisor" {
+			actor = ActorSupervisor
+		}
 		s.Events.Publish(WorkEvent{
 			Kind:      WorkEventUpdated,
 			WorkID:    work.WorkID,
@@ -7767,7 +7771,7 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 			State:     string(work.ExecutionState),
 			PrevState: prevState,
 			JobID:     job.JobID,
-			Actor:     ActorService,
+			Actor:     actor,
 			Cause:     CauseJobLifecycle,
 		})
 	}
