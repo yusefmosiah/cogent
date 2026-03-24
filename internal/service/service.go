@@ -610,7 +610,24 @@ func (s *Service) collectScreenshotPaths(ctx context.Context, workID string, cr 
 	return paths
 }
 
-// findProjectRoot finds the git root from the job CWD for a work item.
+// gitMainRepoRoot returns the main repository root from any path in the repo or a worktree.
+// Worktrees in this project follow the pattern <mainRepo>/.fase/worktrees/<workID>.
+// Unlike "git rev-parse --show-toplevel", this always returns the main repo root.
+func gitMainRepoRoot(ctx context.Context, cwd string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	top := strings.TrimSpace(string(out))
+	// Strip worktree suffix: <mainRepo>/.fase/worktrees/<workID> → <mainRepo>
+	const worktreeMarker = string(os.PathSeparator) + ".fase" + string(os.PathSeparator) + "worktrees" + string(os.PathSeparator)
+	if idx := strings.Index(top, worktreeMarker); idx >= 0 {
+		return top[:idx], nil
+	}
+	return top, nil
+}
+
+// findProjectRoot finds the main git repo root from the job CWD for a work item.
 func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
 	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
 	if err != nil || len(jobs) == 0 {
@@ -620,11 +637,11 @@ func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
 	if cwd == "" || cwd == "." {
 		return ""
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	root, err := gitMainRepoRoot(ctx, cwd)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return root
 }
 
 // collectPlaywrightAttachments looks up the job CWD for the work item and
@@ -637,10 +654,9 @@ func (s *Service) collectPlaywrightAttachments(ctx context.Context, workID strin
 	}
 	cwd := verifyRepoPath(jobs)
 	if cwd != "" && cwd != "." {
-		// Try project root .fase/artifacts/<work-id>/screenshots/ first
-		out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
-		if err == nil {
-			projectRoot := strings.TrimSpace(string(out))
+		// Try main project root .fase/artifacts/<work-id>/screenshots/ first.
+		// Use gitMainRepoRoot so worktree paths resolve to the main repo, not the worktree.
+		if projectRoot, err := gitMainRepoRoot(ctx, cwd); err == nil {
 			screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
 			if attachments := collectScreenshots(screenshotDir); len(attachments) > 0 {
 				return attachments
@@ -773,12 +789,11 @@ func (s *Service) persistCheckScreenshots(ctx context.Context, workID string, sr
 		return srcPaths
 	}
 
-	// Get the project root
-	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	// Get the main project root (not the worktree root, if running in a worktree).
+	projectRoot, err := gitMainRepoRoot(ctx, cwd)
 	if err != nil {
 		return srcPaths
 	}
-	projectRoot := strings.TrimSpace(string(out))
 
 	// Create the destination directory
 	destDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
@@ -3051,12 +3066,19 @@ You are a checker. Your job is to verify the worker's output independently and s
 1. Run the test suite: go test ./...
 2. Check that the build is clean: go build ./...
 3. Review the diff: git diff main...HEAD --stat
-4. Run Playwright tests (if the project has them): Use the run_playwright tool or 'npx playwright test --screenshot on'
-5. Note any issues, warnings, test failures, or visual regressions
+4. Check for a web UI: look for mind-graph/, index.html, playwright.config.ts, or package.json with a test script.
+   - If a web UI exists, you MUST run Playwright: cd mind-graph && npx playwright test --screenshot=on
+   - Playwright screenshots are proof that the UI works. Without them, pass is not justified for UI work.
+   - Screenshots are saved to test-results/ inside the directory where you run Playwright.
+5. Note any issues, warnings, test failures, or visual regressions.
 
 ## Collecting Screenshots
 
-After running Playwright tests (if applicable), collect the screenshot paths. The run_playwright tool returns screenshots in its output. Include these paths in your check record via the screenshots parameter.
+After running Playwright (REQUIRED for UI work), collect screenshot paths from test-results/:
+  find . -path "*/test-results/*.png" -type f
+
+Include ALL absolute paths in your check record via the screenshots parameter.
+If Playwright is present but you could not run it, report that as a failure with checker_notes explaining why.
 
 ## Submitting Your Check Record
 
@@ -3069,8 +3091,8 @@ Call the check_record_create MCP tool with:
   - build_ok: true/false
   - tests_passed: <count>
   - tests_failed: <count>
-  - screenshots: [<list of absolute paths to PNG/JPG files>] (optional)
-  - checker_notes: "<your observations>"
+  - screenshots: [<list of absolute paths to PNG/JPG files>] (REQUIRED if Playwright ran)
+  - checker_notes: "<your observations, including whether Playwright ran and screenshots were captured>"
 
 ### Method B — CLI (for all adapters with bash access):
   Pass:  fase check create %s --result pass  --build-ok --tests-passed <N> --notes "<summary>"

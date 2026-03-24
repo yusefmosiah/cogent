@@ -2422,3 +2422,71 @@ func TestPersistCheckScreenshots(t *testing.T) {
 		t.Fatalf("expected filename to contain 'test-1.png', got %s", attachments[0].Filename)
 	}
 }
+
+// TestGitMainRepoRoot verifies that gitMainRepoRoot resolves the main repo root
+// even when the CWD is inside a git worktree at .fase/worktrees/<workID>.
+func TestGitMainRepoRoot(t *testing.T) {
+	mainRepo := t.TempDir()
+	workID := "work_testworktree"
+
+	// Initialise a proper git repo with a commit so worktree add works.
+	for _, args := range [][]string{
+		{"init", mainRepo},
+		{"-C", mainRepo, "config", "user.email", "test@test.com"},
+		{"-C", mainRepo, "config", "user.name", "Test"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	sentinel := filepath.Join(mainRepo, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("hi"), 0644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", mainRepo, "add", "sentinel.txt"},
+		{"-C", mainRepo, "commit", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Create a real git worktree at the project's standard path.
+	worktreesDir := filepath.Join(mainRepo, ".fase", "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	worktreeDir := filepath.Join(worktreesDir, workID)
+	branch := "fase/work/" + workID
+	if out, err := exec.Command("git", "-C", mainRepo, "worktree", "add", "-b", branch, worktreeDir).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", mainRepo, "worktree", "remove", "--force", worktreeDir).Run()
+	})
+
+	// Verify --show-toplevel on the real worktree returns the worktree dir (the bug scenario).
+	out, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --show-toplevel: %v", err)
+	}
+	showTop := strings.TrimSpace(string(out))
+	realWorktreeDir, _ := filepath.EvalSymlinks(worktreeDir)
+	realShowTop, _ := filepath.EvalSymlinks(showTop)
+	if realShowTop != realWorktreeDir {
+		t.Skipf("git --show-toplevel returned %q, not worktree dir %q — skipping", showTop, worktreeDir)
+	}
+
+	// Our helper should return the main repo root, not the worktree dir.
+	ctx := context.Background()
+	got, err := gitMainRepoRoot(ctx, worktreeDir)
+	if err != nil {
+		t.Fatalf("gitMainRepoRoot: %v", err)
+	}
+	realGot, _ := filepath.EvalSymlinks(got)
+	realMainRepo, _ := filepath.EvalSymlinks(mainRepo)
+	if realGot != realMainRepo {
+		t.Fatalf("gitMainRepoRoot returned %q, want main repo root %q", got, mainRepo)
+	}
+}
