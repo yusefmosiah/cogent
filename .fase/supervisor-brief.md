@@ -1,6 +1,6 @@
 # Runtime Configuration
-supervisor_adapter: claude
-supervisor_model: claude-opus-4-6
+supervisor_adapter: native
+supervisor_model: zai/glm-5-turbo
 checker_pool: codex/gpt-5.4-mini, claude/claude-haiku-4-5, codex/gpt-5.4
 
 # Model Preferences (override)

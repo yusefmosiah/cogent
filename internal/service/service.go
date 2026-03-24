@@ -6017,7 +6017,7 @@ Slot: %d (%s/%s)
 After verification, record exactly one attestation on the parent:
    fase work attest %s --nonce %s --result [passed|failed] --summary "<your finding>" --verifier-kind %s --method %s
 
-Do not record more than one attestation. Do not spawn extra work.`, parent.WorkID, parent.Title, parent.Objective, job.Adapter, workerModel, job.JobID, slotIndex, slot.VerifierKind, slot.Method, workerFindings, uiGuidance, parent.WorkID, nonce, slot.VerifierKind, slot.Method)
+Do not record more than one attestation. Do not spawn extra work.`, parent.WorkID, parent.Title, parent.Objective, job.Adapter, workerModel, job.JobID, slotIndex, slot.VerifierKind, slot.Method, workerFindings, uiGuidance, parent.WorkID, nonce, slot.VerifierKind, slot.Method, slot.Method)
 }
 
 func metadataInt(metadata map[string]any, key string) (int, bool) {
