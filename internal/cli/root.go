@@ -298,7 +298,7 @@ func NewRootCommand() *cobra.Command {
 		newBootstrapCommand(opts),
 		newWorkCommand(opts),
 		newCheckCommand(opts),
-		newNotifyCommand(opts),
+		newReportCommand(opts),
 		newSessionCommand(opts),
 		newTransferCommand(opts, "transfer", "Export and launch explicit cross-vendor transfers", false),
 		newAdaptersCommand(opts),

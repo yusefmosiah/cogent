@@ -38,7 +38,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("create store directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// Use _txlock=immediate to prevent SQLITE_BUSY on concurrent writers.
+	// WAL mode + busy_timeout handles reads, but writes need immediate locking
+	// to avoid corruption from multiple processes.
+	connStr := path + "?_txlock=immediate&_busy_timeout=60000"
+	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
@@ -66,7 +70,8 @@ func OpenWithPrivate(ctx context.Context, publicPath, privatePath string) (*Stor
 		return nil, fmt.Errorf("create private store directory: %w", err)
 	}
 
-	pdb, err := sql.Open("sqlite", privatePath)
+	privateConnStr := privatePath + "?_txlock=immediate&_busy_timeout=60000"
+	pdb, err := sql.Open("sqlite", privateConnStr)
 	if err != nil {
 		_ = store.db.Close()
 		return nil, fmt.Errorf("open private sqlite database: %w", err)

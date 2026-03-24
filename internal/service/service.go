@@ -1726,7 +1726,7 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 		fmt.Sprintf("REQUIRED on success: %s", updateDoneCmd),
 		fmt.Sprintf("REQUIRED on failure: %s", updateFailCmd),
 		"You MUST call one of the above before exiting. The supervisor cannot see your work otherwise.",
-		"REQUIRED: Notify the host/supervisor with a summary before exiting. Use either the notify_host MCP tool OR 'fase notify \"your summary here\"' CLI command. Include: what files you changed, whether tests pass, and any issues found.",
+		"REQUIRED: Report your results before exiting. Use 'fase report \"<summary of what you did, files changed, test results>\"'. This notifies whoever dispatched you (supervisor or host).",
 		"Record notes for findings, risks, and open questions.",
 		"Run verification (tests, builds) and report results as notes.",
 		"If the work involves a web UI: you MUST add e2e tests (default: Playwright) covering all interactive features (buttons, drag, resize, navigation). Backend tests alone are insufficient — they cannot catch broken UI behavior.",
@@ -2266,10 +2266,10 @@ func supervisorDispatchProtocol() map[string]any {
 			"5. If the work needs revision, update it back to ready with feedback.",
 		},
 		"communication": []string{
-			"REQUIRED: After each action (dispatch, attest, merge), call notify_host with a structured status update.",
-			"Format: '[action] work_title — result. Details.' Example: '[dispatched] Fix RSS sources — sent to claude/haiku. [attested] Search fix — passed, merging.'",
-			"On errors or repeated failures, call notify_host with type=escalation.",
-			"The host relies on these messages to monitor progress without checking the dashboard.",
+			"REQUIRED: After each action (dispatch, attest, merge), call the report tool with a structured status update.",
+			"Format: '[action] work_title — result.' Example: '[dispatched] Fix RSS sources — sent to claude/haiku.' '[checked] Search fix — passed, merging.'",
+			"On errors or repeated failures, report with type=escalation.",
+			"Use the report MCP tool or 'fase report \"message\"' CLI command.",
 		},
 		"error_handling": []string{
 			"If a worker fails, the item returns to ready state — it will be redispatched.",

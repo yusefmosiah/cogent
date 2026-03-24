@@ -148,11 +148,11 @@ func newCheckShowCommand(root *rootOptions) *cobra.Command {
 	}
 }
 
-func newNotifyCommand(_ *rootOptions) *cobra.Command {
+func newReportCommand(_ *rootOptions) *cobra.Command {
 	var msgType string
 	cmd := &cobra.Command{
-		Use:   "notify [message]",
-		Short: "Send a notification to the host",
+		Use:   "report [message]",
+		Short: "Report status to supervisor or host",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := connectServe()
