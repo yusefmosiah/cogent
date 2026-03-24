@@ -1,78 +1,46 @@
 # Checker Briefing
 
-You are a **checker** worker. Your job is to produce evidence, not to make decisions.
+This reference doc mirrors the generated checker prompt in `internal/service/service.go`.
+Checkers exist to collect evidence, verify deliverables, and submit a structured check record.
 
-## Your Role
+## Required Verification
 
-- You run in the same worktree as the worker that just completed the implementation
-- You do NOT modify any code — read-only
-- You run tests and collect artifacts
-- You write a structured report
-- You do NOT decide pass/fail based on your judgment — the test results decide
+1. Read the work objective and `git diff main...HEAD --stat`.
+2. Verify any file paths named in the objective actually exist on disk with `test -e <path>`.
+3. Run `go build ./...`.
+4. Run targeted tests for the files or behavior touched by the diff.
+5. If the work touches UI files or browser-facing paths such as `mind-graph/`, `index.html`, `playwright.config.*`, `.tsx`, `.jsx`, `.css`, or `.html`, run Playwright.
+6. Persist Playwright screenshots and videos to `.fase/artifacts/<work-id>/screenshots/` and verify those files exist before passing the check.
+7. Include the commands run, verified paths, and evidence locations in `checker_notes` or `test_output`.
 
-## Steps
+## Check Record Submission
 
-### 1. Run Go Tests
-
-```bash
-go test ./... 2>&1
-```
-
-Capture all output. Note: tests passing = pass; any test failures = fail.
-
-### 2. Run Playwright Tests (if applicable)
-
-Check if `playwright.config.ts` or `playwright.config.js` exists:
+Use `fase check create` or the `check_record_create` MCP tool. The CLI path should include screenshot and video evidence when UI work is checked:
 
 ```bash
-ls playwright.config.* 2>/dev/null
-```
-
-If it exists:
-```bash
-npx playwright test 2>&1
-```
-
-Collect screenshots from `test-results/` after the run.
-
-### 3. Collect Git Diff Stat
-
-```bash
-git diff --stat main...HEAD
-```
-
-### 4. Submit the Check Record
-
-After collecting evidence, submit your report:
-
-```bash
-fase work check <work-id> \
+fase check create <work-id> \
   --result pass|fail \
   --build-ok \
   --tests-passed <N> \
   --tests-failed <N> \
-  --test-output "$(cat go-test-output.txt)" \
+  --test-output "<commands and important output>" \
   --diff-stat "$(git diff --stat main...HEAD)" \
-  --notes "Your observations here" \
-  --screenshots "test-results/screenshot1.png,test-results/screenshot2.png"
+  --screenshots "/abs/path/one.png,/abs/path/two.png" \
+  --videos "/abs/path/run.webm" \
+  --notes "What you verified, what failed, and where evidence was saved"
 ```
 
-**result is "pass" if:**
-- `go test ./...` exits 0 (all tests pass)
-- Playwright tests pass (if applicable)
+## Passing Rules
 
-**result is "fail" if:**
-- Any test fails
-- The build fails
-- Playwright tests fail
+- If `go build ./...` fails, the check must fail.
+- If targeted tests fail, the check must fail.
+- If the objective names files that are missing, the check must fail.
+- If the work is UI-related and persisted screenshots are missing, the check must fail.
+- A passing check record should only be submitted with `build_ok=true` and real artifact paths that exist on disk.
 
-## Artifact Storage
+## Guardrails
 
-Artifacts are saved automatically to `.fase/artifacts/<work-id>/` when you submit the check record. You do not need to copy files manually.
-
-## What NOT to Do
-
-- Do NOT write code or fix bugs
-- Do NOT modify the work item state yourself (the check command does this)
-- Do NOT decide pass/fail based on code review — only test results count
-- Do NOT skip tests to get a passing result
+- Do not modify code.
+- Do not create new work items.
+- Do not call `fase work attest`.
+- Do not call `fase work update` from the checker path.

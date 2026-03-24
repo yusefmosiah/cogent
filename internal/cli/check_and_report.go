@@ -35,6 +35,8 @@ func newCheckCreateCommand(root *rootOptions) *cobra.Command {
 	var testsFailed int
 	var testOutput string
 	var diffStat string
+	var screenshots string
+	var videos string
 
 	cmd := &cobra.Command{
 		Use:   "create <work-id>",
@@ -57,6 +59,8 @@ func newCheckCreateCommand(root *rootOptions) *cobra.Command {
 					"tests_failed":  testsFailed,
 					"test_output":   testOutput,
 					"diff_stat":     diffStat,
+					"screenshots":   splitCSV(screenshots),
+					"videos":        splitCSV(videos),
 					"checker_notes": notes,
 				},
 			}
@@ -87,6 +91,8 @@ func newCheckCreateCommand(root *rootOptions) *cobra.Command {
 	cmd.Flags().IntVar(&testsFailed, "tests-failed", 0, "number of tests failed")
 	cmd.Flags().StringVar(&testOutput, "test-output", "", "test output (truncated)")
 	cmd.Flags().StringVar(&diffStat, "diff-stat", "", "git diff stat")
+	cmd.Flags().StringVar(&screenshots, "screenshots", "", "comma-separated screenshot paths")
+	cmd.Flags().StringVar(&videos, "videos", "", "comma-separated video paths")
 	_ = cmd.MarkFlagRequired("result")
 
 	return cmd

@@ -1947,6 +1947,105 @@ func TestCheckRecordFlow(t *testing.T) {
 	}
 }
 
+func TestCreateCheckRecordRejectsPassWithoutBuild(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "backend-only verification",
+		Objective: "verify check record validation",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "pass",
+		Report: core.CheckReport{
+			BuildOK:     false,
+			TestsPassed: 1,
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for pass without build_ok, got %v", err)
+	}
+}
+
+func TestCreateCheckRecordRequiresScreenshotsForUIWork(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "verify mind-graph UI",
+		Objective: "confirm mind-graph/index.html renders correctly",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "pass",
+		Report: core.CheckReport{
+			BuildOK:     true,
+			TestsPassed: 1,
+			DiffStat:    " mind-graph/index.html | 12 +++++++-----",
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for UI pass without screenshots, got %v", err)
+	}
+}
+
+func TestCreateCheckRecordRejectsMissingArtifactPaths(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "artifact path validation",
+		Objective: "verify checker evidence paths",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "fail",
+		Report: core.CheckReport{
+			BuildOK:     false,
+			TestsFailed: 1,
+			Screenshots: []string{filepath.Join(t.TempDir(), "missing.png")},
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for missing screenshot path, got %v", err)
+	}
+}
+
+func TestBuildCheckerBriefingIncludesEvidenceRequirements(t *testing.T) {
+	svc := newTestService(t)
+
+	briefing := svc.buildCheckerBriefing(core.WorkItemRecord{
+		WorkID:    "work_123",
+		Title:     "checker evidence update",
+		Objective: "verify mind-graph/index.html and docs/checker-briefing.md",
+	})
+
+	for _, want := range []string{
+		"Verify deliverables exist.",
+		"go build ./...",
+		"Run targeted tests for the files or behavior touched by the diff.",
+		".fase/artifacts/work_123/screenshots",
+		"--screenshots",
+	} {
+		if !strings.Contains(briefing, want) {
+			t.Fatalf("expected briefing to contain %q", want)
+		}
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	stateDir := t.TempDir()
