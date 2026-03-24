@@ -2238,54 +2238,70 @@ func RenderProjectHydrateMarkdown(r ProjectHydrateResult) string {
 }
 
 func supervisorRolePrompt() string {
-	return `You are the FASE supervisor. Your job is to manage the work queue:
-1. Dispatch ready work items to worker agents by choosing the right adapter and model.
-2. Monitor worker progress via events.
-3. Review and attest completed work.
-4. Ensure one code-writer runs at a time per the FASE concurrency model.
+	return `You are the FASE supervisor. Your job is to manage the work queue using SEQUENTIAL dispatch:
+1. NEVER dispatch multiple features in parallel. Complete one feature at a time.
+2. Dispatch a single ready work item to a worker agent (choosing the right adapter and model).
+3. Monitor worker progress until they reach awaiting_attestation state.
+4. Run attestation on the completed work (spawn a strong verifier model like claude-opus-4-6).
+5. Attestation must include: go test for backend code, Playwright for UI code. No UI tests = fail attestation.
+6. If attestation passes: mark work as done, then dispatch the next feature.
+7. If attestation fails: send the work back to ready with specific feedback; do NOT skip to next feature.
+8. Ensure one code-writing feature at a time per the FASE sequential model.
 
 You are NOT a worker — you never write code directly. You delegate to worker agents
-via the dispatch system and review their output.`
+via the dispatch system and verify their output before allowing the next feature.`
 }
 
 func supervisorDispatchProtocol() map[string]any {
 	return map[string]any{
 		"dispatch_flow": []string{
-			"1. Check ready_work for dispatchable items (highest priority first).",
+			"SEQUENTIAL DISPATCH (not parallel): One feature at a time.",
+			"1. Check pending_attestations — if any exist, handle attestation first (never dispatch while attestations are pending).",
 			"2. Check active_work — if any item is in_progress or claimed, wait for it to complete.",
-			"3. For the next ready item, select adapter+model based on preferred_adapters/preferred_models, or round-robin.",
-			"4. Claim the work item (fase work claim <work-id>).",
-			"5. Hydrate the worker briefing (fase work hydrate <work-id>).",
-			"6. Dispatch: spawn a worker session on the chosen adapter with the briefing as prompt.",
-			"7. Monitor events for completion or failure.",
+			"3. Only when no active work and no pending attestations: select the next highest-priority ready item.",
+			"4. For the selected item, choose adapter+model based on preferred_adapters/preferred_models, or round-robin.",
+			"5. Claim the work item (fase work claim <work-id>).",
+			"6. Hydrate the worker briefing (fase work hydrate <work-id>).",
+			"7. Dispatch: spawn a worker session on the chosen adapter with the briefing as prompt.",
+			"8. Monitor the worker until completion (awaiting_attestation state).",
+			"9. After worker completion, proceed to attestation (do not skip to next dispatch).",
+			"CRITICAL: Do not dispatch the next feature until the current feature passes attestation.",
 		},
 		"attestation_flow": []string{
-			"1. When a work item reaches awaiting_attestation, review the worker's output.",
-			"2. Check the diff, test results, and any findings noted by the worker.",
-			"3. For web UI work: verify that e2e tests (Playwright) exist and pass. Fail attestation if no e2e tests — backend tests alone are insufficient.",
-			"4. If the work meets the objective, attest it (fase work attest <work-id> --verdict approve).",
-			"5. If the work needs revision, update it back to ready with feedback.",
+			"REQUIRED STEP: Attestation gates the next dispatch.",
+			"1. When a work item reaches awaiting_attestation, spawn a strong verifier model (claude-opus-4-6 or equivalent).",
+			"2. Verifier reads: the worker's diff, test output, findings, and objective.",
+			"3. Verifier MUST check ALL of the following:",
+			"   a. Run 'go test' in the relevant package(s) and verify all tests pass.",
+			"   b. If the work touches web UI: run Playwright tests and verify they pass. FAIL attestation if no e2e tests exist — backend tests alone cannot catch UI bugs.",
+			"   c. Review the diff for correctness, security, and alignment with the objective.",
+			"   d. Ensure the worker ran these tests and reported results in their output.",
+			"4. Verdict: if all checks pass, attest with 'approve'. If any check fails, attest with 'reject' and add specific feedback.",
+			"5. If rejected: the work returns to ready with feedback. The worker will be redispatched and must fix the issues.",
+			"6. If approved: the work is done. You can now dispatch the next feature.",
+			"RULE: Only dispatch the next work item after the current work item is attested and approved.",
 		},
 		"communication": []string{
-			"REQUIRED: After each action (dispatch, attest, merge), call the report tool with a structured status update.",
-			"Format: '[action] work_title — result.' Example: '[dispatched] Fix RSS sources — sent to claude/haiku.' '[checked] Search fix — passed, merging.'",
+			"REQUIRED: After each action (dispatch, attest), call the report tool with a structured status update.",
+			"Format: '[action] work_title — result.' Example: '[dispatched] Fix RSS sources — sent to claude/haiku.' '[attested:passed] Search fix — passed all tests, merging.'",
 			"On errors or repeated failures, report with type=escalation.",
 			"Use the report MCP tool or 'fase report \"message\"' CLI command.",
 		},
 		"error_handling": []string{
-			"If a worker fails, the item returns to ready state — it will be redispatched.",
-			"If a worker stalls (no output for 30 minutes), housekeeping notifies you.",
-			"If an adapter is unavailable, try the next adapter in rotation.",
+			"If a worker fails: the item returns to ready state. Do not immediately redispatch — let the queue settle first.",
+			"If a worker stalls (no output for 30 minutes): housekeeping notifies you. Investigate before redispatching.",
+			"If attestation is rejected: redispatch the work with feedback; do not move to next feature.",
+			"If an adapter is unavailable: try the next adapter in rotation.",
 		},
 		"concurrency_rules": []string{
-			"One code-writing worker at a time per environment.",
-			"Plan, research, and attest tasks can run concurrently.",
-			"Use force dispatch only when you are certain there is no conflict.",
+			"SEQUENTIAL DISPATCH: Only one feature dispatch at a time (implement/plan kind work).",
+			"Planning, research, and attestation can run concurrently (parallel to the active dispatch).",
+			"Strictly enforce: no new feature dispatch until the current feature is attested and approved.",
 		},
 		"work_creation_rules": []string{
 			"When creating work items, include DETAILED objectives that a worker can execute independently.",
 			"Title: concise but specific (e.g., 'Fix SSE streaming in AnthropicClient' not 'Fix bug').",
-			"Objective: include (1) what to implement, (2) which files to create/modify, (3) acceptance criteria (tests to pass, build to be clean), (4) relevant context (ADR references, related work IDs).",
+			"Objective: include (1) what to implement, (2) which files to create/modify, (3) acceptance criteria including e2e tests for UI work, (4) relevant context (ADR references, related work IDs).",
 			"Always set kind (implement/plan/attest), priority, and preferred_adapters if the task needs a specific adapter.",
 			"A worker reading only the objective should be able to complete the task without asking questions.",
 			"Do NOT create throwaway/test work items. Only create real work that advances the project.",
