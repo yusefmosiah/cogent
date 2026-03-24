@@ -228,6 +228,15 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// Load .env — native adapter needs API keys.
 	loadDotEnv(envFile)
 
+	// Guard: prevent duplicate serve instances on same project.
+	if existingInfo, err := loadServeInfo(); err == nil {
+		if syscall.Kill(existingInfo.PID, 0) == nil {
+			return fmt.Errorf("fase serve is already running (pid %d, port %d). Kill it first or use the existing instance", existingInfo.PID, existingInfo.Port)
+		}
+		// Stale serve.json — remove it
+		os.Remove(filepath.Join(core.ResolveRepoStateDir(), "serve.json"))
+	}
+
 	// Open service once — shared by all goroutines
 	svc, err := service.Open(ctx, root.configPath)
 	if err != nil {

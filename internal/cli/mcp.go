@@ -94,7 +94,7 @@ Use this in .mcp.json instead of 'fase mcp stdio'.`,
 var proxyStdoutMu sync.Mutex
 
 func runMCPProxy(ctx context.Context, endpoint string) error {
-	client := &http.Client{}
+	client := &http.Client{Timeout: 5 * time.Minute}
 
 	// Derive WebSocket URL from MCP endpoint for channel notifications.
 	wsURL := strings.Replace(strings.Replace(endpoint, "/mcp", "/ws", 1), "http://", "ws://", 1)
@@ -139,34 +139,40 @@ func runMCPProxy(ctx context.Context, endpoint string) error {
 		}
 
 		// Parse SSE response and relay as raw JSON lines.
-		proxyStdoutMu.Lock()
 		if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-			relaySSEToStdout(resp.Body)
+			relaySSEToStdout(resp.Body) // locks per-line, not for entire stream
 		} else {
-			if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-				resp.Body.Close()
-				proxyStdoutMu.Unlock()
-				return fmt.Errorf("proxy response: %w", err)
+			proxyStdoutMu.Lock()
+			body, _ := io.ReadAll(resp.Body)
+			if len(body) > 0 {
+				os.Stdout.Write(body)
+				fmt.Fprintln(os.Stdout)
 			}
-			fmt.Fprintln(os.Stdout)
+			proxyStdoutMu.Unlock()
 		}
-		proxyStdoutMu.Unlock()
 		resp.Body.Close()
 	}
 	return scanner.Err()
 }
 
 // relaySSEToStdout reads SSE events and writes the data lines to stdout.
+// Uses per-line locking so channel notifications aren't blocked during long streams.
 func relaySSEToStdout(body io.Reader) {
 	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024) // 10MB buffer
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
 			data := line[6:]
 			if data != "" && data != "[DONE]" {
+				proxyStdoutMu.Lock()
 				fmt.Fprintln(os.Stdout, data)
+				proxyStdoutMu.Unlock()
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[mcp-proxy] SSE scanner error: %v\n", err)
 	}
 }
 
