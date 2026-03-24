@@ -159,8 +159,11 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 		}
 
 		// Collect pending events or wait for a signal.
+		// If events were collected during the last turn but the queue is empty,
+		// suppress them — they're likely side-effects of the supervisor's own
+		// actions (e.g., marking items done, creating attest children).
 		var msg string
-		if len(outcome.events) > 0 {
+		if len(outcome.events) > 0 && s.hasActionableWork(ctx) {
 			msg = formatEvents(outcome.events)
 		} else {
 			msg = s.waitForSignal(ctx, ch)
@@ -392,4 +395,20 @@ func parseSupervisorBrief(stateDir string) (adapter, model string) {
 		}
 	}
 	return adapter, model
+}
+
+// hasActionableWork checks if there are ready, in_progress, or checking work items.
+// Used to suppress idle churn: if the queue is empty, don't fire a turn just
+// because side-effect events were collected during the last turn.
+func (s *agenticSupervisor) hasActionableWork(ctx context.Context) bool {
+	for _, state := range []string{"ready", "in_progress", "checking", "awaiting_attestation"} {
+		items, err := s.svc.ListWork(ctx, service.WorkListRequest{
+			ExecutionState: state,
+			Limit:          1,
+		})
+		if err == nil && len(items) > 0 {
+			return true
+		}
+	}
+	return false
 }
