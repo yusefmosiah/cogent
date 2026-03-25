@@ -1235,7 +1235,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 
   # Valid execution states: ready, claimed, in_progress, checking, blocked, done, failed, cancelled, archived
   # Note: awaiting_attestation is deprecated; use checking instead`,
-		Args:  cobra.ExactArgs(1),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkCapability(core.CapWorkUpdate); err != nil {
 				return err
@@ -2056,7 +2056,7 @@ This guarantees every doc has a corresponding work item.`,
 
 	checkCmd := &cobra.Command{
 		Use:   "check <work-id>",
-		Short: "Submit a check record and transition work state",
+		Short: "Submit a check record (legacy alias of `fase check create`)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := service.WorkCheckRequest{
@@ -2081,15 +2081,14 @@ This guarantees every doc has a corresponding work item.`,
 			if err != nil {
 				return err
 			}
-			var result service.WorkCheckResult
+			var result core.CheckRecord
 			if err := json.Unmarshal(data, &result); err != nil {
 				return fmt.Errorf("decoding response: %w", err)
 			}
 			if root.jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), result)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "check %s: %s\n", result.CheckRecord.CheckID, result.CheckRecord.Result)
-			fmt.Fprintf(cmd.OutOrStdout(), "work %s → %s\n", result.Work.WorkID, result.Work.ExecutionState)
+			fmt.Fprintf(cmd.OutOrStdout(), "check %s: %s\n", result.CheckID, result.Result)
 			return nil
 		},
 	}

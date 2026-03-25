@@ -416,11 +416,6 @@ type WorkCheckRequest struct {
 	CreatedBy    string           `json:"created_by,omitempty"`
 }
 
-type WorkCheckResult struct {
-	CheckRecord core.CheckRecord    `json:"check_record"`
-	Work        core.WorkItemRecord `json:"work"`
-}
-
 type WorkShowResult struct {
 	Work         core.WorkItemRecord       `json:"work"`
 	Children     []core.WorkItemRecord     `json:"children,omitempty"`
@@ -834,14 +829,7 @@ func (s *Service) CreateCheckRecord(ctx context.Context, req CheckRecordCreateRe
 		return core.CheckRecord{}, normalizeStoreError("work", req.WorkID, err)
 	}
 
-	// Persist screenshots and videos from the check to the artifacts directory.
-	// This ensures they remain available even after the worktree is cleaned.
-	if req.Report.Screenshots, err = s.prepareCheckArtifactPaths(ctx, req.WorkID, req.Report.Screenshots); err != nil {
-		return core.CheckRecord{}, err
-	}
-	if req.Report.Videos, err = s.prepareCheckArtifactPaths(ctx, req.WorkID, req.Report.Videos); err != nil {
-		return core.CheckRecord{}, err
-	}
+	req.Report = normalizeCheckReport(req.Report)
 
 	if req.Result == "pass" {
 		if !req.Report.BuildOK {
@@ -850,9 +838,32 @@ func (s *Service) CreateCheckRecord(ctx context.Context, req CheckRecordCreateRe
 		if req.Report.TestsFailed > 0 {
 			return core.CheckRecord{}, fmt.Errorf("%w: passing check records cannot report failed tests", ErrInvalidInput)
 		}
+		if strings.TrimSpace(req.Report.TestOutput) == "" {
+			return core.CheckRecord{}, fmt.Errorf("%w: passing check records must include test_output with reproducible command provenance", ErrInvalidInput)
+		}
+		if strings.TrimSpace(req.Report.CheckerNotes) == "" {
+			return core.CheckRecord{}, fmt.Errorf("%w: passing check records must include checker_notes describing verified evidence", ErrInvalidInput)
+		}
 		if checkRecordNeedsUIEvidence(work, req.Report) && len(req.Report.Screenshots) == 0 {
 			return core.CheckRecord{}, fmt.Errorf("%w: passing UI checks must include at least one existing screenshot path", ErrInvalidInput)
 		}
+		for _, deliverablePath := range objectiveDeliverablePaths(work.Objective) {
+			if !checkReportMentionsPath(req.Report, deliverablePath) {
+				return core.CheckRecord{}, fmt.Errorf("%w: passing check records must mention verified deliverable path %q in notes, diff, test output, or artifact paths", ErrInvalidInput, deliverablePath)
+			}
+		}
+	}
+
+	// Persist screenshots and videos from the check to a durable artifacts directory.
+	// This ensures they remain reviewable even after a worktree is cleaned up.
+	if req.Report.Screenshots, err = s.prepareCheckArtifactPaths(ctx, req.WorkID, req.Report.Screenshots); err != nil {
+		return core.CheckRecord{}, err
+	}
+	if req.Report.Videos, err = s.prepareCheckArtifactPaths(ctx, req.WorkID, req.Report.Videos); err != nil {
+		return core.CheckRecord{}, err
+	}
+	if err := s.persistCheckTextArtifacts(ctx, req.WorkID, req.Report); err != nil {
+		return core.CheckRecord{}, err
 	}
 
 	rec := core.CheckRecord{
@@ -896,103 +907,157 @@ func checkRecordNeedsUIEvidence(work core.WorkItemRecord, report core.CheckRepor
 	return checkerUIEvidencePattern.MatchString(report.DiffStat)
 }
 
+func normalizeCheckReport(report core.CheckReport) core.CheckReport {
+	const maxTestOutput = 50 * 1024
+	if len(report.TestOutput) > maxTestOutput {
+		report.TestOutput = report.TestOutput[:maxTestOutput] + "\n[truncated]"
+	}
+	report.TestOutput = strings.TrimSpace(report.TestOutput)
+	report.DiffStat = strings.TrimSpace(report.DiffStat)
+	report.CheckerNotes = strings.TrimSpace(report.CheckerNotes)
+	return report
+}
+
+func objectiveDeliverablePaths(objective string) []string {
+	seen := make(map[string]struct{})
+	var paths []string
+	for _, field := range strings.Fields(objective) {
+		candidate := strings.Trim(field, " \t\r\n\"'`()[]{}<>,;:!?")
+		if candidate == "" || strings.Contains(candidate, "://") || !strings.Contains(candidate, "/") {
+			continue
+		}
+		base := filepath.Base(candidate)
+		if base == "" || base == "." || !strings.Contains(base, ".") {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		paths = append(paths, candidate)
+	}
+	return paths
+}
+
+func checkReportMentionsPath(report core.CheckReport, path string) bool {
+	if path == "" {
+		return true
+	}
+	for _, text := range []string{report.TestOutput, report.DiffStat, report.CheckerNotes} {
+		if strings.Contains(text, path) {
+			return true
+		}
+	}
+	for _, artifactPath := range append(append([]string{}, report.Screenshots...), report.Videos...) {
+		if strings.Contains(artifactPath, path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) prepareCheckArtifactPaths(ctx context.Context, workID string, srcPaths []string) ([]string, error) {
 	if len(srcPaths) == 0 {
 		return nil, nil
 	}
 
-	paths := s.persistCheckScreenshots(ctx, workID, srcPaths)
 	var missing []string
-	var valid []string
-	for _, path := range paths {
+	for _, path := range srcPaths {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			continue
 		}
 		if _, err := os.Stat(path); err != nil {
 			missing = append(missing, path)
-			continue
 		}
-		valid = append(valid, path)
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("%w: check artifact paths do not exist: %s", ErrInvalidInput, strings.Join(missing, ", "))
 	}
-	return valid, nil
+	paths, err := s.persistCheckScreenshots(ctx, workID, srcPaths)
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
 }
 
 func (s *Service) ListCheckRecords(ctx context.Context, workID string, limit int) ([]core.CheckRecord, error) {
 	return s.store.ListCheckRecords(ctx, workID, limit)
 }
 
-// persistCheckScreenshots copies screenshot files from their source paths to the persistent
-// artifacts directory (.fase/artifacts/<work-id>/screenshots/) and returns the new paths.
-// This ensures screenshots remain available even after the worker's worktree is cleaned up.
-func (s *Service) persistCheckScreenshots(ctx context.Context, workID string, srcPaths []string) []string {
+func (s *Service) checkArtifactDir(ctx context.Context, workID string) string {
+	if projectRoot := s.findProjectRoot(ctx, workID); projectRoot != "" {
+		return filepath.Join(projectRoot, ".fase", "artifacts", workID)
+	}
+	return filepath.Join(s.Paths.StateDir, "artifacts", workID)
+}
+
+// persistCheckScreenshots copies screenshot/video files from their source paths to a durable
+// artifacts directory and returns the persisted paths.
+func (s *Service) persistCheckScreenshots(ctx context.Context, workID string, srcPaths []string) ([]string, error) {
 	if len(srcPaths) == 0 {
-		return srcPaths
+		return nil, nil
 	}
 
-	// Find the project root by looking at recent jobs for the work
-	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
-	if err != nil || len(jobs) == 0 {
-		// Can't find project root, return original paths
-		return srcPaths
-	}
-	cwd := verifyRepoPath(jobs)
-	if cwd == "" || cwd == "." {
-		return srcPaths
-	}
-
-	// Get the main project root (not the worktree root, if running in a worktree).
-	projectRoot, err := gitMainRepoRoot(ctx, cwd)
-	if err != nil {
-		return srcPaths
-	}
-
-	// Create the destination directory
-	destDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+	destDir := filepath.Join(s.checkArtifactDir(ctx, workID), "screenshots")
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		// If we can't create the directory, just return original paths
-		return srcPaths
+		return nil, fmt.Errorf("create check artifact dir: %w", err)
 	}
 
-	// Copy each screenshot file
 	var newPaths []string
+	filenameCounts := make(map[string]int)
 	for _, srcPath := range srcPaths {
-		// Skip invalid paths
-		if strings.TrimSpace(srcPath) == "" {
+		srcPath = strings.TrimSpace(srcPath)
+		if srcPath == "" {
 			continue
 		}
 
-		// Read the source file
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
-			// If we can't read the file, include the original path anyway
-			// (it might still be accessible when needed)
-			newPaths = append(newPaths, srcPath)
-			continue
+			return nil, fmt.Errorf("read check artifact %q: %w", srcPath, err)
 		}
 
-		// Extract the filename
 		filename := filepath.Base(srcPath)
 		if filename == "" || filename == "." {
-			filename = "screenshot.png"
+			filename = "artifact"
 		}
+		if count := filenameCounts[filename]; count > 0 {
+			ext := filepath.Ext(filename)
+			stem := strings.TrimSuffix(filename, ext)
+			filename = fmt.Sprintf("%s-%d%s", stem, count+1, ext)
+		}
+		filenameCounts[filepath.Base(srcPath)]++
 
-		// Write to destination
 		destPath := filepath.Join(destDir, filename)
 		if err := os.WriteFile(destPath, data, 0644); err != nil {
-			// If we can't write the file, include the original path
-			newPaths = append(newPaths, srcPath)
-			continue
+			return nil, fmt.Errorf("persist check artifact %q: %w", srcPath, err)
 		}
-
-		// Use the new persistent path
 		newPaths = append(newPaths, destPath)
 	}
 
-	return newPaths
+	return newPaths, nil
+}
+
+func (s *Service) persistCheckTextArtifacts(ctx context.Context, workID string, report core.CheckReport) error {
+	artifactDir := s.checkArtifactDir(ctx, workID)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return fmt.Errorf("create check artifact dir: %w", err)
+	}
+
+	files := map[string]string{
+		"go-test-output.txt": report.TestOutput,
+		"diff-stat.txt":      report.DiffStat,
+		"checker-notes.md":   report.CheckerNotes,
+	}
+	for name, content := range files {
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(artifactDir, name), []byte(content), 0o644); err != nil {
+			return fmt.Errorf("persist check artifact %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // CreateCheckRecordDirect is an acyclic bridge for the native adapter's in-process tool registration.
@@ -3844,86 +3909,18 @@ func (s *Service) SignAttestationRecord(ctx context.Context, attestationID, sign
 	return s.store.UpdateAttestationSignature(ctx, attestationID, signature)
 }
 
-// WorkCheck stores a check record and transitions the work state.
-// Result "pass" moves to checking; "fail" returns to ready for rework.
-func (s *Service) WorkCheck(ctx context.Context, req WorkCheckRequest) (*WorkCheckResult, error) {
-	if req.WorkID == "" {
-		return nil, fmt.Errorf("%w: work_id is required", ErrInvalidInput)
-	}
-	if req.Result != "pass" && req.Result != "fail" {
-		return nil, fmt.Errorf("%w: result must be 'pass' or 'fail'", ErrInvalidInput)
-	}
-
-	work, err := s.store.GetWorkItem(ctx, req.WorkID)
-	if err != nil {
-		return nil, normalizeStoreError("work", req.WorkID, err)
-	}
-
-	// Truncate test output to 50KB
-	const maxTestOutput = 50 * 1024
-	if len(req.Report.TestOutput) > maxTestOutput {
-		req.Report.TestOutput = req.Report.TestOutput[:maxTestOutput] + "\n[truncated]"
-	}
-
-	// Save artifacts to .fase/artifacts/<work-id>/
-	artifactDir := filepath.Join(s.Paths.StateDir, "artifacts", req.WorkID)
-	if err := os.MkdirAll(artifactDir, 0o755); err == nil {
-		if req.Report.TestOutput != "" {
-			_ = os.WriteFile(filepath.Join(artifactDir, "go-test-output.txt"), []byte(req.Report.TestOutput), 0o644)
-		}
-		if req.Report.DiffStat != "" {
-			_ = os.WriteFile(filepath.Join(artifactDir, "diff-stat.txt"), []byte(req.Report.DiffStat), 0o644)
-		}
-		if req.Report.CheckerNotes != "" {
-			_ = os.WriteFile(filepath.Join(artifactDir, "checker-notes.md"), []byte(req.Report.CheckerNotes), 0o644)
-		}
-	}
-
-	now := time.Now().UTC()
-	rec := core.CheckRecord{
-		CheckID:      core.GenerateID("chk"),
+// WorkCheck is a legacy alias for CreateCheckRecord kept for backward-compatible
+// CLI/HTTP surfaces while all check submission semantics route through the
+// canonical check-record contract.
+func (s *Service) WorkCheck(ctx context.Context, req WorkCheckRequest) (core.CheckRecord, error) {
+	return s.CreateCheckRecord(ctx, CheckRecordCreateRequest{
 		WorkID:       req.WorkID,
+		Result:       req.Result,
 		CheckerModel: req.CheckerModel,
 		WorkerModel:  req.WorkerModel,
-		Result:       req.Result,
 		Report:       req.Report,
-		CreatedAt:    now,
-	}
-	if err := s.store.CreateCheckRecord(ctx, rec); err != nil {
-		return nil, fmt.Errorf("store check record: %w", err)
-	}
-
-	// Transition work state
-	var nextState core.WorkExecutionState
-	var message string
-	if req.Result == "pass" {
-		nextState = core.WorkExecutionStateChecking
-		message = fmt.Sprintf("check passed (tests: %d passed, %d failed) — checking",
-			req.Report.TestsPassed, req.Report.TestsFailed)
-	} else {
-		nextState = core.WorkExecutionStateReady
-		notes := req.Report.CheckerNotes
-		if notes == "" {
-			notes = fmt.Sprintf("tests: %d passed, %d failed", req.Report.TestsPassed, req.Report.TestsFailed)
-		}
-		message = "check failed — returning to ready for rework: " + notes
-	}
-
-	updatedWork, err := s.UpdateWork(ctx, WorkUpdateRequest{
-		WorkID:         req.WorkID,
-		ExecutionState: nextState,
-		Message:        message,
-		CreatedBy:      firstNonEmpty(req.CreatedBy, "checker"),
+		CreatedBy:    req.CreatedBy,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("update work after check: %w", err)
-	}
-	_ = work
-
-	return &WorkCheckResult{
-		CheckRecord: rec,
-		Work:        *updatedWork,
-	}, nil
 }
 
 func (s *Service) AddWorkNote(ctx context.Context, req WorkNoteRequest) (*core.WorkNoteRecord, error) {

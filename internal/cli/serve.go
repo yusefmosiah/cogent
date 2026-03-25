@@ -605,14 +605,14 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 					// Publish stall event instead of auto-killing.
 					// Supervisor will receive this and decide: check logs, steer worker, or kill+retry.
 					svc.Events.Publish(service.WorkEvent{
-						Kind:     service.WorkEventUpdated,
-						WorkID:   workID,
-						Title:    workResult.Work.Title,
-						State:    string(workResult.Work.ExecutionState),
-						JobID:    jobID,
-						Adapter:  statusResult.Job.Adapter,
-						Actor:    service.ActorHousekeeping,
-						Cause:    service.CauseHousekeepingStall,
+						Kind:    service.WorkEventUpdated,
+						WorkID:  workID,
+						Title:   workResult.Work.Title,
+						State:   string(workResult.Work.ExecutionState),
+						JobID:   jobID,
+						Adapter: statusResult.Job.Adapter,
+						Actor:   service.ActorHousekeeping,
+						Cause:   service.CauseHousekeepingStall,
 						Metadata: map[string]string{
 							"reason": fmt.Sprintf("no output for 30 minutes and worker process is dead"),
 						},
@@ -648,13 +648,13 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 				if !isProcessAlive(rt.SupervisorPID) {
 					// Publish orphan event for supervisor to handle
 					svc.Events.Publish(service.WorkEvent{
-						Kind:     service.WorkEventUpdated,
-						WorkID:   item.WorkID,
-						Title:    item.Title,
-						State:    string(item.ExecutionState),
-						JobID:    item.CurrentJobID,
-						Actor:    service.ActorHousekeeping,
-						Cause:    service.CauseHousekeepingOrphan,
+						Kind:   service.WorkEventUpdated,
+						WorkID: item.WorkID,
+						Title:  item.Title,
+						State:  string(item.ExecutionState),
+						JobID:  item.CurrentJobID,
+						Actor:  service.ActorHousekeeping,
+						Cause:  service.CauseHousekeepingOrphan,
 						Metadata: map[string]string{
 							"reason": fmt.Sprintf("worker process (pid %d) is dead", rt.SupervisorPID),
 						},
@@ -1300,12 +1300,12 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 				return
 			}
 			req.WorkID = workID
-			result, err := svc.WorkCheck(r.Context(), req)
+			record, err := svc.WorkCheck(r.Context(), req)
 			if err != nil {
 				writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
 				return
 			}
-			writeJSONHTTP(w, 200, result)
+			writeJSONHTTP(w, 200, record)
 		case "block":
 			if r.Method != http.MethodPost {
 				writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})

@@ -1863,6 +1863,7 @@ func TestCheckRecordFlow(t *testing.T) {
 		Report: core.CheckReport{
 			BuildOK:      true,
 			TestsPassed:  3,
+			TestOutput:   "go test ./internal/service\nok\tgithub.com/yusefmosiah/fase/internal/service\t0.123s",
 			CheckerNotes: "all good",
 		},
 		CreatedBy: "test",
@@ -1926,6 +1927,7 @@ func TestCheckRecordFlow(t *testing.T) {
 	direct, err := svc.CreateCheckRecordDirect(ctx, work.WorkID, "pass", "glm-5-turbo", "gpt-5.4-mini", core.CheckReport{
 		BuildOK:      true,
 		TestsPassed:  5,
+		TestOutput:   "go test ./...\nok\tgithub.com/yusefmosiah/fase/internal/service\t0.321s",
 		CheckerNotes: "via direct bridge",
 	}, "worker")
 	if err != nil {
@@ -1973,6 +1975,59 @@ func TestCreateCheckRecordRejectsPassWithoutBuild(t *testing.T) {
 	}
 }
 
+func TestCreateCheckRecordRejectsPassWithoutCommandProvenance(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "command provenance required",
+		Objective: "verify canonical check evidence",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "pass",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  1,
+			CheckerNotes: "verified the change",
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for missing test_output, got %v", err)
+	}
+}
+
+func TestCreateCheckRecordRejectsMissingDeliverableEvidence(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "deliverable evidence required",
+		Objective: "verify mind-graph/index.html and docs/checker-briefing.md",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "pass",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  2,
+			TestOutput:   "go test ./internal/service\nok\tgithub.com/yusefmosiah/fase/internal/service\t0.234s",
+			CheckerNotes: "verified screenshots and commands, but omitted explicit deliverable paths",
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for missing deliverable evidence, got %v", err)
+	}
+}
+
 func TestCreateCheckRecordRequiresScreenshotsForUIWork(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
@@ -1989,9 +2044,11 @@ func TestCreateCheckRecordRequiresScreenshotsForUIWork(t *testing.T) {
 		WorkID: work.WorkID,
 		Result: "pass",
 		Report: core.CheckReport{
-			BuildOK:     true,
-			TestsPassed: 1,
-			DiffStat:    " mind-graph/index.html | 12 +++++++-----",
+			BuildOK:      true,
+			TestsPassed:  1,
+			TestOutput:   "go test ./mind-graph\nok\tmind-graph\t0.100s",
+			DiffStat:     " mind-graph/index.html | 12 +++++++-----",
+			CheckerNotes: "verified mind-graph/index.html render output",
 		},
 	})
 	if !errors.Is(err, ErrInvalidInput) {
@@ -2018,8 +2075,10 @@ func TestCreateCheckRecordRequiresScreenshotsForUITaggedWork(t *testing.T) {
 		WorkID: work.WorkID,
 		Result: "pass",
 		Report: core.CheckReport{
-			BuildOK:     true,
-			TestsPassed: 1,
+			BuildOK:      true,
+			TestsPassed:  1,
+			TestOutput:   "npm test\n1 passed",
+			CheckerNotes: "verified UI-tagged work evidence",
 		},
 	})
 	if !errors.Is(err, ErrInvalidInput) {
@@ -2050,6 +2109,109 @@ func TestCreateCheckRecordRejectsMissingArtifactPaths(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for missing screenshot path, got %v", err)
+	}
+}
+
+func TestCreateCheckRecordPersistsTextArtifacts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "artifact persistence",
+		Objective: "verify durable checker artifacts",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	record, err := svc.CreateCheckRecord(ctx, CheckRecordCreateRequest{
+		WorkID: work.WorkID,
+		Result: "pass",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  2,
+			TestOutput:   "go test ./internal/service\nok\tgithub.com/yusefmosiah/fase/internal/service\t0.456s",
+			DiffStat:     " internal/service/service.go | 12 +++++++++---",
+			CheckerNotes: "verified internal/service/service.go exists and recorded durable evidence",
+		},
+		CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRecord: %v", err)
+	}
+	if record.Result != "pass" {
+		t.Fatalf("expected pass result, got %q", record.Result)
+	}
+
+	artifactDir := filepath.Join(svc.Paths.StateDir, "artifacts", work.WorkID)
+	for name, want := range map[string]string{
+		"go-test-output.txt": record.Report.TestOutput,
+		"diff-stat.txt":      record.Report.DiffStat,
+		"checker-notes.md":   record.Report.CheckerNotes,
+	} {
+		got, readErr := os.ReadFile(filepath.Join(artifactDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", name, readErr)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestWorkCheckUsesCreateCheckRecordAlias(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "legacy work check alias",
+		Objective: "verify canonical alias behavior",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+	work.ExecutionState = core.WorkExecutionStateChecking
+	if err := svc.store.UpdateWorkItem(ctx, *work); err != nil {
+		t.Fatalf("UpdateWorkItem: %v", err)
+	}
+
+	record, err := svc.WorkCheck(ctx, WorkCheckRequest{
+		WorkID:       work.WorkID,
+		Result:       "pass",
+		CheckerModel: "claude-sonnet-4-6",
+		WorkerModel:  "glm-5-turbo",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  2,
+			TestOutput:   "go test ./internal/service\nok\tgithub.com/yusefmosiah/fase/internal/service\t0.111s",
+			CheckerNotes: "verified canonical alias behavior",
+		},
+		CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("WorkCheck: %v", err)
+	}
+	if record.Result != "pass" {
+		t.Fatalf("expected pass result, got %q", record.Result)
+	}
+
+	reloaded, err := svc.store.GetWorkItem(ctx, work.WorkID)
+	if err != nil {
+		t.Fatalf("GetWorkItem: %v", err)
+	}
+	if reloaded.ExecutionState != core.WorkExecutionStateChecking {
+		t.Fatalf("expected work state to remain checking, got %s", reloaded.ExecutionState)
+	}
+
+	records, err := svc.ListCheckRecords(ctx, work.WorkID, 10)
+	if err != nil {
+		t.Fatalf("ListCheckRecords: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].CheckID != record.CheckID {
+		t.Fatalf("expected check_id %q, got %q", record.CheckID, records[0].CheckID)
 	}
 }
 
@@ -2631,7 +2793,10 @@ func TestPersistCheckScreenshots(t *testing.T) {
 
 	// Now test the persistCheckScreenshots function
 	screenshots := []string{srcScreenshot, srcVideo}
-	newPaths := svc.persistCheckScreenshots(ctx, work.WorkID, screenshots)
+	newPaths, err := svc.persistCheckScreenshots(ctx, work.WorkID, screenshots)
+	if err != nil {
+		t.Fatalf("persistCheckScreenshots: %v", err)
+	}
 
 	if len(newPaths) != 2 {
 		t.Fatalf("expected 2 artifact paths, got %d", len(newPaths))

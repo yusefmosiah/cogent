@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/yusefmosiah/fase/internal/channelmeta"
@@ -164,5 +165,89 @@ func TestCheckCreateCommandIncludesArtifacts(t *testing.T) {
 	}
 	if got.Report.CheckerNotes != "captured evidence" {
 		t.Fatalf("unexpected checker_notes: %q", got.Report.CheckerNotes)
+	}
+}
+
+func TestWorkCheckCommandUsesCanonicalCheckResponse(t *testing.T) {
+	var got struct {
+		WorkID string `json:"work_id"`
+		Result string `json:"result"`
+		Report struct {
+			BuildOK      bool   `json:"build_ok"`
+			TestOutput   string `json:"test_output"`
+			CheckerNotes string `json:"checker_notes"`
+		} `json:"report"`
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/work/work_456/check" {
+			t.Fatalf("expected /api/work/work_456/check, got %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(core.CheckRecord{CheckID: "chk_alias", WorkID: "work_456", Result: got.Result})
+	}))
+	defer ts.Close()
+
+	parsed, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	t.Setenv("FASE_STATE_DIR", stateDir)
+	serveData, err := json.Marshal(serveInfo{
+		PID:  os.Getpid(),
+		Port: port,
+		CWD:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("marshal serve.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "serve.json"), serveData, 0o644); err != nil {
+		t.Fatalf("write serve.json: %v", err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{
+		"work", "check", "work_456",
+		"--result", "pass",
+		"--build-ok",
+		"--test-output", "go test ./internal/service",
+		"--notes", "verified canonical alias",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute work check command: %v", err)
+	}
+
+	if got.WorkID != "work_456" {
+		t.Fatalf("expected work_id to round-trip, got %q", got.WorkID)
+	}
+	if got.Result != "pass" {
+		t.Fatalf("expected result=pass, got %q", got.Result)
+	}
+	if !got.Report.BuildOK {
+		t.Fatal("expected build_ok=true")
+	}
+	if got.Report.TestOutput != "go test ./internal/service" {
+		t.Fatalf("unexpected test_output: %q", got.Report.TestOutput)
+	}
+	if got.Report.CheckerNotes != "verified canonical alias" {
+		t.Fatalf("unexpected checker_notes: %q", got.Report.CheckerNotes)
+	}
+	if !strings.Contains(stdout.String(), "check chk_alias: pass") {
+		t.Fatalf("unexpected stdout: %q", stdout.String())
 	}
 }
