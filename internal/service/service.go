@@ -2314,7 +2314,7 @@ func (s *Service) ProjectHydrate(ctx context.Context, req ProjectHydrateRequest)
 	// Pending attestations — work awaiting review.
 	var pendingAttestations []map[string]any
 	for _, w := range allWork {
-		if w.ExecutionState == core.WorkExecutionStateAwaitingAttestation {
+		if w.ExecutionState.Canonical() == core.WorkExecutionStateChecking {
 			pendingAttestations = append(pendingAttestations, map[string]any{
 				"work_id":               w.WorkID,
 				"title":                 w.Title,
@@ -3751,7 +3751,7 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 
 	// Attestation is transactional: recording the attestation also transitions
 	// the work item's execution state. If this work item owns attestation child
-	// work items, we keep the parent in awaiting_attestation until those children
+	// work items, we keep the parent in checking until those children
 	// complete; otherwise we preserve the legacy direct-attestation behavior.
 	switch req.Result {
 	case "passed":
@@ -3772,7 +3772,7 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 				}
 			}
 		} else if work.ExecutionState == core.WorkExecutionStateInProgress {
-			work.ExecutionState = core.WorkExecutionStateAwaitingAttestation
+			work.ExecutionState = core.WorkExecutionStateChecking
 		}
 		if hasAttestationChildren {
 			if err := s.refreshAttestationParentState(ctx, work.WorkID); err != nil {
@@ -3845,7 +3845,7 @@ func (s *Service) SignAttestationRecord(ctx context.Context, attestationID, sign
 }
 
 // WorkCheck stores a check record and transitions the work state.
-// Result "pass" moves to awaiting_attestation; "fail" returns to ready for rework.
+// Result "pass" moves to checking; "fail" returns to ready for rework.
 func (s *Service) WorkCheck(ctx context.Context, req WorkCheckRequest) (*WorkCheckResult, error) {
 	if req.WorkID == "" {
 		return nil, fmt.Errorf("%w: work_id is required", ErrInvalidInput)
@@ -3897,8 +3897,8 @@ func (s *Service) WorkCheck(ctx context.Context, req WorkCheckRequest) (*WorkChe
 	var nextState core.WorkExecutionState
 	var message string
 	if req.Result == "pass" {
-		nextState = core.WorkExecutionStateAwaitingAttestation
-		message = fmt.Sprintf("check passed (tests: %d passed, %d failed) — awaiting attestation",
+		nextState = core.WorkExecutionStateChecking
+		message = fmt.Sprintf("check passed (tests: %d passed, %d failed) — checking",
 			req.Report.TestsPassed, req.Report.TestsFailed)
 	} else {
 		nextState = core.WorkExecutionStateReady
@@ -6043,7 +6043,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 	if parent.AttestationFrozenAt == nil {
 		parent.AttestationFrozenAt = &now
 	}
-	parent.ExecutionState = core.WorkExecutionStateAwaitingAttestation
+	parent.ExecutionState = core.WorkExecutionStateChecking
 	parent.ClaimedBy = ""
 	parent.ClaimedUntil = nil
 	parent.UpdatedAt = now
@@ -6172,7 +6172,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 	_ = s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
 		UpdateID:       core.GenerateID("wup"),
 		WorkID:         parent.WorkID,
-		ExecutionState: core.WorkExecutionStateAwaitingAttestation,
+		ExecutionState: core.WorkExecutionStateChecking,
 		Message:        fmt.Sprintf("spawned %d attestation child work item(s)", createdCount),
 		CreatedBy:      "service",
 		CreatedAt:      now,
@@ -8037,7 +8037,7 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 		}
 	case core.JobStateCompleted:
 		if work.Kind != "attest" && len(defaultRequiredAttestations(work, work.RequiredAttestations, s.Config)) > 0 {
-			workState = core.WorkExecutionStateAwaitingAttestation
+			workState = core.WorkExecutionStateChecking
 		} else {
 			workState = core.WorkExecutionStateDone
 			if shouldSetPendingApproval(work) {
@@ -8061,8 +8061,9 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 	default:
 		workState = work.ExecutionState
 	}
+	workState = workState.Canonical()
 	work.ExecutionState = workState
-	if workState == core.WorkExecutionStateAwaitingAttestation {
+	if workState == core.WorkExecutionStateChecking {
 		if work.AttestationFrozenAt == nil {
 			frozenAt := now
 			work.AttestationFrozenAt = &frozenAt

@@ -629,8 +629,8 @@ func TestWorkLifecycleCommands(t *testing.T) {
 	if show.Work.CurrentJobID != runResult.Job.JobID {
 		t.Fatalf("expected current job %q, got %+v", runResult.Job.JobID, show.Work)
 	}
-	if show.Work.ExecutionState != "awaiting_attestation" {
-		t.Fatalf("expected awaiting_attestation execution state, got %+v", show.Work)
+	if show.Work.ExecutionState != "checking" {
+		t.Fatalf("expected checking execution state, got %+v", show.Work)
 	}
 	if show.Work.ApprovalState != "none" {
 		t.Fatalf("expected none approval state before attestation, got %+v", show.Work)

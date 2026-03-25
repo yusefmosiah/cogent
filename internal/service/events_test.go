@@ -655,7 +655,7 @@ func TestSupervisorMCPProvenanceEvents(t *testing.T) {
 	supervisorAttestEvent := WorkEvent{
 		Kind:      WorkEventAttested,
 		WorkID:    "work-super-2",
-		State:     "awaiting_attestation",
+		State:     "checking",
 		Actor:     ActorSupervisor,
 		Cause:     CauseAttestationRecorded,
 		Metadata:  map[string]string{"result": "passed"},

@@ -3456,7 +3456,7 @@ func TestSyncWorkStateFromJobMapping(t *testing.T) {
 		{"starting maps to in_progress", "", nil, core.JobStateStarting, core.WorkExecutionStateInProgress},
 		{"running maps to in_progress", "", nil, core.JobStateRunning, core.WorkExecutionStateInProgress},
 		{"waiting_input maps to in_progress", "", nil, core.JobStateWaitingInput, core.WorkExecutionStateInProgress},
-		{"completed task maps to awaiting_attestation", "", nil, core.JobStateCompleted, core.WorkExecutionStateAwaitingAttestation},
+		{"completed task maps to checking", "", nil, core.JobStateCompleted, core.WorkExecutionStateChecking},
 		{"completed attestation child maps to done", "attest", nil, core.JobStateCompleted, core.WorkExecutionStateDone},
 		{"failed maps to failed", "", nil, core.JobStateFailed, core.WorkExecutionStateFailed},
 		{"cancelled maps to cancelled", "", nil, core.JobStateCancelled, core.WorkExecutionStateCancelled},
@@ -3573,10 +3573,10 @@ func TestParentAggregationFromChildren(t *testing.T) {
 		t.Fatalf("refreshAttestationParentState: %v", err)
 	}
 
-	// Parent should still be awaiting attestation (child2 not done)
+	// Parent should still be checking (child2 not done)
 	parentItem, _ := svc.store.GetWorkItem(ctx, parent.WorkID)
-	if parentItem.ExecutionState != core.WorkExecutionStateAwaitingAttestation {
-		t.Fatalf("expected awaiting_attestation with one child done, got %s", parentItem.ExecutionState)
+	if parentItem.ExecutionState != core.WorkExecutionStateChecking {
+		t.Fatalf("expected checking with one child done, got %s", parentItem.ExecutionState)
 	}
 
 	// Fail child2
@@ -3671,8 +3671,8 @@ func TestResetWorkIgnoresHistoricalAttestationChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkItem: %v", err)
 	}
-	if parentItem.ExecutionState != core.WorkExecutionStateAwaitingAttestation {
-		t.Fatalf("expected new attempt to remain awaiting_attestation, got %s", parentItem.ExecutionState)
+	if parentItem.ExecutionState != core.WorkExecutionStateChecking {
+		t.Fatalf("expected new attempt to remain checking, got %s", parentItem.ExecutionState)
 	}
 
 	children, err = svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
