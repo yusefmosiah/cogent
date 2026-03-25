@@ -544,6 +544,10 @@ func (s *Store) insertWorkItem(ctx context.Context, db execer, rec core.WorkItem
 	if err != nil {
 		return fmt.Errorf("marshal work required attestations: %w", err)
 	}
+	requiredDocs, err := marshalJSON(rec.RequiredDocs)
+	if err != nil {
+		return fmt.Errorf("marshal work required docs: %w", err)
+	}
 	acceptance, err := marshalJSON(rec.Acceptance)
 	if err != nil {
 		return fmt.Errorf("marshal work acceptance: %w", err)
@@ -559,9 +563,9 @@ func (s *Store) insertWorkItem(ctx context.Context, db execer, rec core.WorkItem
 			work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 			priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,
 			preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
-			required_attestations_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
+			required_attestations_json, required_docs_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
 			current_job_id, current_session_id, claimed_by, claimed_until, attempt_epoch, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.WorkID,
 		rec.Title,
 		rec.Objective,
@@ -581,6 +585,7 @@ func (s *Store) insertWorkItem(ctx context.Context, db execer, rec core.WorkItem
 		string(preferredModels),
 		string(avoidModels),
 		string(requiredAttestations),
+		string(requiredDocs),
 		string(acceptance),
 		string(metadata),
 		nullIfEmpty(rec.HeadCommitOID),
@@ -629,6 +634,10 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 	if err != nil {
 		return fmt.Errorf("marshal work required attestations: %w", err)
 	}
+	requiredDocs, err := marshalJSON(rec.RequiredDocs)
+	if err != nil {
+		return fmt.Errorf("marshal work required docs: %w", err)
+	}
 	acceptance, err := marshalJSON(rec.Acceptance)
 	if err != nil {
 		return fmt.Errorf("marshal work acceptance: %w", err)
@@ -659,6 +668,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		        preferred_models_json = ?,
 		        avoid_models_json = ?,
 		        required_attestations_json = ?,
+		        required_docs_json = ?,
 		        acceptance_json = ?,
 		        metadata_json = ?,
 		        head_commit_oid = ?,
@@ -688,6 +698,7 @@ func (s *Store) UpdateWorkItem(ctx context.Context, rec core.WorkItemRecord) err
 		string(preferredModels),
 		string(avoidModels),
 		string(requiredAttestations),
+		string(requiredDocs),
 		string(acceptance),
 		string(metadata),
 		nullIfEmpty(rec.HeadCommitOID),
@@ -856,7 +867,7 @@ func (s *Store) getWorkItem(ctx context.Context, db execer, workID string) (core
 		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,
 		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
-		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
+		        required_attestations_json, required_docs_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
 		        current_job_id, current_session_id, claimed_by, claimed_until, attempt_epoch, created_at, updated_at
 		   FROM work_items
 		  WHERE work_id = ?`,
@@ -893,7 +904,7 @@ func (s *Store) ListWorkItems(ctx context.Context, limit int, kind, executionSta
 	query := `SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,
 		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
-		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
+		        required_attestations_json, required_docs_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
 		        current_job_id, current_session_id, claimed_by, claimed_until, attempt_epoch, created_at, updated_at
 		   FROM work_items`
 	if len(clauses) > 0 {
@@ -934,7 +945,7 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int, includeArchived bo
 			`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
 			        wi.priority, wi.position, wi.configuration_class, wi.budget_class, wi.required_capabilities_json, wi.required_model_traits_json,
 			        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
-			        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid, wi.attestation_frozen_at,
+			        wi.required_attestations_json, wi.required_docs_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid, wi.attestation_frozen_at,
 			        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.attempt_epoch, wi.created_at, wi.updated_at
 			   FROM work_items wi
 			  WHERE `+where+`
@@ -1195,7 +1206,7 @@ func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRe
 		`SELECT work_id, title, objective, kind, execution_state, approval_state, lock_state, phase,
 		        priority, position, configuration_class, budget_class, required_capabilities_json, required_model_traits_json,
 		        preferred_adapters_json, forbidden_adapters_json, preferred_models_json, avoid_models_json,
-		        required_attestations_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
+		        required_attestations_json, required_docs_json, acceptance_json, metadata_json, head_commit_oid, attestation_frozen_at,
 		        current_job_id, current_session_id, claimed_by, claimed_until, attempt_epoch, created_at, updated_at
 		   FROM work_items
 		  WHERE execution_state IN ('claimed', 'in_progress')
@@ -1389,7 +1400,7 @@ func (s *Store) ListWorkChildren(ctx context.Context, workID string, limit int) 
 		`SELECT wi.work_id, wi.title, wi.objective, wi.kind, wi.execution_state, wi.approval_state, wi.lock_state, wi.phase,
 		        wi.priority, wi.position, wi.configuration_class, wi.budget_class, wi.required_capabilities_json, wi.required_model_traits_json,
 		        wi.preferred_adapters_json, wi.forbidden_adapters_json, wi.preferred_models_json, wi.avoid_models_json,
-		        wi.required_attestations_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid, wi.attestation_frozen_at,
+			        wi.required_attestations_json, wi.required_docs_json, wi.acceptance_json, wi.metadata_json, wi.head_commit_oid, wi.attestation_frozen_at,
 		        wi.current_job_id, wi.current_session_id, wi.claimed_by, wi.claimed_until, wi.attempt_epoch, wi.created_at, wi.updated_at
 		   FROM work_edges we
 		   JOIN work_items wi ON wi.work_id = we.to_work_id
@@ -2765,6 +2776,7 @@ func (s *Store) bootstrap(ctx context.Context) error {
 
 	migrations := []string{
 		`ALTER TABLE work_items ADD COLUMN attempt_epoch INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE work_items ADD COLUMN required_docs_json TEXT NOT NULL DEFAULT '[]'`,
 		`INSERT OR IGNORE INTO attestation_records (
 			attestation_id, subject_kind, subject_id, result, summary, artifact_id,
 			job_id, session_id, metadata_json, created_by, created_at
@@ -3275,6 +3287,7 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	var preferredModelsJSON string
 	var avoidModelsJSON string
 	var requiredAttestationsJSON string
+	var requiredDocsJSON string
 	var acceptanceJSON string
 	var metadataJSON string
 	var headCommitOID sql.NullString
@@ -3299,6 +3312,7 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 		&preferredModelsJSON,
 		&avoidModelsJSON,
 		&requiredAttestationsJSON,
+		&requiredDocsJSON,
 		&acceptanceJSON,
 		&metadataJSON,
 		&headCommitOID,
@@ -3377,6 +3391,9 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	if err := json.Unmarshal([]byte(requiredAttestationsJSON), &rec.RequiredAttestations); err != nil {
 		return core.WorkItemRecord{}, fmt.Errorf("decode work required attestations: %w", err)
 	}
+	if err := json.Unmarshal([]byte(requiredDocsJSON), &rec.RequiredDocs); err != nil {
+		return core.WorkItemRecord{}, fmt.Errorf("decode work required docs: %w", err)
+	}
 	if err := json.Unmarshal([]byte(acceptanceJSON), &rec.Acceptance); err != nil {
 		return core.WorkItemRecord{}, fmt.Errorf("decode work acceptance: %w", err)
 	}
@@ -3403,6 +3420,9 @@ func scanWorkItem(scanner interface{ Scan(...any) error }) (core.WorkItemRecord,
 	}
 	if rec.RequiredAttestations == nil {
 		rec.RequiredAttestations = []core.RequiredAttestation{}
+	}
+	if rec.RequiredDocs == nil {
+		rec.RequiredDocs = []string{}
 	}
 	if rec.Acceptance == nil {
 		rec.Acceptance = map[string]any{}
@@ -3983,6 +4003,7 @@ CREATE TABLE IF NOT EXISTS work_items (
 	preferred_models_json TEXT NOT NULL DEFAULT '[]',
 	avoid_models_json TEXT NOT NULL DEFAULT '[]',
 	required_attestations_json TEXT NOT NULL DEFAULT '[]',
+	required_docs_json TEXT NOT NULL DEFAULT '[]',
 	acceptance_json TEXT NOT NULL DEFAULT '{}',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
 	head_commit_oid TEXT,

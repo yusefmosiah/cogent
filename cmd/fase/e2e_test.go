@@ -149,6 +149,7 @@ type cliWorkItem struct {
 	Kind             string         `json:"kind"`
 	ExecutionState   string         `json:"execution_state"`
 	ApprovalState    string         `json:"approval_state"`
+	RequiredDocs     []string       `json:"required_docs"`
 	CurrentJobID     string         `json:"current_job_id"`
 	CurrentSessionID string         `json:"current_session_id"`
 	ClaimedBy        string         `json:"claimed_by"`
@@ -964,6 +965,175 @@ func TestWorkLifecycleCommands(t *testing.T) {
 		if item.WorkID == constrainedWork.WorkID {
 			t.Fatalf("did not expect impossible-adapter work in ready list: %+v", ready)
 		}
+	}
+}
+
+func TestDocsRequiredWorkBlocksCompletionUntilRepoDocsAlign(t *testing.T) {
+	binary := buildFaseBinary(t)
+	configPath := writeFakeCodexConfig(t)
+	projectDir := t.TempDir()
+	stateDir := os.Getenv("FASE_STATE_DIR")
+	cacheDir := os.Getenv("FASE_CACHE_DIR")
+	configDir := os.Getenv("FASE_CONFIG_DIR")
+
+	env := append(os.Environ(),
+		"FASE_CAPABILITY_ENFORCEMENT=audit",
+		"FASE_AGENT_TOKEN=",
+		"FASE_CONFIG_DIR="+configDir,
+		"FASE_STATE_DIR="+stateDir,
+		"FASE_CACHE_DIR="+cacheDir,
+	)
+
+	serveCmd := exec.Command(binary, "--config", configPath, "serve", "--no-ui", "--no-browser")
+	serveCmd.Dir = projectDir
+	serveCmd.Env = env
+	var serveLogs bytes.Buffer
+	serveCmd.Stdout = &serveLogs
+	serveCmd.Stderr = &serveLogs
+	if err := serveCmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		if serveCmd.Process != nil {
+			_ = serveCmd.Process.Kill()
+			_, _ = serveCmd.Process.Wait()
+		}
+	})
+
+	waitForFile(t, filepath.Join(stateDir, "serve.json"), 10*time.Second, func() string {
+		return serveLogs.String()
+	})
+
+	createOutput := runFaseWithEnv(t, binary, configPath, projectDir, env,
+		"--json", "work", "create",
+		"--title", "Docs required work",
+		"--objective", "Implementation and docs must land together",
+		"--kind", "implement",
+		"--head-commit", "abc123",
+		"--required-attestations", `[{"verifier_kind":"deterministic","method":"test","blocking":true}]`,
+		"--required-docs", `["docs/review-bundle.md"]`,
+	)
+	var work cliWorkItem
+	if err := json.Unmarshal([]byte(createOutput), &work); err != nil {
+		t.Fatalf("unmarshal work create: %v\n%s", err, createOutput)
+	}
+	if len(work.RequiredDocs) != 1 || work.RequiredDocs[0] != "docs/review-bundle.md" {
+		t.Fatalf("expected required doc policy on work create, got %+v", work)
+	}
+
+	runOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "run", "--adapter", "codex", "--cwd", t.TempDir(), "--work", work.WorkID, "--prompt", "docs gate test")
+	var runResult cliRunResult
+	if err := json.Unmarshal([]byte(runOutput), &runResult); err != nil {
+		t.Fatalf("unmarshal run output: %v\n%s", err, runOutput)
+	}
+	waitForJobStateWithEnv(t, binary, configPath, projectDir, env, runResult.Job.JobID, map[string]bool{"completed": true})
+
+	docOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "doc-set", work.WorkID, "--path", "docs/review-bundle.md", "--title", "Review Bundle", "--body", "# Review\n")
+	var docSet struct {
+		Doc struct {
+			Path           string `json:"path"`
+			RepoFileExists bool   `json:"repo_file_exists"`
+		} `json:"doc"`
+	}
+	if err := json.Unmarshal([]byte(docOutput), &docSet); err != nil {
+		t.Fatalf("unmarshal doc-set output: %v\n%s", err, docOutput)
+	}
+	if docSet.Doc.Path != "docs/review-bundle.md" || docSet.Doc.RepoFileExists {
+		t.Fatalf("expected tracked doc without repo file yet, got %+v", docSet.Doc)
+	}
+
+	checkOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "check", "create", work.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/fase\nok\tgithub.com/yusefmosiah/fase/cmd/fase\t0.111s", "--notes", "verified canonical review bundle")
+	var checkRecord struct {
+		CheckID string `json:"check_id"`
+	}
+	if err := json.Unmarshal([]byte(checkOutput), &checkRecord); err != nil {
+		t.Fatalf("unmarshal check output: %v\n%s", err, checkOutput)
+	}
+	if checkRecord.CheckID == "" {
+		t.Fatalf("expected check record id, got %+v", checkRecord)
+	}
+
+	showOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "show", work.WorkID)
+	var show cliWorkShowResult
+	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
+		t.Fatalf("unmarshal work show: %v\n%s", err, showOutput)
+	}
+	if show.Work.ExecutionState != "checking" {
+		t.Fatalf("expected checking after completed run, got %+v", show.Work)
+	}
+
+	var attestationChildren []cliWorkItem
+	for i := range show.Children {
+		if show.Children[i].Kind == "attest" {
+			attestationChildren = append(attestationChildren, show.Children[i])
+		}
+	}
+	if len(attestationChildren) == 0 {
+		t.Fatalf("expected attestation child, got %+v", show.Children)
+	}
+
+	for _, attestationChild := range attestationChildren {
+		nonce, _ := attestationChild.Metadata["attestation_nonce"].(string)
+		if strings.TrimSpace(nonce) == "" {
+			t.Fatalf("expected attestation nonce, got %+v", attestationChild)
+		}
+		attestOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "attest", attestationChild.WorkID, "--nonce", nonce, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
+		var attestation cliAttestationPayload
+		if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
+			t.Fatalf("unmarshal attestation output: %v\n%s", err, attestOutput)
+		}
+		if attestation.Work.ExecutionState != "done" {
+			t.Fatalf("expected attestation child to finish, got %+v", attestation.Work)
+		}
+	}
+
+	showOutput = runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "show", work.WorkID)
+	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
+		t.Fatalf("unmarshal work show after attestation: %v\n%s", err, showOutput)
+	}
+	if show.Work.ExecutionState != "checking" {
+		t.Fatalf("expected docs-required work to remain checking until repo doc exists, got %+v", show.Work)
+	}
+	if len(show.Work.RequiredDocs) != 1 || show.Work.RequiredDocs[0] != "docs/review-bundle.md" {
+		t.Fatalf("expected required docs in runtime output, got %+v", show.Work)
+	}
+	if len(show.Docs) != 1 || show.Docs[0].RepoFileExists || show.Docs[0].MatchesRepo {
+		t.Fatalf("expected unresolved repo doc status, got %+v", show.Docs)
+	}
+
+	failCmd := exec.Command(binary, "--config", configPath, "--json", "work", "update", work.WorkID, "--execution-state", "done", "--message", "attempt done before docs align")
+	failCmd.Dir = projectDir
+	failCmd.Env = env
+	failOutput, err := failCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected work update done to fail before docs align:\n%s", failOutput)
+	}
+	if !strings.Contains(string(failOutput), "docs/review-bundle.md") {
+		t.Fatalf("expected missing required doc error, got %s", failOutput)
+	}
+
+	repoDoc := filepath.Join(projectDir, "docs", "review-bundle.md")
+	if err := os.MkdirAll(filepath.Dir(repoDoc), 0o755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.WriteFile(repoDoc, []byte("# Review\n"), 0o644); err != nil {
+		t.Fatalf("write repo doc: %v", err)
+	}
+
+	showOutput = runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "show", work.WorkID)
+	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
+		t.Fatalf("unmarshal work show after repo doc write: %v\n%s", err, showOutput)
+	}
+	if len(show.Docs) != 1 || !show.Docs[0].RepoFileExists || !show.Docs[0].MatchesRepo {
+		t.Fatalf("expected aligned repo doc status, got %+v", show.Docs)
+	}
+
+	doneOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "update", work.WorkID, "--execution-state", "done", "--message", "docs aligned")
+	if err := json.Unmarshal([]byte(doneOutput), &work); err != nil {
+		t.Fatalf("unmarshal work update output: %v\n%s", err, doneOutput)
+	}
+	if work.ExecutionState != "done" {
+		t.Fatalf("expected done after repo doc alignment, got %+v", work)
 	}
 }
 

@@ -104,6 +104,7 @@ func TestCreateWorkItemAndGetRoundtrip(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 	w := sampleWorkItem("work_01")
+	w.RequiredDocs = []string{"docs/review.md", "docs/runtime.md"}
 
 	if err := s.CreateWorkItem(ctx, w); err != nil {
 		t.Fatalf("CreateWorkItem: %v", err)
@@ -137,6 +138,9 @@ func TestCreateWorkItemAndGetRoundtrip(t *testing.T) {
 	}
 	if got.AttemptEpoch != w.AttemptEpoch {
 		t.Errorf("AttemptEpoch = %d, want %d", got.AttemptEpoch, w.AttemptEpoch)
+	}
+	if len(got.RequiredDocs) != len(w.RequiredDocs) || got.RequiredDocs[0] != w.RequiredDocs[0] || got.RequiredDocs[1] != w.RequiredDocs[1] {
+		t.Errorf("RequiredDocs = %v, want %v", got.RequiredDocs, w.RequiredDocs)
 	}
 	if got.Metadata["key"] != w.Metadata["key"] {
 		t.Errorf("Metadata[key] = %v, want %v", got.Metadata["key"], w.Metadata["key"])
@@ -183,6 +187,7 @@ func TestUpdateWorkItem(t *testing.T) {
 	got.ExecutionState = core.WorkExecutionStateClaimed
 	got.Priority = 10
 	got.AttemptEpoch = 3
+	got.RequiredDocs = []string{"docs/updated.md"}
 	got.UpdatedAt = time.Now().UTC()
 
 	if err := s.UpdateWorkItem(ctx, got); err != nil {
@@ -207,6 +212,9 @@ func TestUpdateWorkItem(t *testing.T) {
 	}
 	if updated.AttemptEpoch != 3 {
 		t.Errorf("AttemptEpoch = %d, want %d", updated.AttemptEpoch, 3)
+	}
+	if len(updated.RequiredDocs) != 1 || updated.RequiredDocs[0] != "docs/updated.md" {
+		t.Errorf("RequiredDocs = %v, want [docs/updated.md]", updated.RequiredDocs)
 	}
 }
 

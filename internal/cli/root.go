@@ -67,6 +67,7 @@ type workCreateOptions struct {
 	preferredModels      string
 	avoidModels          string
 	requiredAttestations string
+	requiredDocs         string
 	acceptance           string
 	headCommitOID        string
 	configurationClass   string
@@ -960,6 +961,10 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 			if err != nil {
 				return exitf(2, "invalid --required-attestations JSON: %v", err)
 			}
+			requiredDocs, err := parseRequiredDocs(createOpts.requiredDocs)
+			if err != nil {
+				return exitf(2, "invalid --required-docs JSON: %v", err)
+			}
 			req := service.WorkCreateRequest{
 				Title:                createOpts.title,
 				Objective:            createOpts.objective,
@@ -975,6 +980,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 				PreferredModels:      splitCSV(createOpts.preferredModels),
 				AvoidModels:          splitCSV(createOpts.avoidModels),
 				RequiredAttestations: requiredAttestations,
+				RequiredDocs:         requiredDocs,
 				Acceptance:           acceptance,
 				HeadCommitOID:        createOpts.headCommitOID,
 				ConfigurationClass:   createOpts.configurationClass,
@@ -1006,6 +1012,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 	createCmd.Flags().StringVar(&createOpts.preferredModels, "preferred-models", "", "comma-separated preferred model ids")
 	createCmd.Flags().StringVar(&createOpts.avoidModels, "avoid-models", "", "comma-separated model ids to avoid")
 	createCmd.Flags().StringVar(&createOpts.requiredAttestations, "required-attestations", "", "JSON array of required attestation policy slots")
+	createCmd.Flags().StringVar(&createOpts.requiredDocs, "required-docs", "", "JSON array of repo-relative document paths required for clean completion")
 	createCmd.Flags().StringVar(&createOpts.acceptance, "acceptance", "", "JSON object for acceptance criteria")
 	createCmd.Flags().StringVar(&createOpts.headCommitOID, "head-commit", "", "Git commit oid currently associated with the work")
 	createCmd.Flags().StringVar(&createOpts.configurationClass, "configuration-class", "", "configuration class for attestation and dispatch defaults")
@@ -2923,6 +2930,11 @@ func renderWorkItem(cmd *cobra.Command, jsonOutput bool, work *core.WorkItemReco
 			return err
 		}
 	}
+	if len(work.RequiredDocs) > 0 {
+		if err := writef(cmd.OutOrStdout(), "  required_docs=%d\n", len(work.RequiredDocs)); err != nil {
+			return err
+		}
+	}
 	if len(work.PreferredModels) > 0 {
 		if err := writef(cmd.OutOrStdout(), "  preferred_models=%s\n", strings.Join(work.PreferredModels, ",")); err != nil {
 			return err
@@ -3802,6 +3814,20 @@ func parseRequiredAttestations(value string) ([]core.RequiredAttestation, error)
 		if decoded[i].Metadata == nil {
 			decoded[i].Metadata = map[string]any{}
 		}
+	}
+	return decoded, nil
+}
+
+func parseRequiredDocs(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return []string{}, nil
+	}
+	var decoded []string
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return nil, err
+	}
+	if decoded == nil {
+		decoded = []string{}
 	}
 	return decoded, nil
 }

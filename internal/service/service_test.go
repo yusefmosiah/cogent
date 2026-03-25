@@ -2567,6 +2567,216 @@ func TestWorkShowDocsReportMissingAndDriftedRepoFiles(t *testing.T) {
 	}
 }
 
+func TestCreateWorkNormalizesRequiredDocs(t *testing.T) {
+	svc, repoRoot := newRepoBackedTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:        "doc policy work",
+		Objective:    "normalize required doc paths",
+		Kind:         "attest",
+		RequiredDocs: []string{filepath.Join(repoRoot, "docs", "policy.md"), "docs/policy.md"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+	if len(work.RequiredDocs) != 1 || work.RequiredDocs[0] != "docs/policy.md" {
+		t.Fatalf("expected normalized required docs, got %+v", work.RequiredDocs)
+	}
+}
+
+func TestRequiredDocsGateBlocksDoneUntilRepoDocAligned(t *testing.T) {
+	svc, repoRoot := newRepoBackedTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:        "docs gate",
+		Objective:    "required docs must align before done",
+		Kind:         "attest",
+		RequiredDocs: []string{"docs/review-bundle.md"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	_, err = svc.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         work.WorkID,
+		ExecutionState: core.WorkExecutionStateDone,
+		Message:        "attempt done without tracked doc",
+		CreatedBy:      "test",
+	})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "required doc docs/review-bundle.md is not tracked") {
+		t.Fatalf("expected missing required doc error, got %v", err)
+	}
+
+	repoFile := filepath.Join(repoRoot, "docs", "review-bundle.md")
+	mustWriteFile(t, repoFile, "# Review\n")
+	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Review Bundle", "# Review\n", "markdown"); err != nil {
+		t.Fatalf("SetDocContent: %v", err)
+	}
+
+	mustWriteFile(t, repoFile, "# Review\nupdated\n")
+	_, err = svc.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         work.WorkID,
+		ExecutionState: core.WorkExecutionStateDone,
+		Message:        "attempt done with drifted doc",
+		CreatedBy:      "test",
+	})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "stale or mismatched") {
+		t.Fatalf("expected drifted required doc error, got %v", err)
+	}
+
+	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Review Bundle", "# Review\nupdated\n", "markdown"); err != nil {
+		t.Fatalf("SetDocContent updated: %v", err)
+	}
+
+	updated, err := svc.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         work.WorkID,
+		ExecutionState: core.WorkExecutionStateDone,
+		Message:        "done after doc alignment",
+		CreatedBy:      "test",
+	})
+	if err != nil {
+		t.Fatalf("UpdateWork after doc alignment: %v", err)
+	}
+	if updated.ExecutionState != core.WorkExecutionStateDone {
+		t.Fatalf("expected done state after doc alignment, got %s", updated.ExecutionState)
+	}
+}
+
+func TestSyncWorkStateFromJobLeavesDocsRequiredWorkCheckingUntilDocsAlign(t *testing.T) {
+	svc, repoRoot := newRepoBackedTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:        "sync docs gate",
+		Objective:    "completed jobs stay checking until required docs align",
+		Kind:         "attest",
+		RequiredDocs: []string{"docs/runtime.md"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	job := core.JobRecord{
+		JobID:     core.GenerateID("job"),
+		SessionID: core.GenerateID("ses"),
+		WorkID:    work.WorkID,
+		State:     core.JobStateCompleted,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := svc.syncWorkStateFromJob(ctx, job, nil); err != nil {
+		t.Fatalf("syncWorkStateFromJob missing docs: %v", err)
+	}
+
+	current, err := svc.store.GetWorkItem(ctx, work.WorkID)
+	if err != nil {
+		t.Fatalf("GetWorkItem: %v", err)
+	}
+	if current.ExecutionState != core.WorkExecutionStateChecking {
+		t.Fatalf("expected checking with unresolved required docs, got %s", current.ExecutionState)
+	}
+
+	repoFile := filepath.Join(repoRoot, "docs", "runtime.md")
+	mustWriteFile(t, repoFile, "# Runtime\n")
+	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Runtime", "# Runtime\n", "markdown"); err != nil {
+		t.Fatalf("SetDocContent: %v", err)
+	}
+
+	job2 := job
+	job2.JobID = core.GenerateID("job")
+	job2.UpdatedAt = time.Now().UTC()
+	if err := svc.syncWorkStateFromJob(ctx, job2, nil); err != nil {
+		t.Fatalf("syncWorkStateFromJob aligned docs: %v", err)
+	}
+
+	current, err = svc.store.GetWorkItem(ctx, work.WorkID)
+	if err != nil {
+		t.Fatalf("GetWorkItem after alignment: %v", err)
+	}
+	if current.ExecutionState != core.WorkExecutionStateDone {
+		t.Fatalf("expected done once required docs align, got %s", current.ExecutionState)
+	}
+}
+
+func TestAttestAndApproveWorkRespectRequiredDocsGate(t *testing.T) {
+	svc, repoRoot := newRepoBackedTestService(t)
+	ctx := context.Background()
+
+	work, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "attestation plus docs gate",
+		Objective: "docs and attestations share one completion gate",
+		RequiredAttestations: []core.RequiredAttestation{
+			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
+		},
+		RequiredDocs: []string{"docs/review.md"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWork: %v", err)
+	}
+
+	repoFile := filepath.Join(repoRoot, "docs", "review.md")
+	mustWriteFile(t, repoFile, "# Review\n")
+	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Review", "# Review\n", "markdown"); err != nil {
+		t.Fatalf("SetDocContent: %v", err)
+	}
+	mustWriteFile(t, repoFile, "# Review\nupdated\n")
+
+	if _, err := svc.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         work.WorkID,
+		ExecutionState: core.WorkExecutionStateChecking,
+		Message:        "implementation complete",
+		CreatedBy:      "worker",
+	}); err != nil {
+		t.Fatalf("UpdateWork checking: %v", err)
+	}
+
+	_, updated, err := svc.AttestWork(ctx, WorkAttestRequest{
+		WorkID:       work.WorkID,
+		Result:       "passed",
+		Summary:      "attestation passed",
+		VerifierKind: "attestation",
+		Method:       "automated_review",
+		CreatedBy:    "verifier",
+	})
+	if err != nil {
+		t.Fatalf("AttestWork: %v", err)
+	}
+	if updated.ExecutionState != core.WorkExecutionStateChecking {
+		t.Fatalf("expected checking while required docs drift, got %s", updated.ExecutionState)
+	}
+
+	if _, err := svc.ApproveWork(ctx, work.WorkID, "approver", "attempt approval with drifted docs"); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "docs/review.md") {
+		t.Fatalf("expected docs gate approval error, got %v", err)
+	}
+
+	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Review", "# Review\nupdated\n", "markdown"); err != nil {
+		t.Fatalf("SetDocContent aligned: %v", err)
+	}
+
+	done, err := svc.UpdateWork(ctx, WorkUpdateRequest{
+		WorkID:         work.WorkID,
+		ExecutionState: core.WorkExecutionStateDone,
+		Message:        "done after docs align",
+		CreatedBy:      "worker",
+	})
+	if err != nil {
+		t.Fatalf("UpdateWork done after docs align: %v", err)
+	}
+	if done.ExecutionState != core.WorkExecutionStateDone {
+		t.Fatalf("expected done after docs align, got %s", done.ExecutionState)
+	}
+
+	approved, err := svc.ApproveWork(ctx, work.WorkID, "approver", "approve once docs align")
+	if err != nil {
+		t.Fatalf("ApproveWork after docs align: %v", err)
+	}
+	if approved.ApprovalState != core.WorkApprovalStateVerified {
+		t.Fatalf("expected verified approval state, got %s", approved.ApprovalState)
+	}
+}
+
 func TestWorkJSONNormalizesDeprecatedExecutionState(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

@@ -406,6 +406,7 @@ type WorkItemRecord struct {
 	PreferredModels      []string              `json:"preferred_models,omitempty"`
 	AvoidModels          []string              `json:"avoid_models,omitempty"`
 	RequiredAttestations []RequiredAttestation `json:"required_attestations,omitempty"`
+	RequiredDocs         []string              `json:"required_docs,omitempty"`
 	Acceptance           map[string]any        `json:"acceptance,omitempty"`
 	Metadata             map[string]any        `json:"metadata,omitempty"`
 	HeadCommitOID        string                `json:"head_commit_oid,omitempty"`

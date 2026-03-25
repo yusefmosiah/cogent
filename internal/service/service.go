@@ -334,6 +334,7 @@ type WorkCreateRequest struct {
 	PreferredModels      []string                   `json:"preferred_models,omitempty"`
 	AvoidModels          []string                   `json:"avoid_models,omitempty"`
 	RequiredAttestations []core.RequiredAttestation `json:"required_attestations,omitempty"`
+	RequiredDocs         []string                   `json:"required_docs,omitempty"`
 	Acceptance           map[string]any             `json:"acceptance,omitempty"`
 	Metadata             map[string]any             `json:"metadata,omitempty"`
 	HeadCommitOID        string                     `json:"head_commit_oid,omitempty"`
@@ -1919,6 +1920,10 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 	if kind == "" {
 		kind = "task"
 	}
+	requiredDocs, err := s.normalizeRequiredDocPaths(ctx, req.RequiredDocs)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	lockState := req.LockState
 	if lockState == "" {
@@ -1942,6 +1947,7 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		PreferredModels:      cloneSlice(req.PreferredModels),
 		AvoidModels:          cloneSlice(req.AvoidModels),
 		Acceptance:           cloneMap(req.Acceptance),
+		RequiredDocs:         requiredDocs,
 		Metadata:             cloneMap(req.Metadata),
 		HeadCommitOID:        strings.TrimSpace(req.HeadCommitOID),
 		AttemptEpoch:         1,
@@ -3548,6 +3554,11 @@ func (s *Service) ApproveWork(ctx context.Context, workID, createdBy, message st
 	if err != nil {
 		return nil, normalizeStoreError("work", workID, err)
 	}
+	if issues, err := s.completionGateIssues(ctx, work); err != nil {
+		return nil, err
+	} else if len(issues) > 0 {
+		return nil, fmt.Errorf("%w: completion policy unresolved: %s", ErrInvalidInput, strings.Join(issues, "; "))
+	}
 	attestations, err := s.store.ListAttestationRecords(ctx, "work", workID, 200)
 	if err != nil {
 		return nil, err
@@ -3646,6 +3657,11 @@ func (s *Service) PromoteWork(ctx context.Context, req WorkPromoteRequest) (*cor
 	work, err := s.store.GetWorkItem(ctx, req.WorkID)
 	if err != nil {
 		return nil, nil, normalizeStoreError("work", req.WorkID, err)
+	}
+	if issues, err := s.completionGateIssues(ctx, work); err != nil {
+		return nil, nil, err
+	} else if len(issues) > 0 {
+		return nil, nil, fmt.Errorf("%w: completion policy unresolved: %s", ErrInvalidInput, strings.Join(issues, "; "))
 	}
 	if work.ApprovalState != core.WorkApprovalStateVerified {
 		return nil, nil, fmt.Errorf("%w: work must be approved before promotion", ErrInvalidInput)
@@ -3828,11 +3844,10 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 	case "passed":
 		if !hasAttestationChildren {
 			shouldSetDone := true
-			if len(work.RequiredAttestations) > 0 {
-				allAttestations, fetchErr := s.store.ListAttestationRecords(ctx, "work", req.WorkID, 200)
-				if fetchErr == nil {
-					shouldSetDone = requiredAttestationsResolved(work, allAttestations)
-				}
+			if issues, gateErr := s.completionGateIssues(ctx, work); gateErr != nil {
+				return nil, nil, gateErr
+			} else if len(issues) > 0 {
+				shouldSetDone = false
 			}
 			if shouldSetDone {
 				work.ExecutionState = core.WorkExecutionStateDone
@@ -4107,6 +4122,26 @@ func (s *Service) GetDocContent(ctx context.Context, workID string) ([]core.DocC
 		docs[i] = s.enrichDocRecord(ctx, docs[i])
 	}
 	return docs, nil
+}
+
+func (s *Service) normalizeRequiredDocPaths(ctx context.Context, raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	paths := make([]string, 0, len(raw))
+	for _, candidate := range raw {
+		path, err := s.normalizeDocPath(ctx, candidate)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid required doc path %q: %v", ErrInvalidInput, candidate, err)
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 func (s *Service) normalizeDocPath(ctx context.Context, raw string) (string, error) {
@@ -6444,6 +6479,67 @@ func shouldSetPendingApproval(work core.WorkItemRecord) bool {
 	return false
 }
 
+func (s *Service) requiredDocIssues(ctx context.Context, work core.WorkItemRecord) ([]string, error) {
+	if len(work.RequiredDocs) == 0 {
+		return nil, nil
+	}
+	docs, err := s.GetDocContent(ctx, work.WorkID)
+	if err != nil {
+		return nil, err
+	}
+	docsByPath := make(map[string]core.DocContentRecord, len(docs))
+	for _, doc := range docs {
+		docsByPath[doc.Path] = doc
+	}
+	issues := make([]string, 0, len(work.RequiredDocs))
+	for _, path := range work.RequiredDocs {
+		doc, ok := docsByPath[path]
+		if !ok {
+			issues = append(issues, fmt.Sprintf("required doc %s is not tracked for this work", path))
+			continue
+		}
+		if !doc.RepoFileExists {
+			issues = append(issues, fmt.Sprintf("required doc %s is missing from the repo", path))
+			continue
+		}
+		if !doc.MatchesRepo {
+			issues = append(issues, fmt.Sprintf("required doc %s is stale or mismatched with the repo file", path))
+		}
+	}
+	return issues, nil
+}
+
+func (s *Service) completionGateIssues(ctx context.Context, work core.WorkItemRecord) ([]string, error) {
+	var issues []string
+
+	children, err := s.store.ListWorkChildren(ctx, work.WorkID, 100)
+	if err != nil {
+		return nil, err
+	}
+	for _, child := range children {
+		if child.Kind == "attest" && childMatchesCurrentAttempt(work, child) && child.ExecutionState != core.WorkExecutionStateDone {
+			issues = append(issues, fmt.Sprintf("pending attestation child %s (state: %s)", child.WorkID, child.ExecutionState))
+		}
+	}
+
+	if len(work.RequiredAttestations) > 0 {
+		attestations, err := s.store.ListAttestationRecords(ctx, "work", work.WorkID, 200)
+		if err != nil {
+			return nil, err
+		}
+		if !requiredAttestationsResolved(work, attestations) {
+			issues = append(issues, "unresolved required attestations")
+		}
+	}
+
+	docIssues, err := s.requiredDocIssues(ctx, work)
+	if err != nil {
+		return nil, err
+	}
+	issues = append(issues, docIssues...)
+	return issues, nil
+}
+
 func currentAttemptEpoch(work core.WorkItemRecord) int {
 	if work.AttemptEpoch > 0 {
 		return work.AttemptEpoch
@@ -8128,7 +8224,9 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 			work.AttestationFrozenAt = &frozenAt
 		}
 	case core.JobStateCompleted:
-		if work.Kind != "attest" && len(defaultRequiredAttestations(work, work.RequiredAttestations, s.Config)) > 0 {
+		if issues, err := s.completionGateIssues(ctx, work); err != nil {
+			return err
+		} else if len(issues) > 0 {
 			workState = core.WorkExecutionStateChecking
 		} else {
 			workState = core.WorkExecutionStateDone
@@ -8311,23 +8409,13 @@ func emitForceDoneWarning(workID, actor string) {
 // terminal-success state (done, archived) because it has unresolved attestation
 // requirements or pending attestation children.
 func (s *Service) guardDoneTransition(ctx context.Context, work core.WorkItemRecord) error {
-	// Check for attestation children that aren't done
-	children, err := s.store.ListWorkChildren(ctx, work.WorkID, 100)
-	if err == nil {
-		for _, child := range children {
-			if child.Kind == "attest" && childMatchesCurrentAttempt(work, child) && child.ExecutionState != core.WorkExecutionStateDone {
-				return fmt.Errorf("%w: work item %s has pending attestation child %s (state: %s)",
-					ErrInvalidInput, work.WorkID, child.WorkID, child.ExecutionState)
-			}
-		}
+	issues, err := s.completionGateIssues(ctx, work)
+	if err != nil {
+		return err
 	}
-	// Check required attestations (legacy path without children)
-	if len(work.RequiredAttestations) > 0 {
-		attestations, fetchErr := s.store.ListAttestationRecords(ctx, "work", work.WorkID, 200)
-		if fetchErr == nil && !requiredAttestationsResolved(work, attestations) {
-			return fmt.Errorf("%w: work item %s has unresolved required attestations",
-				ErrInvalidInput, work.WorkID)
-		}
+	if len(issues) > 0 {
+		return fmt.Errorf("%w: work item %s cannot transition to terminal success: %s",
+			ErrInvalidInput, work.WorkID, strings.Join(issues, "; "))
 	}
 	return nil
 }
@@ -8392,6 +8480,11 @@ func (s *Service) refreshAttestationParentState(ctx context.Context, parentID st
 		return err
 	}
 	if !requiredAttestationsResolved(parent, attestations) {
+		return nil
+	}
+	if issues, err := s.completionGateIssues(ctx, parent); err != nil {
+		return err
+	} else if len(issues) > 0 {
 		return nil
 	}
 
