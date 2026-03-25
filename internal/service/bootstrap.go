@@ -205,6 +205,7 @@ func (s *Service) BootstrapCreate(ctx context.Context, req BootstrapCreateReques
 		Title:     title,
 		Objective: objective,
 		Kind:      kind,
+		CreatedBy: "service",
 		Metadata: map[string]any{
 			"bootstrap_roots":            assessment.Roots,
 			"bootstrap_ready":            assessment.BootstrapReady,

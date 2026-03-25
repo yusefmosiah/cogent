@@ -3909,6 +3909,7 @@ func (s *Service) SetDocContent(ctx context.Context, workID, path, title, body, 
 				Title:     title,
 				Objective: objective,
 				Kind:      kind,
+				CreatedBy: "service",
 			})
 			if err != nil {
 				return nil, "", fmt.Errorf("auto-create work item for doc: %w", err)
@@ -6009,6 +6010,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 			PreferredModels:      child.PreferredModels,
 			RequiredAttestations: child.RequiredAttestations,
 			Metadata:             child.Metadata,
+			CreatedBy:            "service",
 		})
 		if createErr != nil {
 			_, _ = s.UpdateWork(ctx, WorkUpdateRequest{

@@ -144,9 +144,9 @@ func actorFromClaimant(claimant string) EventActor {
 }
 
 // ActorFromCreatedBy maps a createdBy string to an EventActor.
-// Default case returns ActorService (not ActorWorker) to ensure service-generated
-// CreateWork and related paths emit ActorService when no explicit worker/supervisor/host
-// provenance is supplied.
+// Empty string defaults to ActorWorker to match canonical test expectations.
+// True service-generated paths must explicitly pass CreatedBy="service" to
+// emit ActorService when intended.
 func ActorFromCreatedBy(createdBy string) EventActor {
 	switch createdBy {
 	case "housekeeping":
@@ -159,12 +159,11 @@ func ActorFromCreatedBy(createdBy string) EventActor {
 		return ActorMCP
 	case "host":
 		return ActorHost
-	case "service", "":
-		// Explicit "service" or empty (omitted) returns ActorService.
-		// This ensures service-generated CreateWork paths default correctly.
+	case "service":
+		// Explicit "service" returns ActorService for true service-generated paths.
 		return ActorService
 	default:
-		// Any other explicit value (e.g., "worker", "cli") maps to ActorWorker.
+		// Empty string and any unknown values default to ActorWorker.
 		return ActorWorker
 	}
 }
