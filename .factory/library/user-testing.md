@@ -140,3 +140,40 @@ Lifecycle normalization assertions test canonical lifecycle vocabulary, deprecat
 7. Verify attestation children by creating parent work with review policy and checking child creation and aggregation
 8. Verify retry/reset by resetting work items and confirming clean re-entry state with no stale linkage
 9. Keep the entire milestone in a single validator run to ensure deterministic state progression
+
+## Flow Validator Guidance: verification-unification
+
+### Isolation Rules
+
+Verification unification assertions test the canonical verification lifecycle, check submission contract across surfaces, evidence requirements, completion gating, reviewer evidence bundle, and verify terminology. All assertions share the same work-graph state and should run in a single serialized validator to avoid interference from concurrent check submissions and state mutations.
+
+### Resources and Boundaries
+
+- Use the already-running `fase serve` on port `5380`
+- Do NOT start additional serve instances
+- Use CLI, HTTP/API, and browser UI (via `agent-browser`) for comprehensive surface testing
+- Create test work items with unique milestone-scoped identifiers (e.g., prefix with "verify-unif-test-")
+- Clean up test work items and check records after validation or leave them for synthesis inspection
+
+### Assertions to Test
+
+- **VAL-VERIFY-001**: The verification lifecycle has one canonical handoff. Verify that all surviving user-facing surfaces use one verification lifecycle and one meaning for the worker-to-verification handoff, with `checking` as the single canonical handoff state.
+- **VAL-VERIFY-002**: Check submission has one semantic contract across surviving surfaces. Verify that every surviving check-submission surface is either the canonical path or a documented exact alias to it, producing the same record shape, validation rules, and post-submit behavior.
+- **VAL-VERIFY-003**: Passing checks require real evidence and durable artifacts. Verify that a passing check is rejected unless required evidence exists (successful build, no failed tests, valid persisted artifact paths) and that accepted check evidence remains reviewable after ephemeral worktree state is gone.
+- **VAL-VERIFY-004**: Checks are evidence-only and blocking policy gates final success. Verify that checks collect evidence but do not independently satisfy blocking review policy, failed checks reopen the implementation loop, and unresolved blocking verification prevents final success.
+- **VAL-VERIFY-005**: Reviewers consume one canonical evidence bundle. Verify that there is one canonical reviewer flow exposing current work state, checks, attestations, artifacts, linked docs, and approvals without requiring guesswork across duplicate surfaces.
+- **VAL-VERIFY-006**: "Verify" terminology is unambiguous across audit and completion flows. Verify that any surviving verify-named surface is either the canonical completion-review bundle or is explicitly limited to cryptographic/audit verification.
+- **VAL-CROSS-001**: Supervisor-to-verification flow runs end-to-end on canonical states. Verify that a supervisor-dispatched work item moves through the normalized lifecycle into the canonical verification path with no dependency on legacy active states and with preserved work/job context across worker and verifier steps.
+
+### Testing Approach
+
+1. Use CLI commands to create work items, submit checks through different surfaces, and manipulate verification states
+2. Use HTTP API to inspect work item state, check records, attestation records, and verification artifacts
+3. Verify canonical verification lifecycle by checking that `checking` is the handoff state across CLI JSON, HTTP responses, and browser UI work detail views
+4. Verify check submission contract parity by submitting checks through CLI, HTTP, and any other surviving surfaces and comparing record shapes, validation rules, and post-submit state behavior
+5. Verify evidence requirements by attempting to submit passing checks without required artifacts and confirming rejection
+6. Verify completion gating by creating work items with blocking review policy, submitting passing checks, and confirming that final success remains blocked until the canonical policy resolves
+7. Verify canonical evidence bundle by accessing the reviewer flow through CLI, HTTP, and browser UI and confirming all evidence (checks, attestations, artifacts, docs) is visible in one unified view
+8. Verify verify terminology by inspecting CLI help, HTTP endpoint names, and browser UI labels for unambiguous usage of "verify"
+9. Verify end-to-end supervisor-to-verification flow by dispatching work through the supervisor and tracing the full lifecycle from ready → claimed → working → checking → done with canonical state names
+10. Keep the entire milestone in a single validator run to ensure deterministic state progression and cross-assertion coherence
