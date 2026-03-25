@@ -170,6 +170,71 @@ func TestCheckCreateCommandIncludesArtifacts(t *testing.T) {
 	}
 }
 
+func TestCheckListCommandUsesCanonicalDefaultLimit(t *testing.T) {
+	var gotWorkID string
+	var gotLimit string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/check/list" {
+			t.Fatalf("expected /api/check/list, got %s", r.URL.Path)
+		}
+		gotWorkID = r.URL.Query().Get("work_id")
+		gotLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]core.CheckRecord{{
+			CheckID: "chk_list",
+			WorkID:  gotWorkID,
+			Result:  "pass",
+		}})
+	}))
+	defer ts.Close()
+
+	parsed, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	t.Setenv("FASE_STATE_DIR", stateDir)
+	serveData, err := json.Marshal(serveInfo{
+		PID:  os.Getpid(),
+		Port: port,
+		CWD:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("marshal serve.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "serve.json"), serveData, 0o644); err != nil {
+		t.Fatalf("write serve.json: %v", err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"check", "list", "work_789"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute check list command: %v", err)
+	}
+
+	if gotWorkID != "work_789" {
+		t.Fatalf("work_id = %q, want work_789", gotWorkID)
+	}
+	if gotLimit != strconv.Itoa(core.DefaultCheckRecordListLimit) {
+		t.Fatalf("limit = %q, want %d", gotLimit, core.DefaultCheckRecordListLimit)
+	}
+	if !strings.Contains(stdout.String(), "chk_list\tpass") {
+		t.Fatalf("unexpected stdout: %q", stdout.String())
+	}
+}
+
 func TestWorkCheckCommandUsesCanonicalCheckResponse(t *testing.T) {
 	var got struct {
 		WorkID string `json:"work_id"`

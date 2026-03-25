@@ -141,7 +141,7 @@ func newCheckRecordListTool(svc faseBridge) Tool {
 			}
 			limit := in.Limit
 			if limit <= 0 {
-				limit = 10
+				limit = core.DefaultCheckRecordListLimit
 			}
 			recs, err := svc.ListCheckRecords(ctx, in.WorkID, limit)
 			if err != nil {

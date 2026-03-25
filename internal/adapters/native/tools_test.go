@@ -235,6 +235,27 @@ func TestCheckRecordList_ReturnsRecords(t *testing.T) {
 	if records[0].CheckID != "chk_1" {
 		t.Fatalf("check_id = %q, want chk_1", records[0].CheckID)
 	}
+	if svc.lastListLimit != core.DefaultCheckRecordListLimit {
+		t.Fatalf("limit = %d, want %d", svc.lastListLimit, core.DefaultCheckRecordListLimit)
+	}
+}
+
+func TestCheckRecordList_RespectsRequestedLimit(t *testing.T) {
+	t.Parallel()
+	registry := MustNewToolRegistry()
+	svc := &fakeFaseBridge{}
+	if err := RegisterFASETools(registry, svc); err != nil {
+		t.Fatalf("RegisterFASETools returned error: %v", err)
+	}
+	if _, err := registry.Execute(context.Background(), "check_record_list", mustJSON(t, map[string]any{
+		"work_id": "wid_test",
+		"limit":   3,
+	})); err != nil {
+		t.Fatalf("check_record_list returned error: %v", err)
+	}
+	if svc.lastListLimit != 3 {
+		t.Fatalf("limit = %d, want 3", svc.lastListLimit)
+	}
 }
 
 func TestCheckRecordShow_ReturnsCanonicalRecord(t *testing.T) {
@@ -306,7 +327,9 @@ func TestCollectPlaywrightScreenshots(t *testing.T) {
 }
 
 // fakeFaseBridge implements faseBridge for testing.
-type fakeFaseBridge struct{}
+type fakeFaseBridge struct {
+	lastListLimit int
+}
 
 func (f *fakeFaseBridge) CreateCheckRecordDirect(_ context.Context, workID, result, checkerModel, workerModel string, report core.CheckReport, createdBy string) (core.CheckRecord, error) {
 	return core.CheckRecord{
@@ -327,6 +350,7 @@ func (f *fakeFaseBridge) GetCheckRecord(_ context.Context, checkID string) (core
 }
 
 func (f *fakeFaseBridge) ListCheckRecords(_ context.Context, workID string, limit int) ([]core.CheckRecord, error) {
+	f.lastListLimit = limit
 	return []core.CheckRecord{
 		{CheckID: "chk_1", WorkID: workID, Result: "pass"},
 	}, nil

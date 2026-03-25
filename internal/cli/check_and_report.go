@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/yusefmosiah/fase/internal/channelmeta"
+	"github.com/yusefmosiah/fase/internal/core"
 )
 
 func newCheckCommand(root *rootOptions) *cobra.Command {
@@ -99,7 +101,9 @@ func newCheckCreateCommand(root *rootOptions) *cobra.Command {
 }
 
 func newCheckListCommand(root *rootOptions) *cobra.Command {
-	return &cobra.Command{
+	var limit int
+
+	cmd := &cobra.Command{
 		Use:   "list <work-id>",
 		Short: "List check records for a work item",
 		Args:  cobra.ExactArgs(1),
@@ -110,6 +114,7 @@ func newCheckListCommand(root *rootOptions) *cobra.Command {
 			}
 			params := url.Values{}
 			params.Set("work_id", args[0])
+			params.Set("limit", strconv.Itoa(limit))
 			data, err := c.doGet("/api/check/list", params)
 			if err != nil {
 				return err
@@ -131,6 +136,9 @@ func newCheckListCommand(root *rootOptions) *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().IntVar(&limit, "limit", core.DefaultCheckRecordListLimit, "max check records to return")
+	return cmd
 }
 
 func newCheckShowCommand(root *rootOptions) *cobra.Command {

@@ -1673,7 +1673,16 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 			writeJSONHTTP(w, 400, map[string]string{"error": "work_id required"})
 			return
 		}
-		records, err := svc.ListCheckRecords(r.Context(), workID, 20)
+		limit := core.DefaultCheckRecordListLimit
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			parsed, err := strconv.Atoi(rawLimit)
+			if err != nil || parsed <= 0 {
+				writeJSONHTTP(w, 400, map[string]string{"error": "limit must be a positive integer"})
+				return
+			}
+			limit = parsed
+		}
+		records, err := svc.ListCheckRecords(r.Context(), workID, limit)
 		if err != nil {
 			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
 			return

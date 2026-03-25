@@ -553,6 +553,10 @@ type PromotionRecord struct {
 	Metadata          map[string]any `json:"metadata,omitempty"`
 }
 
+// DefaultCheckRecordListLimit is the canonical machine-surface default for
+// list-style check record reads across CLI, HTTP, MCP, and native tools.
+const DefaultCheckRecordListLimit = 20
+
 // CheckReport is the structured output from a checker worker.
 type CheckReport struct {
 	BuildOK      bool     `json:"build_ok"`

@@ -663,7 +663,7 @@ func registerTools(server *mcp.Server, mcpSrv *Server) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input checkRecordListInput) (*mcp.CallToolResult, any, error) {
 		limit := input.Limit
 		if limit <= 0 {
-			limit = 10
+			limit = core.DefaultCheckRecordListLimit
 		}
 		records, err := svc.ListCheckRecords(ctx, input.WorkID, limit)
 		if err != nil {
