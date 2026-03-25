@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -149,5 +151,33 @@ func TestReportJobCompletionPostsChannelNotification(t *testing.T) {
 	}
 	if want := channelmeta.JobCompletionMeta(); !reflect.DeepEqual(got.Meta, want) {
 		t.Fatalf("unexpected meta: got %#v want %#v", got.Meta, want)
+	}
+}
+
+func TestNotificationProofBundleLogsFailedWorkFetch(t *testing.T) {
+	svc := newTestService(t)
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+
+	bundle := svc.notificationProofBundle(context.Background(), core.WorkItemRecord{WorkID: "work_missing"})
+	if bundle.Work.WorkID != "work_missing" {
+		t.Fatalf("expected fallback work ID, got %+v", bundle.Work)
+	}
+	if bundle.CheckRecords != nil || bundle.Attestations != nil || bundle.Artifacts != nil || bundle.Docs != nil {
+		t.Fatalf("expected fallback bundle without fetched proof records, got %+v", bundle)
+	}
+	if got := logs.String(); !strings.Contains(got, "notificationProofBundle fallback for work work_missing") {
+		t.Fatalf("expected debug log for failed proof fetch, got %q", got)
 	}
 }

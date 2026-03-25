@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -5428,6 +5429,7 @@ func (s *Service) reportJobCompletion(job core.JobRecord, terminalEvent, message
 func (s *Service) notificationProofBundle(ctx context.Context, work core.WorkItemRecord) notify.ProofBundle {
 	result, err := s.Work(ctx, work.WorkID)
 	if err != nil {
+		log.Printf("debug: notificationProofBundle fallback for work %s: %v", work.WorkID, err)
 		return notify.ProofBundle{Work: work}
 	}
 	return notify.ProofBundle{

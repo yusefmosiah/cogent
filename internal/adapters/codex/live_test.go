@@ -3,6 +3,7 @@ package codex_test
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,55 @@ func codexBinary(t *testing.T) string {
 	return p
 }
 
+func codexUnavailableReason(msg string) string {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	switch {
+	case lower == "":
+		return ""
+	case strings.Contains(lower, "usage limit"),
+		strings.Contains(lower, "purchase more credits"),
+		strings.Contains(lower, "upgrade to pro"),
+		strings.Contains(lower, "try again at"),
+		strings.Contains(lower, "sign in"),
+		strings.Contains(lower, "log in"),
+		strings.Contains(lower, "login"),
+		strings.Contains(lower, "authentication"),
+		strings.Contains(lower, "unauthorized"),
+		strings.Contains(lower, "invalid api key"),
+		strings.Contains(lower, "rate limit"):
+		return msg
+	default:
+		return ""
+	}
+}
+
+func skipIfCodexUnavailable(t *testing.T, msg string) {
+	t.Helper()
+	if reason := codexUnavailableReason(msg); reason != "" {
+		t.Skipf("codex live turn unavailable: %s", reason)
+	}
+}
+
+func startCodexSession(t *testing.T, ctx context.Context, adapter *codex.LiveAdapter, req adapterapi.StartSessionRequest) adapterapi.LiveSession {
+	t.Helper()
+	session, err := adapter.StartSession(ctx, req)
+	if err != nil {
+		skipIfCodexUnavailable(t, err.Error())
+		t.Fatalf("StartSession: %v", err)
+	}
+	return session
+}
+
+func resumeCodexSession(t *testing.T, ctx context.Context, adapter *codex.LiveAdapter, threadID string, req adapterapi.StartSessionRequest) adapterapi.LiveSession {
+	t.Helper()
+	session, err := adapter.ResumeSession(ctx, threadID, req)
+	if err != nil {
+		skipIfCodexUnavailable(t, err.Error())
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	return session
+}
+
 // TestLiveAdapter_StartSession verifies that the Codex live adapter can spawn
 // the app-server, initialize, start a thread, and receive a session.started event.
 func TestLiveAdapter_StartSession(t *testing.T) {
@@ -30,12 +80,9 @@ func TestLiveAdapter_StartSession(t *testing.T) {
 	defer cancel()
 
 	cwd := t.TempDir()
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+	session := startCodexSession(t, ctx, adapter, adapterapi.StartSessionRequest{
 		CWD: cwd,
 	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
 	defer func() { _ = session.Close() }()
 
 	if session.SessionID() == "" {
@@ -69,12 +116,9 @@ func TestLiveAdapter_StartTurn(t *testing.T) {
 	defer cancel()
 
 	cwd := t.TempDir()
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+	session := startCodexSession(t, ctx, adapter, adapterapi.StartSessionRequest{
 		CWD: cwd,
 	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
 	defer func() { _ = session.Close() }()
 
 	// Drain the session.started event.
@@ -92,7 +136,7 @@ func TestLiveAdapter_StartTurn(t *testing.T) {
 	t.Logf("turn started: %s", turnID)
 
 	// Wait for turn.completed.
-	completed := drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnCompleted)
+	completed := drainTurnCompleted(t, ctx, session.Events())
 	if completed.TurnID != turnID {
 		t.Fatalf("turn ID mismatch: %s != %s", completed.TurnID, turnID)
 	}
@@ -108,12 +152,9 @@ func TestLiveAdapter_Interrupt(t *testing.T) {
 	defer cancel()
 
 	cwd := t.TempDir()
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+	session := startCodexSession(t, ctx, adapter, adapterapi.StartSessionRequest{
 		CWD: cwd,
 	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
 	defer func() { _ = session.Close() }()
 
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
@@ -164,10 +205,7 @@ func TestLiveAdapter_ResumeSession(t *testing.T) {
 	cwd := t.TempDir()
 
 	// Start a session and run a turn to establish state.
-	session1, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{CWD: cwd})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
+	session1 := startCodexSession(t, ctx, adapter, adapterapi.StartSessionRequest{CWD: cwd})
 
 	drainUntil(t, ctx, session1.Events(), adapterapi.EventKindSessionStarted)
 
@@ -179,15 +217,12 @@ func TestLiveAdapter_ResumeSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	drainUntil(t, ctx, session1.Events(), adapterapi.EventKindTurnCompleted)
+	drainTurnCompleted(t, ctx, session1.Events())
 
 	_ = session1.Close()
 
 	// Resume with a new app-server instance.
-	session2, err := adapter.ResumeSession(ctx, threadID, adapterapi.StartSessionRequest{CWD: cwd})
-	if err != nil {
-		t.Fatalf("ResumeSession: %v", err)
-	}
+	session2 := resumeCodexSession(t, ctx, adapter, threadID, adapterapi.StartSessionRequest{CWD: cwd})
 	defer func() { _ = session2.Close() }()
 
 	drainUntil(t, ctx, session2.Events(), adapterapi.EventKindSessionStarted)
@@ -211,13 +246,10 @@ func TestLiveAdapter_SteerCh(t *testing.T) {
 	steerCh := make(chan adapterapi.SteerEvent, 4)
 
 	cwd := t.TempDir()
-	session, err := adapter.StartSession(ctx, adapterapi.StartSessionRequest{
+	session := startCodexSession(t, ctx, adapter, adapterapi.StartSessionRequest{
 		CWD:     cwd,
 		SteerCh: steerCh,
 	})
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
 	defer func() { _ = session.Close() }()
 
 	drainUntil(t, ctx, session.Events(), adapterapi.EventKindSessionStarted)
@@ -236,8 +268,39 @@ func TestLiveAdapter_SteerCh(t *testing.T) {
 	steerCh <- adapterapi.SteerEvent{Message: "Say exactly: STEERED"}
 
 	// Wait for turn to complete.
-	drainUntil(t, ctx, session.Events(), adapterapi.EventKindTurnCompleted)
+	drainTurnCompleted(t, ctx, session.Events())
 	t.Log("turn completed after steer")
+}
+
+func drainTurnCompleted(t *testing.T, ctx context.Context, ch <-chan adapterapi.Event) adapterapi.Event {
+	t.Helper()
+	var lastErr string
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("event channel closed before turn completion")
+			}
+			t.Logf("event: kind=%s session=%s turn=%s text=%q", ev.Kind, ev.SessionID, ev.TurnID, ev.Text)
+			switch ev.Kind {
+			case adapterapi.EventKindError:
+				if ev.Text != "" {
+					lastErr = ev.Text
+					skipIfCodexUnavailable(t, ev.Text)
+				}
+			case adapterapi.EventKindTurnFailed:
+				if ev.Text == "" {
+					ev.Text = lastErr
+				}
+				skipIfCodexUnavailable(t, ev.Text)
+				t.Fatalf("expected turn.completed, got turn.failed: %s", ev.Text)
+			case adapterapi.EventKindTurnCompleted:
+				return ev
+			}
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for turn.completed event")
+		}
+	}
 }
 
 // drainUntil reads events until the target kind is found, returning it.

@@ -2794,6 +2794,21 @@ func (s *Store) bootstrap(ctx context.Context) error {
 			    OR (wi2.priority = work_items.priority AND wi2.created_at < work_items.created_at)
 			    OR (wi2.priority = work_items.priority AND wi2.created_at = work_items.created_at AND wi2.rowid < work_items.rowid)
 		) WHERE position = 0`,
+		`DELETE FROM doc_content
+		   WHERE rowid IN (
+			 SELECT rowid
+			   FROM (
+				 SELECT rowid,
+						ROW_NUMBER() OVER (
+							PARTITION BY path
+							ORDER BY updated_at DESC, created_at DESC, rowid DESC
+						) AS rn
+				   FROM doc_content
+				  WHERE path <> ''
+			   ) ranked
+			  WHERE rn > 1
+		   )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_content_path_unique ON doc_content(path) WHERE path <> ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !ignorableSQLiteMigrationErr(err) {

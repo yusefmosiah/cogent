@@ -590,6 +590,9 @@ func (s *codexSession) handleNotification(msg rpcMessage) {
 			Turn     struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
 			} `json:"turn"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
@@ -611,10 +614,15 @@ func (s *codexSession) handleNotification(msg rpcMessage) {
 		case "interrupted":
 			kind = adapterapi.EventKindTurnInterrupted
 		}
+		text := ""
+		if p.Turn.Error != nil {
+			text = p.Turn.Error.Message
+		}
 		s.emit(adapterapi.Event{
 			Kind:      kind,
 			SessionID: s.threadID,
 			TurnID:    p.Turn.ID,
+			Text:      text,
 		})
 
 	case "item/agentMessage/delta":
@@ -638,15 +646,27 @@ func (s *codexSession) handleNotification(msg rpcMessage) {
 
 	case "error":
 		var p struct {
-			Message string `json:"message"`
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"turnId"`
+			Error    *struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			return
 		}
+		if p.ThreadID != "" && p.ThreadID != s.threadID {
+			return
+		}
+		text := ""
+		if p.Error != nil {
+			text = p.Error.Message
+		}
 		s.emit(adapterapi.Event{
 			Kind:      adapterapi.EventKindError,
 			SessionID: s.threadID,
-			Text:      p.Message,
+			TurnID:    p.TurnID,
+			Text:      text,
 		})
 	}
 }

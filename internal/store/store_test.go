@@ -1117,3 +1117,87 @@ func TestUpsertDocContentIncrementsVersionOnExistingPath(t *testing.T) {
 		t.Fatalf("expected updated content, got %+v", byPath)
 	}
 }
+
+func TestUpsertDocContentRejectsSamePathAcrossDifferentWorkItems(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	seedWorkItem(t, s, sampleWorkItem("work_doc_a"))
+	seedWorkItem(t, s, sampleWorkItem("work_doc_b"))
+
+	first := core.DocContentRecord{
+		DocID:  "doc_01",
+		WorkID: "work_doc_a",
+		Path:   "docs/shared.md",
+		Title:  "Shared",
+		Body:   "# Shared\n",
+		Format: "markdown",
+	}
+	if err := s.UpsertDocContent(ctx, first); err != nil {
+		t.Fatalf("UpsertDocContent first: %v", err)
+	}
+
+	second := core.DocContentRecord{
+		DocID:  "doc_02",
+		WorkID: "work_doc_b",
+		Path:   "docs/shared.md",
+		Title:  "Shared Again",
+		Body:   "# Shared Again\n",
+		Format: "markdown",
+	}
+	if err := s.UpsertDocContent(ctx, second); err == nil {
+		t.Fatal("expected duplicate doc path across work items to fail")
+	}
+
+	byPath, err := s.GetDocContentByPath(ctx, "docs/shared.md")
+	if err != nil {
+		t.Fatalf("GetDocContentByPath: %v", err)
+	}
+	if byPath.WorkID != first.WorkID || byPath.DocID != first.DocID {
+		t.Fatalf("expected original doc binding to remain intact, got %+v", byPath)
+	}
+}
+
+func TestBootstrapDeduplicatesLegacyDocPathsBeforeAddingUniqueIndex(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	seedWorkItem(t, s, sampleWorkItem("work_doc_a"))
+	seedWorkItem(t, s, sampleWorkItem("work_doc_b"))
+
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX idx_doc_content_path_unique`); err != nil {
+		t.Fatalf("drop unique path index: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO doc_content (
+			doc_id, work_id, path, title, body, format, version, created_at, updated_at
+		) VALUES
+			('doc_old', 'work_doc_a', 'docs/legacy.md', 'Legacy', '# Legacy', 'markdown', 1, '2026-03-25T00:00:00Z', '2026-03-25T00:00:00Z'),
+			('doc_new', 'work_doc_b', 'docs/legacy.md', 'Legacy New', '# Legacy new', 'markdown', 1, '2026-03-25T00:00:01Z', '2026-03-25T00:00:02Z')`); err != nil {
+		t.Fatalf("seed duplicate legacy docs: %v", err)
+	}
+
+	if err := s.bootstrap(ctx); err != nil {
+		t.Fatalf("bootstrap re-run: %v", err)
+	}
+
+	byPath, err := s.GetDocContentByPath(ctx, "docs/legacy.md")
+	if err != nil {
+		t.Fatalf("GetDocContentByPath: %v", err)
+	}
+	if byPath.DocID != "doc_new" || byPath.WorkID != "work_doc_b" {
+		t.Fatalf("expected newest legacy doc to win, got %+v", byPath)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM doc_content WHERE path = 'docs/legacy.md'`).Scan(&count); err != nil {
+		t.Fatalf("count deduped docs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 deduped doc row, got %d", count)
+	}
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO doc_content (
+			doc_id, work_id, path, title, body, format, version, created_at, updated_at
+		) VALUES
+			('doc_dup', 'work_doc_a', 'docs/legacy.md', 'Dup', '# Dup', 'markdown', 1, '2026-03-25T00:00:03Z', '2026-03-25T00:00:03Z')`); err == nil {
+		t.Fatal("expected unique path index to reject duplicate legacy path after bootstrap")
+	}
+}
