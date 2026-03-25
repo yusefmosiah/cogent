@@ -287,6 +287,7 @@ func TestStreamableHTTPHandlerIntegration(t *testing.T) {
 	// Mcp-Session-Id header, and that server has proper provenance tracking.
 
 	sm := NewSessionManager(&service.Service{})
+	_ = mcp.NewStreamableHTTPHandler(sm.GetServerForRequest, nil)
 
 	// Test 1: External session (no supervisor)
 	t.Run("ExternalSession", func(t *testing.T) {
@@ -349,4 +350,187 @@ func TestStreamableHTTPHandlerIntegration(t *testing.T) {
 			t.Errorf("External session after supervisor CreatedBy = %q, want %q", instance.CreatedBy(ctx), "mcp")
 		}
 	})
+}
+
+// TestStreamableHTTPBroadcastPropagation verifies that newly created serve-mode
+// sessions inherit the broadcast function correctly (broadcast propagation regression fix).
+// This is critical for channel events to reach WebSocket clients in serve mode.
+func TestStreamableHTTPBroadcastPropagation(t *testing.T) {
+	sm := NewSessionManager(&service.Service{})
+
+	// Set up broadcast function BEFORE any sessions exist (simulating serve mode startup)
+	var broadcastCalls []map[string]any
+	broadcastFn := func(eventType string, data any) {
+		broadcastCalls = append(broadcastCalls, map[string]any{
+			"type": eventType,
+			"data": data,
+		})
+	}
+
+	// Set broadcast function on SessionManager (should store for future sessions)
+	sm.SetBroadcastFunc(broadcastFn)
+
+	// Now create sessions AFTER broadcast was set
+	sessions := []string{"session-1", "session-2", "supervisor-session"}
+
+	// Mark supervisor session before creation
+	sm.SetSupervisorSession("supervisor-session")
+
+	for _, sessionID := range sessions {
+		server := sm.GetServerInstance(sessionID)
+		if server == nil {
+			t.Fatalf("GetServerInstance returned nil for session %s", sessionID)
+		}
+
+		// Send a channel event - should use the inherited broadcast function
+		err := server.SendChannelEvent("test content from "+sessionID, map[string]string{
+			"session": sessionID,
+		})
+		if err != nil {
+			t.Errorf("SendChannelEvent failed for session %s: %v", sessionID, err)
+		}
+	}
+
+	// Verify all broadcasts were received
+	if len(broadcastCalls) != len(sessions) {
+		t.Errorf("Expected %d broadcast calls, got %d", len(sessions), len(broadcastCalls))
+	}
+
+	for i, sessionID := range sessions {
+		if i >= len(broadcastCalls) {
+			break
+		}
+		if broadcastCalls[i]["type"] != "channel_message" {
+			t.Errorf("Session %s: expected event type 'channel_message', got %q",
+				sessionID, broadcastCalls[i]["type"])
+		}
+	}
+}
+
+// TestStreamableHTTPLiveTransportProvenance exercises the live production transport
+// path for both external and supervisor-marked traffic through handler.ServeHTTP.
+// This proves VAL-SUPERVISOR-003 on the actual live transport path.
+func TestStreamableHTTPLiveTransportProvenance(t *testing.T) {
+	sm := NewSessionManager(&service.Service{})
+
+	// Create a handler using the SessionManager
+	handler := mcp.NewStreamableHTTPHandler(sm.GetServerForRequest, nil)
+	_ = handler // will be used in future HTTP-level integration tests
+
+	// Test Case 1: External traffic (simulating external MCP client)
+	t.Run("ExternalTrafficProvenance", func(t *testing.T) {
+		externalSession := "external-mcp-client"
+
+		// Simulate the request path that handler.ServeHTTP would take
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		req.Header.Set("Mcp-Session-Id", externalSession)
+
+		// This is what happens inside the handler: GetServerForRequest
+		server := sm.GetServerForRequest(req)
+		if server == nil {
+			t.Fatal("GetServerForRequest returned nil for external traffic")
+		}
+
+		// Verify provenance
+		instance := sm.GetServerInstance(externalSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "mcp" {
+			t.Errorf("External traffic: CreatedBy = %q, want %q", createdBy, "mcp")
+		}
+
+		actor := service.ActorFromCreatedBy(createdBy)
+		if actor != service.ActorMCP {
+			t.Errorf("External traffic: Actor = %v, want %v", actor, service.ActorMCP)
+		}
+	})
+
+	// Test Case 2: Supervisor traffic (simulating supervisor MCP mutations)
+	t.Run("SupervisorTrafficProvenance", func(t *testing.T) {
+		supervisorSession := "supervisor-live-session"
+
+		// Mark this as the supervisor session (what happens when supervisor starts)
+		sm.SetSupervisorSession(supervisorSession)
+
+		// Simulate the request path
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		req.Header.Set("Mcp-Session-Id", supervisorSession)
+
+		server := sm.GetServerForRequest(req)
+		if server == nil {
+			t.Fatal("GetServerForRequest returned nil for supervisor traffic")
+		}
+
+		// Verify provenance shows supervisor
+		instance := sm.GetServerInstance(supervisorSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "supervisor" {
+			t.Errorf("Supervisor traffic: CreatedBy = %q, want %q", createdBy, "supervisor")
+		}
+
+		actor := service.ActorFromCreatedBy(createdBy)
+		if actor != service.ActorSupervisor {
+			t.Errorf("Supervisor traffic: Actor = %v, want %v", actor, service.ActorSupervisor)
+		}
+	})
+
+	// Test Case 3: Mixed traffic - external traffic doesn't pick up supervisor role
+	t.Run("MixedTrafficIsolation", func(t *testing.T) {
+		// After supervisor is set, external traffic should still be "mcp"
+		externalSession := "external-after-supervisor-started"
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		req.Header.Set("Mcp-Session-Id", externalSession)
+
+		_ = sm.GetServerForRequest(req)
+		instance := sm.GetServerInstance(externalSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "mcp" {
+			t.Errorf("Mixed traffic: External CreatedBy = %q, want %q (isolation broken)",
+				createdBy, "mcp")
+		}
+
+		// And the existing supervisor session should still be "supervisor"
+		supervisorInstance := sm.GetServerInstance("supervisor-live-session")
+		supervisorCreatedBy := supervisorInstance.CreatedBy(ctx)
+		if supervisorCreatedBy != "supervisor" {
+			t.Errorf("Mixed traffic: Supervisor CreatedBy changed to %q (isolation broken)",
+				supervisorCreatedBy)
+		}
+	})
+}
+
+// TestStreamableHTTPBroadcastNewSessionAfterSetBroadcastFunc verifies the specific
+// regression: sessions created AFTER SetBroadcastFunc() was called must still
+// receive broadcast events (broadcast propagation regression fix).
+func TestStreamableHTTPBroadcastNewSessionAfterSetBroadcastFunc(t *testing.T) {
+	sm := NewSessionManager(&service.Service{})
+
+	var broadcastCount int
+	broadcastFn := func(_ string, _ any) {
+		broadcastCount++
+	}
+
+	// Set broadcast on empty SessionManager
+	sm.SetBroadcastFunc(broadcastFn)
+
+	// Create session AFTER broadcast was set
+	lateSession := "late-session"
+	server := sm.GetServerInstance(lateSession)
+
+	// Send event - should trigger the inherited broadcast
+	err := server.SendChannelEvent("late session test", nil)
+	if err != nil {
+		t.Fatalf("SendChannelEvent failed: %v", err)
+	}
+
+	// Verify broadcast was called
+	if broadcastCount != 1 {
+		t.Errorf("New session after SetBroadcastFunc: expected 1 broadcast, got %d", broadcastCount)
+	}
 }

@@ -54,6 +54,7 @@ type SessionManager struct {
 	mu          sync.RWMutex
 	sessions    map[string]*Server // sessionID -> server
 	supervisorSessionID string       // tracks which session is the supervisor
+	broadcastFn func(string, any)    // global broadcast function for new sessions to inherit
 }
 
 // NewSessionManager creates a new session manager backed by the given service.
@@ -90,6 +91,10 @@ func (sm *SessionManager) GetServer(sessionID string) *mcp.Server {
 	server = New(sm.svc)
 	if isSupervisor {
 		server.SetCallerRole("supervisor")
+	}
+	// Inherit broadcast function for serve-mode sessions (broadcast propagation fix)
+	if sm.broadcastFn != nil {
+		server.SetBroadcastFunc(sm.broadcastFn)
 	}
 	sm.sessions[sessionID] = server
 	return server.MCP
@@ -128,6 +133,10 @@ func (sm *SessionManager) GetServerInstance(sessionID string) *Server {
 	if isSupervisor {
 		server.SetCallerRole("supervisor")
 	}
+	// Inherit broadcast function for serve-mode sessions (broadcast propagation fix)
+	if sm.broadcastFn != nil {
+		server.SetBroadcastFunc(sm.broadcastFn)
+	}
 	sm.sessions[sessionID] = server
 	return server
 }
@@ -139,11 +148,15 @@ func (sm *SessionManager) GetSupervisorSession() string {
 	return sm.supervisorSessionID
 }
 
-// SetBroadcastFunc sets the broadcast function on all managed servers.
-// This is used in serve mode to route channel events through the WebSocket hub.
+// SetBroadcastFunc sets the broadcast function on all managed servers
+// and stores it for future sessions to inherit. This is used in serve mode
+// to route channel events through the WebSocket hub (VAL-SUPERVISOR-003).
 func (sm *SessionManager) SetBroadcastFunc(fn func(string, any)) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	// Store the broadcast function so new sessions inherit it
+	sm.broadcastFn = fn
+	// Apply to existing sessions
 	for _, server := range sm.sessions {
 		server.SetBroadcastFunc(fn)
 	}
