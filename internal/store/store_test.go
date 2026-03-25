@@ -43,6 +43,7 @@ func sampleWorkItem(workID string) core.WorkItemRecord {
 		LockState:      core.WorkLockStateUnlocked,
 		Priority:       5,
 		Position:       1,
+		AttemptEpoch:   1,
 		Metadata:       map[string]any{"key": "val"},
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -134,6 +135,9 @@ func TestCreateWorkItemAndGetRoundtrip(t *testing.T) {
 	if got.Position != w.Position {
 		t.Errorf("Position = %d, want %d", got.Position, w.Position)
 	}
+	if got.AttemptEpoch != w.AttemptEpoch {
+		t.Errorf("AttemptEpoch = %d, want %d", got.AttemptEpoch, w.AttemptEpoch)
+	}
 	if got.Metadata["key"] != w.Metadata["key"] {
 		t.Errorf("Metadata[key] = %v, want %v", got.Metadata["key"], w.Metadata["key"])
 	}
@@ -162,6 +166,7 @@ func TestUpdateWorkItem(t *testing.T) {
 	got.Objective = "New objective"
 	got.ExecutionState = core.WorkExecutionStateClaimed
 	got.Priority = 10
+	got.AttemptEpoch = 3
 	got.UpdatedAt = time.Now().UTC()
 
 	if err := s.UpdateWorkItem(ctx, got); err != nil {
@@ -183,6 +188,9 @@ func TestUpdateWorkItem(t *testing.T) {
 	}
 	if updated.Priority != 10 {
 		t.Errorf("Priority = %d, want %d", updated.Priority, 10)
+	}
+	if updated.AttemptEpoch != 3 {
+		t.Errorf("AttemptEpoch = %d, want %d", updated.AttemptEpoch, 3)
 	}
 }
 

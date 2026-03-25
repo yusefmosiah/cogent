@@ -367,10 +367,10 @@ const (
 )
 
 type RequiredAttestation struct {
-	VerifierKind      string         `json:"verifier_kind,omitempty"`
-	Method            string         `json:"method,omitempty"`
-	Blocking          bool           `json:"blocking,omitempty"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
+	VerifierKind string         `json:"verifier_kind,omitempty"`
+	Method       string         `json:"method,omitempty"`
+	Blocking     bool           `json:"blocking,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 	// Escalation fields — nil on original slots, set on escalated slots
 	// Per ADR-0036: these fields distinguish original requirements from post-freeze escalations
 	EscalatedAt      *time.Time `json:"escalated_at,omitempty"`
@@ -406,8 +406,12 @@ type WorkItemRecord struct {
 	CurrentSessionID     string                `json:"current_session_id,omitempty"`
 	ClaimedBy            string                `json:"claimed_by,omitempty"`
 	ClaimedUntil         *time.Time            `json:"claimed_until,omitempty"`
-	CreatedAt            time.Time             `json:"created_at"`
-	UpdatedAt            time.Time             `json:"updated_at"`
+	// AttemptEpoch tracks which attempt is currently active. Starts at 1 and
+	// increments on each retry/reset. Used to ensure stale children, nonces,
+	// and review artifacts from prior attempts do not satisfy the new run.
+	AttemptEpoch int       `json:"attempt_epoch,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type WorkEdgeRecord struct {

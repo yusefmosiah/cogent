@@ -460,6 +460,15 @@ type WorkRenewLeaseRequest struct {
 	LeaseDuration time.Duration `json:"lease_duration,omitempty"`
 }
 
+// WorkResetRequest resets a work item to start a new attempt epoch.
+// This clears stale state and begins a fresh attempt while preserving history.
+type WorkResetRequest struct {
+	WorkID      string `json:"work_id,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	CreatedBy   string `json:"created_by,omitempty"`
+	ClearClaims bool   `json:"clear_claims,omitempty"`
+}
+
 type WorkHydrateRequest struct {
 	WorkID   string
 	Mode     string
@@ -1869,8 +1878,12 @@ func (s *Service) CreateWork(ctx context.Context, req WorkCreateRequest) (*core.
 		Acceptance:           cloneMap(req.Acceptance),
 		Metadata:             cloneMap(req.Metadata),
 		HeadCommitOID:        strings.TrimSpace(req.HeadCommitOID),
+		AttemptEpoch:         1,
 		CreatedAt:            now,
 		UpdatedAt:            now,
+	}
+	if epoch, ok := metadataInt(work.Metadata, "attempt_epoch"); ok && epoch > 0 {
+		work.AttemptEpoch = epoch
 	}
 	work.RequiredAttestations = defaultRequiredAttestations(work, req.RequiredAttestations, s.Config)
 	if req.Position > 0 {
@@ -3210,6 +3223,84 @@ func (s *Service) SetWorkLock(ctx context.Context, workID string, lockState core
 	return &work, nil
 }
 
+// ResetWork starts a new attempt epoch for a work item. This clears the
+// current job/session linkage, increments the attempt epoch, and resets the
+// execution state to ready. Prior children, nonces, and review artifacts are
+// preserved as historical records but will not satisfy the new attempt.
+// This implements the VAL-LIFECYCLE-005 contract.
+func (s *Service) ResetWork(ctx context.Context, req WorkResetRequest) (*core.WorkItemRecord, error) {
+	work, err := s.store.GetWorkItem(ctx, req.WorkID)
+	if err != nil {
+		return nil, normalizeStoreError("work", req.WorkID, err)
+	}
+
+	now := time.Now().UTC()
+	prevState := string(work.ExecutionState)
+	previousTerminal := work.ExecutionState.Terminal()
+
+	// Increment attempt epoch to isolate this new attempt from prior history
+	work.AttemptEpoch = currentAttemptEpoch(work) + 1
+
+	// Clear current attempt linkage
+	work.CurrentJobID = ""
+	work.CurrentSessionID = ""
+	work.ExecutionState = core.WorkExecutionStateReady
+	work.ApprovalState = core.WorkApprovalStateNone
+
+	// Clear claim state so the new attempt never inherits a stale lease.
+	if req.ClearClaims || previousTerminal || work.ClaimedBy != "" || work.ClaimedUntil != nil {
+		work.ClaimedBy = ""
+		work.ClaimedUntil = nil
+	}
+
+	// Reset attestation freeze to allow new attestations for this epoch
+	work.AttestationFrozenAt = nil
+
+	// Clear the attestation nonce from metadata to ensure old attestations
+	// cannot be replayed against this new attempt
+	if work.Metadata != nil {
+		delete(work.Metadata, "attestation_nonce")
+	}
+
+	work.UpdatedAt = now
+
+	if err := s.store.UpdateWorkItem(ctx, work); err != nil {
+		return nil, err
+	}
+
+	if err := s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:       core.GenerateID("wup"),
+		WorkID:         work.WorkID,
+		ExecutionState: work.ExecutionState,
+		ApprovalState:  work.ApprovalState,
+		Message:        fmt.Sprintf("Reset to attempt %d: %s", work.AttemptEpoch, req.Reason),
+		CreatedBy:      req.CreatedBy,
+		CreatedAt:      now,
+		Metadata: map[string]any{
+			"attempt_epoch": work.AttemptEpoch,
+			"prev_state":    prevState,
+			"reset_reason":  req.Reason,
+		},
+	}); err != nil {
+		return nil, err
+	}
+
+	s.Events.Publish(WorkEvent{
+		Kind:      WorkEventUpdated,
+		WorkID:    work.WorkID,
+		Title:     work.Title,
+		State:     string(work.ExecutionState),
+		PrevState: prevState,
+		Actor:     ActorFromCreatedBy(req.CreatedBy),
+		Cause:     CauseHostManual,
+		Metadata: map[string]string{
+			"attempt_epoch": fmt.Sprintf("%d", work.AttemptEpoch),
+		},
+	})
+
+	return &work, nil
+}
+
 // checkerModels is the ordered pool of adapter+model pairs used for checker dispatch.
 // Checkers intentionally use a different model from the worker to provide independent verification.
 var checkerModels = []struct{ adapter, model string }{
@@ -3564,15 +3655,28 @@ func (s *Service) AttestWork(ctx context.Context, req WorkAttestRequest) (*core.
 	// Nonce validation: if the work item has an attestation nonce,
 	// the caller must provide it. The nonce is generated after the worker
 	// exits, so workers cannot attest their own work.
+	// Additionally, attestations must match the current attempt epoch to prevent
+	// stale attestations from prior attempts satisfying a new run (VAL-LIFECYCLE-005).
 	if storedNonce, ok := attestationTarget.Metadata["attestation_nonce"].(string); ok && storedNonce != "" {
 		if req.Nonce == "" || req.Nonce != storedNonce {
 			return nil, nil, fmt.Errorf("attestation nonce mismatch: work item requires valid nonce (generated post-completion)")
+		}
+	}
+	// For attestation children, verify the attempt epoch matches the parent's current epoch
+	if strings.EqualFold(work.Kind, "attest") && attestationTarget.WorkID != work.WorkID {
+		childEpoch := currentAttemptEpoch(work)
+		if !childMatchesCurrentAttempt(attestationTarget, work) {
+			return nil, nil, fmt.Errorf("attestation epoch mismatch: attestation child is from attempt %d but parent is now at attempt %d", childEpoch, currentAttemptEpoch(attestationTarget))
 		}
 	}
 	now := time.Now().UTC()
 	metadata := cloneMap(req.Metadata)
 	if metadata == nil {
 		metadata = map[string]any{}
+	}
+	metadata["attempt_epoch"] = currentAttemptEpoch(attestationTarget)
+	if nonce := attestationNonce(attestationTarget.Metadata); nonce != "" {
+		metadata["attestation_nonce"] = nonce
 	}
 	if attestationTarget.HeadCommitOID != "" {
 		if _, ok := metadata["commit_oid"]; !ok {
@@ -5920,6 +6024,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 		return err
 	}
 
+	parent.AttemptEpoch = currentAttemptEpoch(parent)
 	nonce := ""
 	if parent.Metadata != nil {
 		if existing, ok := parent.Metadata["attestation_nonce"].(string); ok {
@@ -5951,6 +6056,9 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 		if !strings.EqualFold(child.Kind, "attest") {
 			continue
 		}
+		if !childMatchesCurrentAttempt(parent, child) {
+			continue
+		}
 		childNonce := ""
 		if child.Metadata != nil {
 			childNonce, _ = child.Metadata["attestation_nonce"].(string)
@@ -5965,6 +6073,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 
 	workerFindings := attestationWorkerFindings(workDetail)
 	workerModel := summaryString(job.Summary, "model")
+	createdCount := 0
 
 	for slotIdx, slot := range slots {
 		if _, ok := existing[slotIdx]; ok {
@@ -5986,10 +6095,12 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 			PreferredAdapters:    childAdapters,
 			PreferredModels:      childModels,
 			RequiredAttestations: []core.RequiredAttestation{},
+			AttemptEpoch:         parent.AttemptEpoch,
 			Metadata: map[string]any{
 				"parent_work_id":    parent.WorkID,
 				"slot_index":        slotIdx,
 				"attestation_nonce": nonce,
+				"attempt_epoch":     parent.AttemptEpoch,
 				"worker_job_id":     job.JobID,
 				"worker_adapter":    job.Adapter,
 				"worker_model":      workerModel,
@@ -6022,8 +6133,9 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 			return createErr
 		}
 		if err := s.attachParentEdge(ctx, parent.WorkID, created.WorkID, "service", now, map[string]any{
-			"edge_kind":  "attestation",
-			"slot_index": slotIdx,
+			"edge_kind":     "attestation",
+			"slot_index":    slotIdx,
+			"attempt_epoch": parent.AttemptEpoch,
 		}, false); err != nil {
 			_, _ = s.UpdateWork(ctx, WorkUpdateRequest{
 				WorkID:         parent.WorkID,
@@ -6043,6 +6155,7 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 			Metadata: map[string]any{
 				"slot_index":        slotIdx,
 				"attestation_nonce": nonce,
+				"attempt_epoch":     parent.AttemptEpoch,
 			},
 		}); err != nil {
 			_, _ = s.UpdateWork(ctx, WorkUpdateRequest{
@@ -6053,15 +6166,20 @@ func (s *Service) spawnAttestationChildren(ctx context.Context, parent core.Work
 			})
 			return err
 		}
+		createdCount++
 	}
 
-	_, _ = s.UpdateWork(ctx, WorkUpdateRequest{
+	_ = s.store.CreateWorkUpdate(ctx, core.WorkUpdateRecord{
+		UpdateID:       core.GenerateID("wup"),
 		WorkID:         parent.WorkID,
 		ExecutionState: core.WorkExecutionStateAwaitingAttestation,
-		Message:        fmt.Sprintf("spawned %d attestation child work item(s)", len(slots)),
+		Message:        fmt.Sprintf("spawned %d attestation child work item(s)", createdCount),
 		CreatedBy:      "service",
+		CreatedAt:      now,
 		Metadata: map[string]any{
 			"attestation_nonce": nonce,
+			"attempt_epoch":     parent.AttemptEpoch,
+			"created_children":  createdCount,
 		},
 	})
 
@@ -6234,6 +6352,43 @@ func shouldSetPendingApproval(work core.WorkItemRecord) bool {
 	return false
 }
 
+func currentAttemptEpoch(work core.WorkItemRecord) int {
+	if work.AttemptEpoch > 0 {
+		return work.AttemptEpoch
+	}
+	if epoch, ok := metadataInt(work.Metadata, "attempt_epoch"); ok && epoch > 0 {
+		return epoch
+	}
+	return 1
+}
+
+func attestationNonce(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	nonce, _ := metadata["attestation_nonce"].(string)
+	return strings.TrimSpace(nonce)
+}
+
+func metadataMatchesCurrentAttempt(work core.WorkItemRecord, metadata map[string]any) bool {
+	expectedEpoch := currentAttemptEpoch(work)
+	if epoch, ok := metadataInt(metadata, "attempt_epoch"); ok {
+		return epoch == expectedEpoch
+	}
+	currentNonce := attestationNonce(work.Metadata)
+	if currentNonce != "" {
+		return attestationNonce(metadata) == currentNonce
+	}
+	return expectedEpoch == 1
+}
+
+func childMatchesCurrentAttempt(parent, child core.WorkItemRecord) bool {
+	if child.AttemptEpoch > 0 {
+		return child.AttemptEpoch == currentAttemptEpoch(parent)
+	}
+	return metadataMatchesCurrentAttempt(parent, child.Metadata)
+}
+
 func requiredAttestationsResolved(work core.WorkItemRecord, attestations []core.AttestationRecord) bool {
 	superseded := supersededAttestationIDs(attestations)
 	for _, slot := range work.RequiredAttestations {
@@ -6336,6 +6491,9 @@ func hasPassingAttestationForSlot(work core.WorkItemRecord, slot core.RequiredAt
 			continue
 		}
 		if superseded[attestation.AttestationID] {
+			continue
+		}
+		if !metadataMatchesCurrentAttempt(work, attestation.Metadata) {
 			continue
 		}
 		if slot.VerifierKind != "" && attestation.VerifierKind != slot.VerifierKind {
@@ -7878,12 +8036,16 @@ func (s *Service) syncWorkStateFromJob(ctx context.Context, job core.JobRecord, 
 			work.AttestationFrozenAt = &frozenAt
 		}
 	case core.JobStateCompleted:
-		workState = core.WorkExecutionStateDone
+		if work.Kind != "attest" && len(defaultRequiredAttestations(work, work.RequiredAttestations, s.Config)) > 0 {
+			workState = core.WorkExecutionStateAwaitingAttestation
+		} else {
+			workState = core.WorkExecutionStateDone
+			if shouldSetPendingApproval(work) {
+				work.ApprovalState = core.WorkApprovalStatePending
+			}
+		}
 		work.ClaimedBy = ""
 		work.ClaimedUntil = nil
-		if shouldSetPendingApproval(work) {
-			work.ApprovalState = core.WorkApprovalStatePending
-		}
 	case core.JobStateFailed:
 		workState = core.WorkExecutionStateFailed
 		work.ClaimedBy = ""
@@ -8060,7 +8222,7 @@ func (s *Service) guardDoneTransition(ctx context.Context, work core.WorkItemRec
 	children, err := s.store.ListWorkChildren(ctx, work.WorkID, 100)
 	if err == nil {
 		for _, child := range children {
-			if child.Kind == "attest" && child.ExecutionState != core.WorkExecutionStateDone {
+			if child.Kind == "attest" && childMatchesCurrentAttempt(work, child) && child.ExecutionState != core.WorkExecutionStateDone {
 				return fmt.Errorf("%w: work item %s has pending attestation child %s (state: %s)",
 					ErrInvalidInput, work.WorkID, child.WorkID, child.ExecutionState)
 			}
@@ -8098,7 +8260,7 @@ func (s *Service) refreshAttestationParentState(ctx context.Context, parentID st
 	}
 	attestationChildren := make([]core.WorkItemRecord, 0, len(children))
 	for _, candidate := range children {
-		if strings.EqualFold(candidate.Kind, "attest") {
+		if strings.EqualFold(candidate.Kind, "attest") && childMatchesCurrentAttempt(parent, candidate) {
 			attestationChildren = append(attestationChildren, candidate)
 		}
 	}
