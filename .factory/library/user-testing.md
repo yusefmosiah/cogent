@@ -177,3 +177,41 @@ Verification unification assertions test the canonical verification lifecycle, c
 8. Verify verify terminology by inspecting CLI help, HTTP endpoint names, and browser UI labels for unambiguous usage of "verify"
 9. Verify end-to-end supervisor-to-verification flow by dispatching work through the supervisor and tracing the full lifecycle from ready → claimed → working → checking → done with canonical state names
 10. Keep the entire milestone in a single validator run to ensure deterministic state progression and cross-assertion coherence
+
+## Flow Validator Guidance: docs-as-verification
+
+### Isolation Rules
+
+Docs-as-verification assertions test documentation integration with the work verification system: doc-linking, source-of-truth semantics, verification gating, doc policy, and proof bundle integration. All assertions share the same work-graph state and should run in a single serialized validator to avoid interference from concurrent doc mutations and state changes.
+
+### Resources and Boundaries
+
+- Use the already-running `fase serve` on port `5380`
+- Do NOT start additional serve instances
+- Use CLI and HTTP/API for primary testing
+- Create test work items with unique milestone-scoped identifiers (e.g., prefix with "docs-verify-test-")
+- Create test documents in temporary locations (e.g., `/tmp/fase-doc-test/`) to avoid polluting the repo
+- Clean up test work items, doc records, and temp files after validation or leave them for synthesis inspection
+
+### Assertions to Test
+
+- **VAL-DOCS-001**: Tracked docs are first-class work-linked records. Verify that tracked docs always link to a work item and declare a non-empty authoritative repo-relative path, and storing a doc without an explicit work item resolves or creates the linked work.
+- **VAL-DOCS-002**: Repo docs remain the source of truth. Verify that runtime doc records support linkage and review but verification treats the repo file at the declared path as authoritative.
+- **VAL-DOCS-003**: Missing or stale required docs are verification failures. Verify that missing required docs, stale docs, or doc/code mismatch create explicit verification failure or unresolved-review outcomes and can block completion when policy requires docs.
+- **VAL-DOCS-004**: Verification docs and briefings match runtime behavior or are removed. Verify that any committed doc claiming to mirror runtime verification behavior stays aligned with the shipped contract.
+- **VAL-DOCS-005**: Writable doc-ingest surfaces are import helpers, not authoritative doc stores. Verify that doc-set and similar surfaces are explicitly treated as import/bootstrap helpers, and a document cannot satisfy verification unless the repo file exists at the declared path.
+- **VAL-DOCS-006**: Doc requirements are machine-readable verification policy. Verify that completion dependencies on docs are represented in runtime state strongly enough for verification to deterministically fail on absence, staleness, or mismatch.
+- **VAL-CROSS-002**: Documentation participates in the same completion gate as code and verification evidence. Verify that for work requiring docs, code changes, review evidence, and repo doc alignment are all evaluated as part of one completion contract.
+- **VAL-CROSS-003**: Final reporting and notifications reuse the canonical proof bundle. Verify that completion or escalation reporting is rendered from canonical work-graph facts including linked docs.
+
+### Testing Approach
+
+1. Use CLI `fase work doc-set` to create and link docs to work items
+2. Use HTTP API to inspect work item state and doc records
+3. Verify work-doc linking by creating docs with and without explicit work IDs and checking auto-creation behavior
+4. Verify repo-file authority by creating work with required docs, submitting doc-set records, and testing whether verification passes without actual repo files
+5. Verify missing/stale doc failures by creating work with required docs but missing or outdated repo files and confirming verification blocks or fails
+6. Verify machine-readable policy by inspecting work specs for RequiredDocs fields and testing whether verification deterministically checks them
+7. Verify completion gating by creating work with both code checks and required docs, satisfying one but not the other, and confirming completion remains blocked
+8. Verify proof bundle integration by accessing work detail/review surfaces and confirming linked docs are visible alongside checks and attestations
+9. Keep the entire milestone in a single validator run to ensure deterministic state progression
