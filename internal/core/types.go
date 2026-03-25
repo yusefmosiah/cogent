@@ -299,15 +299,45 @@ const (
 	WorkExecutionStateArchived            WorkExecutionState = "archived"
 )
 
+// Valid returns true for canonical states that should be used for new writes.
+// Deprecated aliases (e.g., awaiting_attestation) return false to prevent new writes
+// with legacy state names while still allowing backward-compatible reads.
 func (s WorkExecutionState) Valid() bool {
 	switch s {
 	case WorkExecutionStateReady, WorkExecutionStateClaimed, WorkExecutionStateInProgress,
-		WorkExecutionStateChecking, WorkExecutionStateAwaitingAttestation, WorkExecutionStateBlocked,
+		WorkExecutionStateChecking, WorkExecutionStateBlocked,
 		WorkExecutionStateDone, WorkExecutionStateFailed, WorkExecutionStateCancelled,
 		WorkExecutionStateArchived:
 		return true
+	case WorkExecutionStateAwaitingAttestation:
+		// Deprecated: awaiting_attestation is a deprecated alias for checking.
+		// New writes should use checking. This is still accepted for backward
+		// compatibility but will be normalized.
+		return false
 	default:
 		return false
+	}
+}
+
+// IsDeprecatedState returns true if the state is a deprecated alias.
+// These states should be normalized to their canonical equivalents on read.
+func (s WorkExecutionState) IsDeprecatedState() bool {
+	switch s {
+	case WorkExecutionStateAwaitingAttestation:
+		return true
+	default:
+		return false
+	}
+}
+
+// Canonical returns the canonical state for this value.
+// Deprecated aliases are normalized to their canonical equivalents.
+func (s WorkExecutionState) Canonical() WorkExecutionState {
+	switch s {
+	case WorkExecutionStateAwaitingAttestation:
+		return WorkExecutionStateChecking
+	default:
+		return s
 	}
 }
 

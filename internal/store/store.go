@@ -982,6 +982,14 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int, includeArchived bo
 	if err != nil {
 		return nil, err
 	}
+
+	// Normalize deprecated states in returned items for consistent runtime behavior
+	for i := range readyItems {
+		if readyItems[i].ExecutionState.IsDeprecatedState() {
+			readyItems[i].ExecutionState = readyItems[i].ExecutionState.Canonical()
+		}
+	}
+
 	if !includeArchived || len(readyItems) >= limit {
 		return readyItems, nil
 	}
@@ -989,6 +997,13 @@ func (s *Store) ListReadyWork(ctx context.Context, limit int, includeArchived bo
 	archivedItems, err := queryWork(`wi.execution_state = 'archived'`, limit-len(readyItems))
 	if err != nil {
 		return nil, err
+	}
+
+	// Normalize deprecated states in archived items as well
+	for i := range archivedItems {
+		if archivedItems[i].ExecutionState.IsDeprecatedState() {
+			archivedItems[i].ExecutionState = archivedItems[i].ExecutionState.Canonical()
+		}
 	}
 
 	return append(readyItems, archivedItems...), nil
@@ -1185,6 +1200,7 @@ func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRe
 		    AND claimed_until <= ?`,
 		now,
 	)
+
 	if err != nil {
 		return nil, fmt.Errorf("query expired work claims: %w", err)
 	}
@@ -1200,6 +1216,13 @@ func (s *Store) ReleaseExpiredWorkClaims(ctx context.Context) ([]core.WorkItemRe
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate expired work claims: %w", err)
+	}
+
+	// Normalize deprecated states in returned items for consistent runtime behavior
+	for i := range items {
+		if items[i].ExecutionState.IsDeprecatedState() {
+			items[i].ExecutionState = items[i].ExecutionState.Canonical()
+		}
 	}
 
 	for i, item := range items {
