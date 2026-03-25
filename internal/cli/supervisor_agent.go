@@ -182,6 +182,21 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 			continue
 		}
 
+		// Idle suppression: if there's no actionable work and no novel events,
+		// back off instead of sending an empty turn that would just cause churn.
+		// This implements VAL-SUPERVISOR-005's "no-actionable-work periods do not trigger churn".
+		if msg == "" && !s.hasActionableWork(ctx) {
+			s.log("idle", "no actionable work, backing off")
+			// Short backoff before checking again
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+				// After backoff, loop will re-check hasActionableWork
+			}
+			continue
+		}
+
 		s.log("turn", fmt.Sprintf("session=%s", sessionID))
 
 		sendResult, err := s.svc.Send(ctx, service.SendRequest{
