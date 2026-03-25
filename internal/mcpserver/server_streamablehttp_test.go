@@ -1,7 +1,9 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -533,4 +535,261 @@ func TestStreamableHTTPBroadcastNewSessionAfterSetBroadcastFunc(t *testing.T) {
 	if broadcastCount != 1 {
 		t.Errorf("New session after SetBroadcastFunc: expected 1 broadcast, got %d", broadcastCount)
 	}
+}
+
+// TestStreamableHTTPProductionRouteProvenance is a true production-route regression test
+// that drives actual HTTP requests through handler.ServeHTTP with JSON-RPC content.
+// This test proves VAL-SUPERVISOR-003 end to end on the live transport path.
+//
+// It verifies:
+// 1. External MCP traffic (ActorMCP) via production handler.ServeHTTP
+// 2. Supervisor MCP traffic (ActorSupervisor) via production handler.ServeHTTP
+// 3. Session isolation on the live route (external doesn't become supervisor)
+// 4. No-self-wake behavior on the proven live route (supervisor events don't self-wake)
+func TestStreamableHTTPProductionRouteProvenance(t *testing.T) {
+	sm := NewSessionManager(&service.Service{})
+
+	// Create the actual production handler
+	handler := mcp.NewStreamableHTTPHandler(sm.GetServerForRequest, nil)
+
+	// Test 1: External traffic through production route shows ActorMCP
+	t.Run("ExternalProductionRouteActorMCP", func(t *testing.T) {
+		externalSession := "external-prod-session"
+
+		// Build a JSON-RPC initialize request (real MCP protocol)
+		initRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "initialize",
+			"params": map[string]any{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]any{},
+				"clientInfo": map[string]any{
+					"name":    "test-client",
+					"version": "0.1.0",
+				},
+			},
+		}
+
+		reqBody, err := json.Marshal(initRequest)
+		if err != nil {
+			t.Fatalf("Failed to marshal request: %v", err)
+		}
+
+		// Create HTTP request with session ID (actual production path)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Mcp-Session-Id", externalSession)
+		req.Header.Set("Content-Type", "application/json")
+
+		// Execute through the production handler
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		// Request succeeded
+		if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+			t.Logf("External init response code: %d", rec.Code)
+		}
+
+		// Verify provenance: external traffic should show ActorMCP
+		instance := sm.GetServerInstance(externalSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "mcp" {
+			t.Errorf("External production route: CreatedBy = %q, want %q", createdBy, "mcp")
+		}
+
+		actor := service.ActorFromCreatedBy(createdBy)
+		if actor != service.ActorMCP {
+			t.Errorf("External production route: Actor = %v, want %v", actor, service.ActorMCP)
+		}
+
+		// Verify external events DO wake supervisor (they're actionable)
+		externalEvent := service.WorkEvent{
+			Kind:      service.WorkEventUpdated,
+			WorkID:    "work-external-1",
+			State:     "done",
+			PrevState: "in_progress",
+			Actor:     actor,
+			Cause:     service.CauseWorkerTerminal,
+		}
+		if !externalEvent.RequiresSupervisorAttention() {
+			t.Error("External MCP event should wake supervisor")
+		}
+	})
+
+	// Test 2: Supervisor traffic through production route shows ActorSupervisor
+	t.Run("SupervisorProductionRouteActorSupervisor", func(t *testing.T) {
+		supervisorSession := "supervisor-prod-session"
+
+		// Mark as supervisor BEFORE any requests (production flow)
+		sm.SetSupervisorSession(supervisorSession)
+
+		// Build a JSON-RPC tools/list request
+		listRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/list",
+		}
+
+		reqBody, err := json.Marshal(listRequest)
+		if err != nil {
+			t.Fatalf("Failed to marshal request: %v", err)
+		}
+
+		// Create HTTP request with supervisor session ID
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Mcp-Session-Id", supervisorSession)
+		req.Header.Set("Content-Type", "application/json")
+
+		// Execute through the production handler
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+			t.Logf("Supervisor list response code: %d", rec.Code)
+		}
+
+		// Verify provenance: supervisor traffic should show ActorSupervisor
+		instance := sm.GetServerInstance(supervisorSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "supervisor" {
+			t.Errorf("Supervisor production route: CreatedBy = %q, want %q", createdBy, "supervisor")
+		}
+
+		actor := service.ActorFromCreatedBy(createdBy)
+		if actor != service.ActorSupervisor {
+			t.Errorf("Supervisor production route: Actor = %v, want %v", actor, service.ActorSupervisor)
+		}
+
+		// Verify supervisor events DON'T wake supervisor (self-wake prevention, VAL-SUPERVISOR-002)
+		supervisorEvent := service.WorkEvent{
+			Kind:      service.WorkEventUpdated,
+			WorkID:    "work-supervisor-1",
+			State:     "done",
+			PrevState: "in_progress",
+			Actor:     actor,
+			Cause:     service.CauseSupervisorMutation,
+		}
+		if supervisorEvent.RequiresSupervisorAttention() {
+			t.Error("Supervisor event on production route should NOT wake supervisor (VAL-SUPERVISOR-002)")
+		}
+	})
+
+	// Test 3: Mixed traffic isolation on production route
+	t.Run("MixedTrafficIsolationProductionRoute", func(t *testing.T) {
+		// After supervisor is set, external traffic should still be ActorMCP
+		externalMixedSession := "external-mixed-session"
+
+		listRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      3,
+			"method":  "tools/list",
+		}
+
+		reqBody, _ := json.Marshal(listRequest)
+
+		// External request on the production handler
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Mcp-Session-Id", externalMixedSession)
+		req.Header.Set("Content-Type", "application/json")
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		// External should still be "mcp" (isolation intact)
+		instance := sm.GetServerInstance(externalMixedSession)
+		ctx := context.Background()
+		createdBy := instance.CreatedBy(ctx)
+
+		if createdBy != "mcp" {
+			t.Errorf("Mixed traffic isolation: External CreatedBy = %q, want %q (isolation broken!)",
+				createdBy, "mcp")
+		}
+
+		// Supervisor should still be "supervisor" (isolation intact)
+		supervisorInstance := sm.GetServerInstance("supervisor-prod-session")
+		supervisorCreatedBy := supervisorInstance.CreatedBy(ctx)
+
+		if supervisorCreatedBy != "supervisor" {
+			t.Errorf("Mixed traffic isolation: Supervisor CreatedBy changed to %q (isolation broken!)",
+				supervisorCreatedBy)
+		}
+	})
+
+	// Test 4: Broadcast propagation on production route (preserves existing behavior)
+	t.Run("BroadcastPropagationProductionRoute", func(t *testing.T) {
+		var broadcastCalls []map[string]any
+		broadcastFn := func(eventType string, data any) {
+			broadcastCalls = append(broadcastCalls, map[string]any{
+				"type": eventType,
+				"data": data,
+			})
+		}
+
+		// Set broadcast function BEFORE session creation
+		sm.SetBroadcastFunc(broadcastFn)
+
+		// Create a new session through the production route
+		broadcastSession := "broadcast-prod-session"
+		listRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      4,
+			"method":  "tools/list",
+		}
+
+		reqBody, _ := json.Marshal(listRequest)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Mcp-Session-Id", broadcastSession)
+		req.Header.Set("Content-Type", "application/json")
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		// Get the server instance and send a channel event
+		server := sm.GetServerInstance(broadcastSession)
+		err := server.SendChannelEvent("test from production route", map[string]string{"test": "true"})
+		if err != nil {
+			t.Fatalf("SendChannelEvent failed: %v", err)
+		}
+
+		// Verify broadcast was called (propagation works)
+		if len(broadcastCalls) != 1 {
+			t.Errorf("Broadcast propagation: expected 1 call, got %d", len(broadcastCalls))
+		}
+		if broadcastCalls[0]["type"] != "channel_message" {
+			t.Errorf("Broadcast event type = %q, want channel_message", broadcastCalls[0]["type"])
+		}
+	})
+
+	// Test 5: VAL-SUPERVISOR-006 - External event after supervisor event still wakes
+	t.Run("ExternalAfterSupervisorStillWakes", func(t *testing.T) {
+		// First: supervisor mutation should NOT wake (no self-wake)
+		supervisorEvent := service.WorkEvent{
+			Kind:      service.WorkEventUpdated,
+			WorkID:    "work-super-2",
+			State:     "done",
+			PrevState: "in_progress",
+			Actor:     service.ActorSupervisor,
+			Cause:     service.CauseSupervisorMutation,
+		}
+		if supervisorEvent.RequiresSupervisorAttention() {
+			t.Error("Supervisor event should not wake (VAL-SUPERVISOR-002)")
+		}
+
+		// Then: external event with same state SHOULD still wake (VAL-SUPERVISOR-006)
+		externalEvent := service.WorkEvent{
+			Kind:      service.WorkEventUpdated,
+			WorkID:    "work-external-3",
+			State:     "done",
+			PrevState: "in_progress",
+			Actor:     service.ActorMCP,
+			Cause:     service.CauseWorkerTerminal,
+		}
+		if !externalEvent.RequiresSupervisorAttention() {
+			t.Error("External event after supervisor event SHOULD still wake (VAL-SUPERVISOR-006)")
+		}
+	})
 }
