@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,6 +14,10 @@ type reportInput struct {
 	Type    string `json:"type,omitempty" jsonschema:"message type: info, status_update, escalation (default: info)"`
 }
 
+type reportResult struct {
+	Status string `json:"status"`
+}
+
 func registerChannelTools(server *mcp.Server, mcpSrv *Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "report",
@@ -20,13 +25,13 @@ func registerChannelTools(server *mcp.Server, mcpSrv *Server) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input reportInput) (*mcp.CallToolResult, any, error) {
 		msg := strings.TrimSpace(input.Message)
 		if msg == "" {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "error: message must not be empty"}}}, nil, nil
+			return nil, nil, fmt.Errorf("message must not be empty")
 		}
 		msgType := channelmeta.NormalizeWorkerReportType(input.Type)
 
 		if err := mcpSrv.SendChannelEvent(msg, channelmeta.WorkerReportMeta(msgType)); err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "error: " + err.Error()}}}, nil, nil
+			return nil, nil, err
 		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Report sent."}}}, nil, nil
+		return jsonResult(reportResult{Status: "sent"})
 	})
 }

@@ -49,8 +49,12 @@ func TestReportToolUsesWorkerReportContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected text content, got %T", result.Content[0])
 	}
-	if text.Text != "Report sent." {
-		t.Fatalf("unexpected tool response: %q", text.Text)
+	var ack reportResult
+	if err := json.Unmarshal([]byte(text.Text), &ack); err != nil {
+		t.Fatalf("decode report result: %v", err)
+	}
+	if ack.Status != "sent" {
+		t.Fatalf("unexpected report status: %q", ack.Status)
 	}
 
 	var notification channelNotification

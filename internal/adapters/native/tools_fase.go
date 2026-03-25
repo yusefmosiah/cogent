@@ -116,12 +116,7 @@ func newCheckRecordCreateTool(svc faseBridge) Tool {
 			if err != nil {
 				return "", fmt.Errorf("create check record: %w", err)
 			}
-			return jsonString(map[string]any{
-				"check_id":  rec.CheckID,
-				"work_id":   rec.WorkID,
-				"result":    rec.Result,
-				"created_at": rec.CreatedAt.Format(time.RFC3339),
-			})
+			return jsonString(rec)
 		},
 	)
 }
@@ -152,22 +147,7 @@ func newCheckRecordListTool(svc faseBridge) Tool {
 			if err != nil {
 				return "", fmt.Errorf("list check records: %w", err)
 			}
-			items := make([]map[string]any, 0, len(recs))
-			for _, r := range recs {
-				items = append(items, map[string]any{
-					"check_id":      r.CheckID,
-					"work_id":       r.WorkID,
-					"result":        r.Result,
-					"checker_model": r.CheckerModel,
-					"worker_model":  r.WorkerModel,
-					"created_at":    r.CreatedAt.Format(time.RFC3339),
-				})
-			}
-			return jsonString(map[string]any{
-				"work_id": in.WorkID,
-				"records": items,
-				"count":   len(items),
-			})
+			return jsonString(recs)
 		},
 	)
 }
@@ -192,24 +172,7 @@ func newCheckRecordShowTool(svc faseBridge) Tool {
 			if err != nil {
 				return "", fmt.Errorf("get check record: %w", err)
 			}
-			return jsonString(map[string]any{
-				"check_id":      rec.CheckID,
-				"work_id":       rec.WorkID,
-				"result":        rec.Result,
-				"checker_model": rec.CheckerModel,
-				"worker_model":  rec.WorkerModel,
-				"created_at":    rec.CreatedAt.Format(time.RFC3339),
-				"report": map[string]any{
-					"build_ok":      rec.Report.BuildOK,
-					"tests_passed":  rec.Report.TestsPassed,
-					"tests_failed":  rec.Report.TestsFailed,
-					"test_output":   rec.Report.TestOutput,
-					"diff_stat":     rec.Report.DiffStat,
-					"screenshots":   rec.Report.Screenshots,
-					"videos":        rec.Report.Videos,
-					"checker_notes": rec.Report.CheckerNotes,
-				},
-			})
+			return jsonString(rec)
 		},
 	)
 }
@@ -280,14 +243,14 @@ func newRunTestsTool() Tool {
 			}
 
 			return jsonString(map[string]any{
-				"packages":      pkgs,
-				"exit_code":     exitCode,
-				"passed":        passed,
-				"failed":        failed,
-				"elapsed_ms":    elapsed.Milliseconds(),
-				"output":        output,
-				"build_ok":      exitCode == 0 || failed > 0, // build succeeded even if tests fail
-				"all_passed":    exitCode == 0,
+				"packages":   pkgs,
+				"exit_code":  exitCode,
+				"passed":     passed,
+				"failed":     failed,
+				"elapsed_ms": elapsed.Milliseconds(),
+				"output":     output,
+				"build_ok":   exitCode == 0 || failed > 0, // build succeeded even if tests fail
+				"all_passed": exitCode == 0,
 			})
 		},
 	)

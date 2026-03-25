@@ -194,8 +194,18 @@ func TestCheckRecordCreate_ValidatesResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check_record_create returned error: %v", err)
 	}
-	if !strings.Contains(out, "chk_test") {
-		t.Fatalf("expected check_id in output, got: %s", out)
+	var record core.CheckRecord
+	if err := json.Unmarshal([]byte(out), &record); err != nil {
+		t.Fatalf("decode check_record_create output: %v", err)
+	}
+	if record.CheckID != "chk_test" {
+		t.Fatalf("check_id = %q, want chk_test", record.CheckID)
+	}
+	if record.WorkID != "wid_test" {
+		t.Fatalf("work_id = %q, want wid_test", record.WorkID)
+	}
+	if record.Result != "pass" {
+		t.Fatalf("result = %q, want pass", record.Result)
 	}
 }
 
@@ -212,8 +222,43 @@ func TestCheckRecordList_ReturnsRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check_record_list returned error: %v", err)
 	}
-	if !strings.Contains(out, "wid_test") {
-		t.Fatalf("expected work_id in output, got: %s", out)
+	var records []core.CheckRecord
+	if err := json.Unmarshal([]byte(out), &records); err != nil {
+		t.Fatalf("decode check_record_list output: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
+	}
+	if records[0].WorkID != "wid_test" {
+		t.Fatalf("work_id = %q, want wid_test", records[0].WorkID)
+	}
+	if records[0].CheckID != "chk_1" {
+		t.Fatalf("check_id = %q, want chk_1", records[0].CheckID)
+	}
+}
+
+func TestCheckRecordShow_ReturnsCanonicalRecord(t *testing.T) {
+	t.Parallel()
+	registry := MustNewToolRegistry()
+	svc := &fakeFaseBridge{}
+	if err := RegisterFASETools(registry, svc); err != nil {
+		t.Fatalf("RegisterFASETools returned error: %v", err)
+	}
+	out, err := registry.Execute(context.Background(), "check_record_show", mustJSON(t, map[string]any{
+		"check_id": "chk_show",
+	}))
+	if err != nil {
+		t.Fatalf("check_record_show returned error: %v", err)
+	}
+	var record core.CheckRecord
+	if err := json.Unmarshal([]byte(out), &record); err != nil {
+		t.Fatalf("decode check_record_show output: %v", err)
+	}
+	if record.CheckID != "chk_show" {
+		t.Fatalf("check_id = %q, want chk_show", record.CheckID)
+	}
+	if record.Report.CheckerNotes != "looks good" {
+		t.Fatalf("checker_notes = %q, want looks good", record.Report.CheckerNotes)
 	}
 }
 
@@ -277,6 +322,7 @@ func (f *fakeFaseBridge) GetCheckRecord(_ context.Context, checkID string) (core
 		CheckID: checkID,
 		WorkID:  "wid_test",
 		Result:  "pass",
+		Report:  core.CheckReport{CheckerNotes: "looks good"},
 	}, nil
 }
 

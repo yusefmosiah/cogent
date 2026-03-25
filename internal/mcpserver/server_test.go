@@ -136,8 +136,15 @@ func TestReportMCPToolUsesBroadcastFuncInServeMode(t *testing.T) {
 		t.Fatalf("call report tool: %v", err)
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok || text.Text != "Report sent." {
-		t.Errorf("tool response = %v, want 'Report sent.'", result.Content)
+	if !ok {
+		t.Fatalf("tool content type = %T, want *mcp.TextContent", result.Content[0])
+	}
+	var ack reportResult
+	if err := json.Unmarshal([]byte(text.Text), &ack); err != nil {
+		t.Fatalf("decode report result: %v", err)
+	}
+	if ack.Status != "sent" {
+		t.Errorf("report status = %q, want sent", ack.Status)
 	}
 
 	if len(broadcasts) != 1 {
