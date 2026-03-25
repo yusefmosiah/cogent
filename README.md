@@ -4,10 +4,13 @@
 
 It gives you:
 - a **work graph** (SQLite) that tracks work items, dependency edges, attestations, approvals, and promotions,
+- a **canonical lifecycle** with one state machine: `ready → claimed → in_progress → checking → blocked → done / failed / cancelled / archived`,
 - a **command vocabulary** for mutating work state: create, claim, release, block, attest, approve, promote, hydrate,
+- a **verification model** where checks produce evidence and blocking attestation policy gates completion,
 - **6 adapter CLIs** (Codex, Claude, Factory, Pi, Gemini, OpenCode) for dispatching work to coding agents,
 - **work hydration** that compiles deterministic briefings so any agent can pick up where any other left off,
 - a **mind-graph UI** (Poincaré disk hyperbolic visualization) for observing causal relations in the work graph,
+- a **unified usage/surface model** with normalized cost reporting across all adapters and machine-facing surfaces (CLI `--json`, HTTP API, MCP tools),
 - durable session persistence, transfers, debriefs, and canonical history search.
 
 The core invariant: **agents may always stop, the system may always resume.**
@@ -24,6 +27,43 @@ When runtime code, committed documentation, and persisted work-graph state disag
 
 Workers should reference `fase work update --execution-state` with the values from `internal/core/types.go` for valid states. Any doc that contradicts the code's state definitions should be treated as historical.
 
+### Canonical Lifecycle
+
+Every work item follows one state machine defined in `internal/core/types.go`:
+
+| State | Meaning |
+| --- | --- |
+| `ready` | Available for assignment |
+| `claimed` | Assigned to a worker, not yet started |
+| `in_progress` | Worker is actively executing |
+| `checking` | Evidence collection / verification in progress |
+| `blocked` | Waiting on a dependency or external input |
+| `done` | Completed and verified |
+| `failed` | Terminal failure |
+| `cancelled` | Explicitly cancelled |
+| `archived` | Retained for history, no longer active |
+
+The deprecated alias `awaiting_attestation` is normalized to `checking` on read and rejected on new writes.
+
+### Verification Model
+
+Checks are evidence, not approval. The pipeline:
+
+1. **Evidence collection** — workers and automated checks produce `AttestationRecord` entries against a work item.
+2. **Blocking attestation policy** — each work item declares `required_attestations` slots. Slots marked `blocking: true` must be satisfied before the item can transition to `done`.
+3. **Attestation freeze** — once the attestation requirement set is frozen (`attestation_frozen_at`), no new required slots can be added. Escalations after freeze are recorded with explicit provenance (`escalated_at`, `escalation_by`, `escalation_reason`).
+4. **Docs as verification** — repository docs are first-class verification evidence. `required_docs` on a work item declares which documents must exist and be current. Doc drift is a check failure, not a separate concern.
+5. **Completion gating** — the supervisor/service layer enforces that all blocking attestation slots are satisfied before allowing `done`. The work graph, not the agent, owns completion authority.
+
+### Usage and Surface Model
+
+All machine-facing surfaces (CLI `--json`, HTTP API, MCP tools) expose the same normalized usage and cost contract:
+
+- **Vendor-reported cost** is preferred when present.
+- **Estimated cost** is derived only when provider, model, and pricing are all known.
+- Estimated cost is a routing/debugging hint, not a billing ledger.
+- Usage attribution tracks per-model token counts for multi-model jobs.
+
 Key specs:
 - [docs/fase-v0-local-control-plane.md](docs/fase-v0-local-control-plane.md) — product direction and v0 scope
 - [docs/fase-work-runtime.md](docs/fase-work-runtime.md) — work runtime design
@@ -33,13 +73,18 @@ Key specs:
 
 ## Status
 
+The control plane has been hardened through a 6-milestone readiness mission (contract-freeze, supervisor-wake-causality, lifecycle-normalization, verification-unification, docs-as-verification, usage-and-surface-cleanup) with all 40 validation assertions passing.
+
 Current repo status:
 - Milestones 0 through 4 are implemented.
 - Milestone 5 is partial.
-- The codebase is production-shaped for local use, but not yet feature-complete against the full spec.
+- The readiness mission aligned contracts, lifecycle, verification, and surfaces across the codebase.
 
 Practical summary:
 - Core runtime, SQLite persistence, canonical schemas, session inspection, transfers, and event translation are in place.
+- One canonical lifecycle state machine governs all work items (see Canonical Lifecycle above).
+- Checks produce evidence; blocking attestation policy gates completion (see Verification Model above).
+- Supervisor wake causality is hardened: no self-wake loops, trustworthy event provenance, `RequiresSupervisorAttention()` as the canonical wake gate.
 - Codex, Claude, Factory, Pi, Gemini, and OpenCode adapters all exist.
 - A host-agent-facing `runtime` inventory command is available.
 - A provider/model catalog is available, including auth mode, billing class, and best-effort pricing when known.
@@ -47,6 +92,7 @@ Practical summary:
 - `transfer` is the explicit failover/recovery path when native continuation is not possible.
 - `debrief` is available for model-authored "land the plane" exports on still-live sessions.
 - `status` now exposes normalized token usage and vendor-reported or estimated cost when enough signal exists.
+- All machine-facing surfaces (CLI `--json`, HTTP API, MCP tools) share one unified usage/cost contract.
 
 ## Intended Use
 
@@ -63,14 +109,15 @@ The primary surface is the CLI with `--json`. Jobs queue in the background and r
 
 ## Spec Coverage
 
-Reasonable headline: about 80-85% of the written spec is implemented.
+Reasonable headline: about 85-90% of the written spec is implemented, with the control plane fully hardened.
 
 That estimate is based on feature surface, not line count:
-- Core data model: mostly implemented
-- Core command surface: mostly implemented
+- Core data model: implemented
+- Core command surface: implemented
 - Adapter coverage: implemented for all adapters named in the current spec
+- Lifecycle and verification: unified and aligned across all layers
 - Live E2E validation: implemented for major paths
-- Operational polish and lifecycle completeness: still incomplete
+- Operational polish: supervisor causality and wake gating hardened
 
 More concrete milestone view:
 
@@ -81,12 +128,24 @@ More concrete milestone view:
 | Milestone 2 | Complete | Codex and Claude adapters, fake CLIs, golden translation tests |
 | Milestone 3 | Complete | Factory and Pi adapters, `send`, canonical session inspection |
 | Milestone 4 | Complete | transfer export/run, Gemini adapter |
-| Milestone 5 | Partial | OpenCode experimental adapter is implemented; `runtime` now covers the host-agent inventory role, but lifecycle polish is still missing |
+| Milestone 5 | Partial | OpenCode experimental adapter is implemented; `runtime` covers the host-agent inventory role |
+
+Readiness mission milestones (all complete):
+
+| Readiness milestone | Status | Notes |
+| --- | --- | --- |
+| contract-freeze | Complete | Canonical lifecycle, attestation, and docs-as-truth policies locked |
+| supervisor-wake-causality | Complete | Self-wake loops eliminated, event provenance trustworthy |
+| lifecycle-normalization | Complete | One state machine across CLI, service, store, supervisor, docs |
+| verification-unification | Complete | Single check→attestation→completion pipeline |
+| docs-as-verification | Complete | Docs are first-class verification evidence |
+| usage-and-surface-cleanup | Complete | Unified usage/cost across CLI, HTTP, MCP surfaces |
 
 ## Implemented
 
 Commands currently wired:
 - `fase run`
+- `fase serve`
 - `fase status`
 - `fase logs`
 - `fase send`
@@ -137,10 +196,11 @@ Testing currently in repo:
 
 ## Not Yet Implemented
 
-Important gaps versus the spec:
+Remaining gaps versus the spec:
 - the adapter contract does not yet include explicit `Cancel` or `ExportNativeSession` methods from the spec
 - `tool.result`, approval, checkpoint, and richer structured event coverage are still incomplete for some vendors
 - transfer bundle ergonomics can still improve, especially richer evidence references into native session state when available
+- `work hydrate` is not yet fully implemented (deterministic briefing compilation with debrief mode)
 
 ## Repository Layout
 
@@ -161,38 +221,48 @@ Fixtures and adapter test assets:
 ## Build And Test
 
 Requirements:
-- Go 1.26.x
+- Go 1.25+
 - vendor CLIs installed if you want live adapter runs
 
 Build:
 
 ```bash
-make build
+make build        # produces build/fase
+make install      # installs to ~/.local/bin/fase
 ```
 
 Test:
 
 ```bash
-make test
-make lint
+make test         # go test ./internal/...
+make lint         # go vet ./...
+```
+
+Serve (UI + API + supervisor):
+
+```bash
+fase serve                        # UI + API + housekeeping on default port
+fase serve --auto                 # also auto-dispatch ready work
+fase serve --host 0.0.0.0        # accessible via Tailscale/LAN
+fase serve --no-browser           # don't open browser on start
 ```
 
 Run:
 
 ```bash
-./bin/fase run --adapter codex --cwd . --prompt "Reply with exactly OK."
-./bin/fase status --wait <job-id>
-./bin/fase logs --follow <job-id>
-./bin/fase artifacts list --job <job-id>
-./bin/fase history search --query "provider outage" --adapter claude
-./bin/fase work create --title "Implement X" --objective "Do the work"
-./bin/fase work claim-next --claimant worker-a
-./bin/fase work release <work-id> --claimant worker-a
-./bin/fase adapters --json
-./bin/fase catalog sync --json
-./bin/fase catalog show --json
-./bin/fase catalog probe --json --adapter opencode --provider openai
-./bin/fase runtime --json
+fase run --adapter codex --cwd . --prompt "Reply with exactly OK."
+fase status --wait <job-id>
+fase logs --follow <job-id>
+fase artifacts list --job <job-id>
+fase history search --query "provider outage" --adapter claude
+fase work create --title "Implement X" --objective "Do the work"
+fase work claim-next --claimant worker-a
+fase work release <work-id> --claimant worker-a
+fase adapters --json
+fase catalog sync --json
+fase catalog show --json
+fase catalog probe --json --adapter opencode --provider openai
+fase runtime --json
 ```
 
 ## Catalog
@@ -214,12 +284,7 @@ Current first-pass behavior:
 
 ## Usage And Cost Reporting
 
-`status --json` exposes normalized job-level usage and cost data when the adapter emits enough signal.
-
-Rules:
-- Prefer vendor-reported cost when present.
-- Otherwise estimate cost only when provider, model, and pricing are known.
-- Treat estimated cost as a routing/debugging hint, not a billing ledger.
+`status --json` exposes normalized job-level usage and cost data when the adapter emits enough signal. See the Usage and Surface Model section above for the contract details.
 
 The staged release matrix for contract, fake, live low-cost, recovery, and recursive orchestration lanes is documented in [docs/release-test-matrix.md](docs/release-test-matrix.md).
 
@@ -308,3 +373,4 @@ cd mind-graph && npm run dev
 3. Build the mind-graph into a proper component with operator controls (lock, approve, attest).
 4. Add blocking edge discovery and visualization from the work graph.
 5. Expand live adapter testing beyond smoke tests into multi-agent workflows.
+6. Implement adapter-level `Cancel` and `ExportNativeSession` per the spec.
