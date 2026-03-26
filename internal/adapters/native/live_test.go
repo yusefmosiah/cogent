@@ -400,28 +400,51 @@ func TestLiveAdapterNativeCoAgentSession(t *testing.T) {
 						ID: "parent-1",
 						ToolCalls: []ToolCall{{
 							ID:   "call-spawn",
-							Name: "spawn_session",
+							Name: "spawn_agent",
 							Arguments: mustJSONRaw(t, map[string]any{
+								"work_id": "work-123",
 								"adapter": "native",
 								"model":   "zai/glm-4.7",
+								"role":    "checker",
 							}),
 						}},
 						StopReason: "tool_use",
 					}, nil
 				},
 				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
-					sessionID := toolResultJSONField(t, req.Messages[len(req.Messages)-1], "session_id")
-					if sessionID == "" {
-						t.Fatalf("expected spawned session_id in tool result: %+v", req.Messages[len(req.Messages)-1])
+					agentID := toolResultJSONField(t, req.Messages[len(req.Messages)-1], "agent_id")
+					if agentID == "" {
+						t.Fatalf("expected spawned agent_id in tool result: %+v", req.Messages[len(req.Messages)-1])
 					}
 					return &LLMResponse{
 						ID: "parent-2",
 						ToolCalls: []ToolCall{{
-							ID:   "call-send",
-							Name: "send_turn",
+							ID:   "call-post",
+							Name: "post_message",
 							Arguments: mustJSONRaw(t, map[string]any{
-								"session_id": sessionID,
-								"input":      "child, say delegated result",
+								"work_id": "work-123",
+								"from":    "worker-1",
+								"role":    "worker",
+								"content": "child, say delegated result",
+							}),
+						}},
+						StopReason: "tool_use",
+					}, nil
+				},
+				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
+					cursor := toolResultJSONInt(t, req.Messages[len(req.Messages)-1], "cursor")
+					if cursor != 1 {
+						t.Fatalf("expected post_message cursor 1, got %d", cursor)
+					}
+					return &LLMResponse{
+						ID: "parent-3",
+						ToolCalls: []ToolCall{{
+							ID:   "call-wait",
+							Name: "wait_for_message",
+							Arguments: mustJSONRaw(t, map[string]any{
+								"work_id":    "work-123",
+								"cursor":     1,
+								"timeout_ms": 1000,
 							}),
 						}},
 						StopReason: "tool_use",
@@ -430,14 +453,14 @@ func TestLiveAdapterNativeCoAgentSession(t *testing.T) {
 				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
 					last := req.Messages[len(req.Messages)-1]
 					if len(last.Content) != 1 || last.Content[0].Type != "tool_result" {
-						t.Fatalf("unexpected send_turn result message: %+v", last)
+						t.Fatalf("unexpected wait_for_message result message: %+v", last)
 					}
 					if !strings.Contains(last.Content[0].Text, "delegated result") {
 						t.Fatalf("expected delegated result in tool output: %s", last.Content[0].Text)
 					}
 					req.OnDelta("parent received delegated result")
 					return &LLMResponse{
-						ID:         "parent-3",
+						ID:         "parent-4",
 						TextBlocks: []string{"parent received delegated result"},
 						StopReason: "end_turn",
 					}, nil
@@ -447,7 +470,7 @@ func TestLiveAdapterNativeCoAgentSession(t *testing.T) {
 		&scriptedClient{
 			steps: []scriptStep{
 				func(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
-					if got := lastText(req.Messages); got != "child, say delegated result" {
+					if got := lastText(req.Messages); !strings.Contains(got, "child, say delegated result") {
 						t.Fatalf("unexpected child prompt: %q", got)
 					}
 					req.OnDelta("delegated result")
@@ -575,6 +598,28 @@ func mustJSONRaw(t *testing.T, v any) json.RawMessage {
 
 func toolResultJSONField(t *testing.T, msg Message, key string) string {
 	t.Helper()
+	payload := toolResultJSON(t, msg)
+	if value, _ := payload[key].(string); value != "" {
+		return value
+	}
+	return ""
+}
+
+func toolResultJSONInt(t *testing.T, msg Message, key string) int {
+	t.Helper()
+	payload := toolResultJSON(t, msg)
+	switch value := payload[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
+func toolResultJSON(t *testing.T, msg Message) map[string]any {
+	t.Helper()
 	for _, block := range msg.Content {
 		if block.Type != "tool_result" || strings.TrimSpace(block.Text) == "" {
 			continue
@@ -583,11 +628,9 @@ func toolResultJSONField(t *testing.T, msg Message, key string) string {
 		if err := json.Unmarshal([]byte(block.Text), &payload); err != nil {
 			t.Fatalf("decode tool result JSON: %v", err)
 		}
-		if value, _ := payload[key].(string); value != "" {
-			return value
-		}
+		return payload
 	}
-	return ""
+	return map[string]any{}
 }
 
 func lastText(messages []Message) string {

@@ -3,9 +3,11 @@ package native
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yusefmosiah/cogent/internal/adapterapi"
 )
@@ -17,12 +19,18 @@ type coAgentManager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*coAgentSession
+	channels *ChannelManager
 }
 
 type coAgentSession struct {
 	adapter string
 	model   string
+	role    string
+	workID  string
+	cursor  uint64
 	session adapterapi.LiveSession
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 func newCoAgentManager(cwd, profile string, adapters map[string]adapterapi.LiveAgentAdapter) *coAgentManager {
@@ -37,6 +45,7 @@ func newCoAgentManager(cwd, profile string, adapters map[string]adapterapi.LiveA
 		profile:  profile,
 		adapters: cloned,
 		sessions: map[string]*coAgentSession{},
+		channels: NewChannelManager(),
 	}
 }
 
@@ -51,128 +60,174 @@ func RegisterCoAgentTools(registry *ToolRegistry, manager *coAgentManager) error
 
 func NewCoAgentTools(manager *coAgentManager) []Tool {
 	return []Tool{
-		newSpawnSessionTool(manager),
-		newSendTurnTool(manager),
-		newSteerSessionTool(manager),
-		newCloseSessionTool(manager),
-		newListSessionsTool(manager),
+		newSpawnAgentTool(manager),
+		newPostMessageTool(manager),
+		newReadMessagesTool(manager),
+		newWaitForMessageTool(manager),
+		newCloseAgentTool(manager),
 	}
 }
 
-func newSpawnSessionTool(manager *coAgentManager) Tool {
+func newSpawnAgentTool(manager *coAgentManager) Tool {
 	type args struct {
+		WorkID  string `json:"work_id"`
 		Adapter string `json:"adapter"`
 		Model   string `json:"model"`
+		Role    string `json:"role"`
 		Profile string `json:"profile,omitempty"`
 		CWD     string `json:"cwd,omitempty"`
 	}
 	return toolFromFunc(
-		"spawn_session",
-		"Start a co-agent live session on another adapter.",
+		"spawn_agent",
+		"Start a peer agent session on a work channel without waiting for a reply.",
 		jsonSchemaObject(map[string]any{
+			"work_id": map[string]any{"type": "string"},
 			"adapter": map[string]any{"type": "string"},
 			"model":   map[string]any{"type": "string"},
+			"role":    map[string]any{"type": "string"},
 			"profile": map[string]any{"type": "string"},
 			"cwd":     map[string]any{"type": "string"},
-		}, []string{"adapter"}, false),
+		}, []string{"work_id", "model", "role"}, false),
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in args
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return "", fmt.Errorf("decode spawn_session args: %w", err)
+				return "", fmt.Errorf("decode spawn_agent args: %w", err)
 			}
-			return manager.spawn(ctx, in.Adapter, in.Model, in.Profile, in.CWD)
+			return manager.spawn(ctx, in.WorkID, in.Adapter, in.Model, in.Role, in.Profile, in.CWD)
 		},
 	)
 }
 
-func newSendTurnTool(manager *coAgentManager) Tool {
+func newPostMessageTool(manager *coAgentManager) Tool {
 	type args struct {
-		SessionID string `json:"session_id"`
-		Input     string `json:"input"`
+		WorkID  string `json:"work_id"`
+		From    string `json:"from,omitempty"`
+		Role    string `json:"role,omitempty"`
+		Content string `json:"content"`
 	}
 	return toolFromFunc(
-		"send_turn",
-		"Send a prompt to a co-agent session and wait for the turn result.",
+		"post_message",
+		"Post a message to a shared work channel and return immediately.",
 		jsonSchemaObject(map[string]any{
-			"session_id": map[string]any{"type": "string"},
-			"input":      map[string]any{"type": "string"},
-		}, []string{"session_id", "input"}, false),
+			"work_id": map[string]any{"type": "string"},
+			"from":    map[string]any{"type": "string"},
+			"role":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		}, []string{"work_id", "content"}, false),
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in args
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return "", fmt.Errorf("decode send_turn args: %w", err)
+				return "", fmt.Errorf("decode post_message args: %w", err)
 			}
-			return manager.sendTurn(ctx, in.SessionID, in.Input)
+			from := fallbackString(in.From, ctx.Value("native_session_id"))
+			role := fallbackString(in.Role, ctx.Value("native_session_role"))
+			if from == "" {
+				from = "host"
+			}
+			if role == "" {
+				role = "agent"
+			}
+			return manager.postMessage(in.WorkID, from, role, in.Content)
 		},
 	)
 }
 
-func newSteerSessionTool(manager *coAgentManager) Tool {
+func newReadMessagesTool(manager *coAgentManager) Tool {
 	type args struct {
-		SessionID string `json:"session_id"`
-		TurnID    string `json:"turn_id,omitempty"`
-		Input     string `json:"input"`
+		WorkID string `json:"work_id"`
+		Cursor uint64 `json:"cursor,omitempty"`
 	}
 	return toolFromFunc(
-		"steer_session",
-		"Inject input into a running co-agent turn.",
+		"read_messages",
+		"Read messages from a work channel since the supplied cursor without blocking.",
 		jsonSchemaObject(map[string]any{
-			"session_id": map[string]any{"type": "string"},
-			"turn_id":    map[string]any{"type": "string"},
-			"input":      map[string]any{"type": "string"},
-		}, []string{"session_id", "input"}, false),
+			"work_id": map[string]any{"type": "string"},
+			"cursor":  map[string]any{"type": "integer", "minimum": 0},
+		}, []string{"work_id"}, false),
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in args
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return "", fmt.Errorf("decode steer_session args: %w", err)
+				return "", fmt.Errorf("decode read_messages args: %w", err)
 			}
-			return manager.steer(ctx, in.SessionID, in.TurnID, in.Input)
+			return manager.readMessages(in.WorkID, in.Cursor)
 		},
 	)
 }
 
-func newCloseSessionTool(manager *coAgentManager) Tool {
+func newWaitForMessageTool(manager *coAgentManager) Tool {
 	type args struct {
-		SessionID string `json:"session_id"`
+		WorkID    string `json:"work_id"`
+		Cursor    uint64 `json:"cursor,omitempty"`
+		TimeoutMS int    `json:"timeout_ms,omitempty"`
 	}
 	return toolFromFunc(
-		"close_session",
-		"Close a co-agent session.",
+		"wait_for_message",
+		"Block until a new message arrives on a work channel or the timeout expires.",
 		jsonSchemaObject(map[string]any{
-			"session_id": map[string]any{"type": "string"},
-		}, []string{"session_id"}, false),
+			"work_id":    map[string]any{"type": "string"},
+			"cursor":     map[string]any{"type": "integer", "minimum": 0},
+			"timeout_ms": map[string]any{"type": "integer", "minimum": 1},
+		}, []string{"work_id"}, false),
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in args
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return "", fmt.Errorf("decode close_session args: %w", err)
+				return "", fmt.Errorf("decode wait_for_message args: %w", err)
 			}
-			return manager.closeOne(in.SessionID)
+			timeout := 30 * time.Second
+			if in.TimeoutMS > 0 {
+				timeout = time.Duration(in.TimeoutMS) * time.Millisecond
+			}
+			return manager.waitForMessage(ctx, in.WorkID, in.Cursor, timeout)
 		},
 	)
 }
 
-func newListSessionsTool(manager *coAgentManager) Tool {
+func newCloseAgentTool(manager *coAgentManager) Tool {
+	type args struct {
+		AgentID string `json:"agent_id"`
+	}
 	return toolFromFunc(
-		"list_sessions",
-		"List active co-agent sessions.",
-		nil,
+		"close_agent",
+		"Close a peer agent session.",
+		jsonSchemaObject(map[string]any{
+			"agent_id": map[string]any{"type": "string"},
+		}, []string{"agent_id"}, false),
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
-			return manager.list(), nil
+			var in args
+			if err := json.Unmarshal(raw, &in); err != nil {
+				return "", fmt.Errorf("decode close_agent args: %w", err)
+			}
+			return manager.closeOne(in.AgentID)
 		},
 	)
 }
 
-func (m *coAgentManager) spawn(ctx context.Context, adapterName, model, profile, cwd string) (string, error) {
+func (m *coAgentManager) spawn(ctx context.Context, workID, adapterName, model, role, profile, cwd string) (string, error) {
+	workID = strings.TrimSpace(workID)
+	if workID == "" {
+		return "", fmt.Errorf("work_id must not be empty")
+	}
 	adapterName = strings.TrimSpace(adapterName)
 	if adapterName == "" {
-		return "", fmt.Errorf("adapter must not be empty")
+		adapterName = "native"
 	}
 	adapter, ok := m.adapters[adapterName]
 	if !ok {
-		return "", fmt.Errorf("co-agent adapter %q not registered", adapterName)
+		return "", fmt.Errorf("peer adapter %q not registered", adapterName)
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", fmt.Errorf("model must not be empty")
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return "", fmt.Errorf("role must not be empty")
 	}
 	if strings.TrimSpace(cwd) == "" {
 		cwd = m.cwd
+	}
+	if strings.TrimSpace(profile) == "" {
+		profile = role
 	}
 	if strings.TrimSpace(profile) == "" {
 		profile = m.profile
@@ -186,29 +241,185 @@ func (m *coAgentManager) spawn(ctx context.Context, adapterName, model, profile,
 		return "", err
 	}
 
-	m.mu.Lock()
-	m.sessions[session.SessionID()] = &coAgentSession{
+	channel, err := m.channels.Channel(workID)
+	if err != nil {
+		_ = session.Close()
+		return "", err
+	}
+
+	agentCtx, cancel := context.WithCancel(context.Background())
+	co := &coAgentSession{
 		adapter: adapterName,
 		model:   model,
+		role:    role,
+		workID:  workID,
+		cursor:  channel.Cursor(),
 		session: session,
+		cancel:  cancel,
+		done:    make(chan struct{}),
 	}
+
+	m.mu.Lock()
+	if _, exists := m.sessions[session.SessionID()]; exists {
+		m.mu.Unlock()
+		cancel()
+		_ = session.Close()
+		return "", fmt.Errorf("peer agent %q already exists", session.SessionID())
+	}
+	m.sessions[session.SessionID()] = co
 	m.mu.Unlock()
 
+	go m.runAgent(agentCtx, co)
+
 	return jsonString(map[string]any{
+		"agent_id":   session.SessionID(),
 		"session_id": session.SessionID(),
+		"work_id":    workID,
 		"adapter":    adapterName,
 		"model":      model,
+		"role":       role,
 		"profile":    profile,
 		"cwd":        cwd,
 	})
 }
 
-func (m *coAgentManager) sendTurn(ctx context.Context, sessionID, input string) (string, error) {
-	co, err := m.lookup(sessionID)
+func (m *coAgentManager) postMessage(workID, from, role, content string) (string, error) {
+	ch, err := m.channels.Channel(workID)
 	if err != nil {
 		return "", err
 	}
-	turnID, err := co.session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput(input)})
+	cursor, err := ch.Post(ChannelMessage{
+		From:    strings.TrimSpace(from),
+		Role:    strings.TrimSpace(role),
+		Content: content,
+	})
+	if err != nil {
+		return "", err
+	}
+	return jsonString(map[string]any{
+		"work_id": workID,
+		"cursor":  cursor,
+		"status":  "posted",
+	})
+}
+
+func (m *coAgentManager) readMessages(workID string, cursor uint64) (string, error) {
+	ch, err := m.channels.Channel(workID)
+	if err != nil {
+		return "", err
+	}
+	messages, nextCursor, err := ch.ReadSince(cursor)
+	if err != nil {
+		return "", err
+	}
+	return jsonString(map[string]any{
+		"work_id":  workID,
+		"messages": messages,
+		"cursor":   nextCursor,
+	})
+}
+
+func (m *coAgentManager) waitForMessage(ctx context.Context, workID string, cursor uint64, timeout time.Duration) (string, error) {
+	ch, err := m.channels.Channel(workID)
+	if err != nil {
+		return "", err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	messages, nextCursor, err := ch.Wait(waitCtx, cursor)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return jsonString(map[string]any{
+				"work_id":   workID,
+				"messages":  []ChannelMessage{},
+				"cursor":    cursor,
+				"timed_out": true,
+			})
+		}
+		return "", err
+	}
+	return jsonString(map[string]any{
+		"work_id":   workID,
+		"messages":  messages,
+		"cursor":    nextCursor,
+		"timed_out": false,
+	})
+}
+
+func (m *coAgentManager) closeOne(agentID string) (string, error) {
+	m.mu.Lock()
+	co, ok := m.sessions[agentID]
+	if ok {
+		delete(m.sessions, agentID)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("peer agent %q not found", agentID)
+	}
+	co.cancel()
+	if err := co.session.Close(); err != nil {
+		return "", err
+	}
+	<-co.done
+	return jsonString(map[string]any{
+		"agent_id":   agentID,
+		"session_id": agentID,
+		"status":     "closed",
+	})
+}
+
+func (m *coAgentManager) runAgent(ctx context.Context, co *coAgentSession) {
+	defer close(co.done)
+	defer m.removeSession(co.session.SessionID())
+
+	ch, err := m.channels.Channel(co.workID)
+	if err != nil {
+		return
+	}
+	cursor := co.cursor
+
+	for {
+		messages, nextCursor, err := ch.Wait(ctx, cursor)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, ErrChannelClosed) {
+				return
+			}
+			_, _ = ch.Post(ChannelMessage{
+				From:    co.session.SessionID(),
+				Role:    co.role,
+				Content: fmt.Sprintf("peer agent error: %v", err),
+			})
+			return
+		}
+		cursor = nextCursor
+		for _, msg := range messages {
+			if msg.From == co.session.SessionID() {
+				continue
+			}
+			output, err := m.runAgentTurn(ctx, co, msg)
+			if err != nil {
+				_, _ = ch.Post(ChannelMessage{
+					From:    co.session.SessionID(),
+					Role:    co.role,
+					Content: fmt.Sprintf("peer agent error: %v", err),
+				})
+				continue
+			}
+			if strings.TrimSpace(output) == "" {
+				continue
+			}
+			_, _ = ch.Post(ChannelMessage{
+				From:    co.session.SessionID(),
+				Role:    co.role,
+				Content: output,
+			})
+		}
+	}
+}
+
+func (m *coAgentManager) runAgentTurn(ctx context.Context, co *coAgentSession, msg ChannelMessage) (string, error) {
+	turnID, err := co.session.StartTurn(ctx, []adapterapi.Input{adapterapi.TextInput(peerTurnPrompt(co, msg))})
 	if err != nil {
 		return "", err
 	}
@@ -220,7 +431,7 @@ func (m *coAgentManager) sendTurn(ctx context.Context, sessionID, input string) 
 			return "", ctx.Err()
 		case ev, ok := <-co.session.Events():
 			if !ok {
-				return "", fmt.Errorf("co-agent session %s closed", sessionID)
+				return "", fmt.Errorf("peer agent %s closed", co.session.SessionID())
 			}
 			if ev.TurnID != "" && ev.TurnID != turnID {
 				continue
@@ -229,68 +440,33 @@ func (m *coAgentManager) sendTurn(ctx context.Context, sessionID, input string) 
 			case adapterapi.EventKindOutputDelta:
 				output.WriteString(ev.Text)
 			case adapterapi.EventKindTurnCompleted:
-				return jsonString(map[string]any{
-					"session_id": sessionID,
-					"turn_id":    turnID,
-					"output":     output.String(),
-				})
+				return strings.TrimSpace(output.String()), nil
 			case adapterapi.EventKindTurnFailed:
-				return "", fmt.Errorf("co-agent turn failed: %s", ev.Text)
+				return "", fmt.Errorf("peer agent turn failed: %s", ev.Text)
 			case adapterapi.EventKindTurnInterrupted:
-				return "", fmt.Errorf("co-agent turn interrupted")
+				return "", fmt.Errorf("peer agent turn interrupted")
 			}
 		}
 	}
 }
 
-func (m *coAgentManager) steer(ctx context.Context, sessionID, turnID, input string) (string, error) {
-	co, err := m.lookup(sessionID)
-	if err != nil {
-		return "", err
-	}
-	if err := co.session.Steer(ctx, turnID, []adapterapi.Input{adapterapi.TextInput(input)}); err != nil {
-		return "", err
-	}
-	return jsonString(map[string]any{
-		"session_id": sessionID,
-		"turn_id":    co.session.ActiveTurnID(),
-		"status":     "ok",
-	})
+func peerTurnPrompt(co *coAgentSession, msg ChannelMessage) string {
+	return strings.TrimSpace(fmt.Sprintf(
+		"You are the %s peer agent for work %s.\nRespond to the latest channel message. Use any available tools you need, then end your turn with the exact message that should be posted back to the shared channel.\n\nLatest message:\nFrom: %s\nRole: %s\nContent:\n%s",
+		co.role,
+		co.workID,
+		msg.From,
+		msg.Role,
+		msg.Content,
+	))
 }
 
-func (m *coAgentManager) closeOne(sessionID string) (string, error) {
-	m.mu.Lock()
-	co, ok := m.sessions[sessionID]
-	if ok {
-		delete(m.sessions, sessionID)
-	}
-	m.mu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("co-agent session %q not found", sessionID)
-	}
-	if err := co.session.Close(); err != nil {
-		return "", err
-	}
-	return jsonString(map[string]any{
-		"session_id": sessionID,
-		"status":     "closed",
-	})
-}
-
-func (m *coAgentManager) list() string {
+func (m *coAgentManager) removeSession(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	items := make([]map[string]any, 0, len(m.sessions))
-	for id, co := range m.sessions {
-		items = append(items, map[string]any{
-			"session_id":  id,
-			"adapter":     co.adapter,
-			"model":       co.model,
-			"active_turn": co.session.ActiveTurnID(),
-		})
+	if co, ok := m.sessions[sessionID]; ok && co.session.SessionID() == sessionID {
+		delete(m.sessions, sessionID)
 	}
-	out, _ := jsonString(map[string]any{"sessions": items})
-	return out
 }
 
 func (m *coAgentManager) lookup(sessionID string) (*coAgentSession, error) {
@@ -298,7 +474,7 @@ func (m *coAgentManager) lookup(sessionID string) (*coAgentSession, error) {
 	defer m.mu.Unlock()
 	co, ok := m.sessions[sessionID]
 	if !ok {
-		return nil, fmt.Errorf("co-agent session %q not found", sessionID)
+		return nil, fmt.Errorf("peer agent %q not found", sessionID)
 	}
 	return co, nil
 }
@@ -314,9 +490,21 @@ func (m *coAgentManager) closeAll() error {
 
 	var firstErr error
 	for _, co := range sessions {
+		co.cancel()
 		if err := co.session.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		<-co.done
 	}
 	return firstErr
+}
+
+func fallbackString(current string, candidate any) string {
+	if strings.TrimSpace(current) != "" {
+		return strings.TrimSpace(current)
+	}
+	if value, _ := candidate.(string); strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
