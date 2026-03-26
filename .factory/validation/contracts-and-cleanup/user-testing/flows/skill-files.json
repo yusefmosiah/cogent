@@ -1,0 +1,82 @@
+{
+  "groupId": "skill-files",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell commands (bash/zsh)",
+    "boundary": "Read-only verification, no shared state, no services needed"
+  },
+  "toolsUsed": ["ls", "cp", "file content review"],
+  "assertions": [
+    {
+      "id": "VAL-SKILL-001",
+      "title": "Worker skill file exists",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Check if skills/cogent/worker/SKILL.md exists",
+          "expected": "File exists with correct path",
+          "observed": "File exists: -rw-r--r--@ 1 wiz staff 1544 Mar 26 00:31 /Users/wiz/fase/skills/cogent/worker/SKILL.md"
+        },
+        {
+          "action": "Read file content and verify worker protocol elements",
+          "expected": "Content includes peer channels, implementation instructions, verification protocol",
+          "observed": "✓ Peer channels: spawn_agent, post_message, wait_for_message, read_messages, close_agent documented\n✓ Implementation instructions: 5-step protocol from reading assignment to completion\n✓ Verification protocol: 'Verification Expectations' section with build/test/lint requirements and checker integration"
+        },
+        {
+          "action": "Verify structured instructions for self-check",
+          "expected": "Instructions include verification via peer channels before completion",
+          "observed": "Protocol step 4 explicitly describes spawning peer checker, posting verification request, collecting findings, addressing issues, and closing agent when complete"
+        }
+      ],
+      "evidence": {
+        "files": ["contracts-and-cleanup/skill-files/VAL-SKILL-001-worker-SKILL.md"],
+        "fileSize": "1544 bytes",
+        "lastModified": "Mar 26 00:31",
+        "keyElements": [
+          "Channel tools: spawn_agent, post_message, wait_for_message, read_messages, close_agent",
+          "Protocol sections: Goal, Protocol (5 steps), Verification Expectations, Commit And Completion",
+          "Verification flow: local verification → peer checker → address issues → signal done/failed"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SKILL-002",
+      "title": "Checker skill file exists",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Check if skills/cogent/checker/SKILL.md exists",
+          "expected": "File exists with correct path",
+          "observed": "File exists: -rw-r--r--@ 1 wiz staff 1305 Mar 26 00:31 /Users/wiz/fase/skills/cogent/checker/SKILL.md"
+        },
+        {
+          "action": "Read file content and verify checker protocol elements",
+          "expected": "Content includes build/test verification, check record creation, verification protocol",
+          "observed": "✓ Build/test verification: Explicit commands listed (go build ./..., filtered go test, go vet ./...)\n✓ Check record: 'cogent check create <work-id> --result pass|fail' documented in step 5\n✓ Verification protocol: 7-step protocol from reading assignment to closing agent after exchange complete"
+        },
+        {
+          "action": "Verify structured instructions for independent verification",
+          "expected": "Instructions include code review, validator execution, check record creation, and result reporting",
+          "observed": "Protocol covers: (1) read context, (2) review code diff, (3) run validators, (4) decide pass/fail, (5) create check record, (6) post result back to worker, (7) handle follow-up discussion"
+        }
+      ],
+      "evidence": {
+        "files": ["contracts-and-cleanup/skill-files/VAL-SKILL-002-checker-SKILL.md"],
+        "fileSize": "1305 bytes",
+        "lastModified": "Mar 26 00:31",
+        "keyElements": [
+          "Build/test commands: go build ./..., filtered go test, go vet ./...",
+          "Check record creation: cogent check create <work-id> --result pass|fail",
+          "Protocol sections: Goal, Protocol (7 steps), Reporting Expectations",
+          "Independent verification: code review + validator evidence → pass/fail decision"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: 2 passed. Both worker and checker skill files exist with complete protocol documentation including peer channel tools, verification steps, and check record creation."
+}

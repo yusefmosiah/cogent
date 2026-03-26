@@ -1,0 +1,114 @@
+{
+  "groupId": "skill-loading",
+  "testedAt": "2026-03-26T19:45:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell commands (bash/zsh) + code review with grep/rg",
+    "sharedState": "none - read-only verification",
+    "servicesNeeded": "none"
+  },
+  "toolsUsed": ["rg", "grep", "go build", "code review"],
+  "assertions": [
+    {
+      "id": "VAL-SKILL-003",
+      "title": "CompileWorkerBriefing loads skills",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search for CompileWorkerBriefing function",
+          "expected": "Function found in internal/service/service.go",
+          "observed": "Function found at line 2120 in internal/service/service.go"
+        },
+        {
+          "action": "Verify loadSkillFile is called",
+          "expected": "CompileWorkerBriefing calls loadSkillFile with skillName",
+          "observed": "Line 2228: skillMarkdown := s.loadSkillFile(skillName) where skillName is 'worker' or 'checker' based on work kind"
+        },
+        {
+          "action": "Review loadSkillFile implementation",
+          "expected": "Function attempts to read skill file from disk",
+          "observed": "Lines 2075-2115: loadSkillFile searches multiple root directories and attempts os.ReadFile(path) for skills/cogent/<name>/SKILL.md"
+        },
+        {
+          "action": "Verify skill content is included in briefing",
+          "expected": "Loaded content included in worker_contract.skill_markdown",
+          "observed": "Lines 2305-2306: briefing includes 'skill_name': skillName and 'skill_markdown': skillMarkdown in worker_contract map"
+        },
+        {
+          "action": "Verify unit tests exist",
+          "expected": "Unit test verifies skill loading behavior",
+          "observed": "TestCompileWorkerBriefingIncludesSkillMarkdownForWorkKinds (lines 2734-2784) verifies worker and checker skills are loaded and included in briefing"
+        },
+        {
+          "action": "Run go build ./...",
+          "expected": "Build passes without errors",
+          "observed": "Command completed successfully [Process exited with code 0]"
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["contracts-and-cleanup/skill-loading/VAL-SKILL-003-code-snippet.md"],
+        "buildOutput": "contracts-and-cleanup/skill-loading/build-output.txt",
+        "keyFindings": [
+          "CompileWorkerBriefing calls loadSkillFile at line 2228",
+          "skillName is 'worker' for regular work, 'checker' for attest work",
+          "loadSkillFile searches for skills/cogent/<name>/SKILL.md in multiple roots",
+          "Loaded content is included in briefing under worker_contract.skill_markdown",
+          "Unit test TestCompileWorkerBriefingIncludesSkillMarkdownForWorkKinds validates behavior"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SKILL-004",
+      "title": "Hardcoded fallback works",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review loadSkillFile for fallback logic",
+          "expected": "Function falls back when skill file not found",
+          "observed": "Line 2114: return fallbackSkillContent(name) called when no skill file found in any root directory"
+        },
+        {
+          "action": "Review fallbackSkillContent implementation",
+          "expected": "Function provides hardcoded content without error",
+          "observed": "Lines 2045-2073: fallbackSkillContent returns hardcoded contract instructions for 'checker' and default (worker), never returns error"
+        },
+        {
+          "action": "Verify fallback content validity",
+          "expected": "Fallback content contains valid briefing instructions",
+          "observed": "Checker fallback: 9 bullet points with review, attestation requirements. Worker fallback: 11 bullet points with commit, update, testing requirements"
+        },
+        {
+          "action": "Verify no error propagation",
+          "expected": "loadSkillFile signature returns string, not error",
+          "observed": "Line 2075: func (s *Service) loadSkillFile(name string) string - no error return type, cannot fail"
+        },
+        {
+          "action": "Verify unit test for fallback",
+          "expected": "Unit test explicitly tests missing file scenario",
+          "observed": "TestLoadSkillFileUsesRepoSkillAndFallback 'missing' subtest (lines 2712-2731) changes to empty temp dir and verifies loadSkillFile returns fallbackSkillContent"
+        },
+        {
+          "action": "Run go build ./...",
+          "expected": "Build passes without errors",
+          "observed": "Command completed successfully [Process exited with code 0]"
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["contracts-and-cleanup/skill-loading/VAL-SKILL-004-code-snippet.md"],
+        "buildOutput": "contracts-and-cleanup/skill-loading/build-output.txt",
+        "keyFindings": [
+          "loadSkillFile returns fallbackSkillContent(name) when no file found (line 2114)",
+          "fallbackSkillContent has no error path - always returns valid string content",
+          "Fallback provides complete contract instructions for both worker and checker",
+          "Function signature prevents error propagation: returns string, not (string, error)",
+          "Unit test TestLoadSkillFileUsesRepoSkillAndFallback explicitly validates fallback behavior"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: both passed. VAL-SKILL-003: CompileWorkerBriefing successfully loads skill files via loadSkillFile, which searches multiple root directories for skills/cogent/<name>/SKILL.md and includes content in worker_contract.skill_markdown. VAL-SKILL-004: When skill files are missing, loadSkillFile gracefully falls back to fallbackSkillContent providing hardcoded contract instructions without error. Both assertions verified through code review, unit test analysis, and successful go build."
+}

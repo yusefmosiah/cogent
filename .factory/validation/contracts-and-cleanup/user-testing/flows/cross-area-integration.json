@@ -1,0 +1,123 @@
+{
+  "groupId": "cross-area-integration",
+  "testedAt": "2026-03-26T00:00:00.000Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell commands (bash/zsh)",
+    "sharedState": "read-only verification",
+    "servicesNeeded": false
+  },
+  "toolsUsed": ["shell", "go", "make", "grep"],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "Full build-test-install cycle",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go build ./...",
+          "expected": "Build completes successfully (exit 0)",
+          "observed": "Build completed successfully (exit 0)"
+        },
+        {
+          "action": "Run filtered go test",
+          "expected": "All tests pass (exit 0)",
+          "observed": "All tests passed: 9 packages tested, all cached results valid (exit 0)"
+        },
+        {
+          "action": "Run go vet ./...",
+          "expected": "Vet analysis passes (exit 0)",
+          "observed": "Vet analysis passed with no issues (exit 0)"
+        },
+        {
+          "action": "Run make install",
+          "expected": "Binary installed to ~/.local/bin/cogent",
+          "observed": "Binary successfully installed to /Users/wiz/.local/bin/cogent"
+        },
+        {
+          "action": "Run ~/.local/bin/cogent --help",
+          "expected": "Help output displays with 'cogent' as command name",
+          "observed": "Help displayed correctly with 'Usage: cogent [command]' and all subcommands listed"
+        },
+        {
+          "action": "Run ~/.local/bin/cogent version",
+          "expected": "Version command runs successfully",
+          "observed": "Version command returned 'dev' (exit 0)"
+        }
+      ],
+      "evidence": {
+        "terminalOutputs": [
+          "contracts-and-cleanup/cross-area-integration/step1-go-build.txt",
+          "contracts-and-cleanup/cross-area-integration/step2-go-test.txt",
+          "contracts-and-cleanup/cross-area-integration/step3-go-vet.txt",
+          "contracts-and-cleanup/cross-area-integration/step4-make-install.txt",
+          "contracts-and-cleanup/cross-area-integration/step5-cogent-help.txt",
+          "contracts-and-cleanup/cross-area-integration/step6-cogent-version.txt"
+        ],
+        "keyFindings": [
+          "All build commands exit with code 0",
+          "Binary is named 'cogent' (not 'fase')",
+          "Help output shows 'cogent' as command name throughout",
+          "All 9 tested packages pass (internal/adapters/native, opencode, pi, cli, core, events, notify, service, store)"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "Worker briefing coherent",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Locate CompileWorkerBriefing function",
+          "expected": "Function exists in service.go",
+          "observed": "Function found at internal/service/service.go:2120"
+        },
+        {
+          "action": "Search for CLI name references in briefing code",
+          "expected": "All references use 'cogent' (not 'fase')",
+          "observed": "All CLI commands use 'cogent work update', 'cogent work attest', 'cogent report', etc. Zero 'fase' references found in service.go"
+        },
+        {
+          "action": "Search for execution state instructions",
+          "expected": "Uses '--execution-state done' (not 'checking')",
+          "observed": "Line 2186 and 2063: updateDoneCmd uses '--execution-state done'. No references to '--execution-state checking' found."
+        },
+        {
+          "action": "Verify skill file loading logic",
+          "expected": "Briefing includes skill content or fallback",
+          "observed": "Line 2230: skillMarkdown := s.loadSkillFile(skillName). loadSkillFile function (line 2075) tries multiple roots, then calls fallbackSkillContent(name) if file not found (line 2114). Fallback function exists at line 2045."
+        },
+        {
+          "action": "Verify internal consistency",
+          "expected": "Briefing content is coherent across worker and checker modes",
+          "observed": "Briefing correctly differentiates worker (line 2203) and checker (line 2209) modes with appropriate commands and rules. Worker uses 'cogent work update --execution-state done/failed', checker uses 'cogent work attest --result passed/failed'."
+        }
+      ],
+      "evidence": {
+        "codeReview": [
+          "contracts-and-cleanup/cross-area-integration/step7-execution-state-refs.txt",
+          "contracts-and-cleanup/cross-area-integration/step8-cogent-refs.txt",
+          "contracts-and-cleanup/cross-area-integration/step9-skill-loading.txt",
+          "contracts-and-cleanup/cross-area-integration/step10-fase-refs.txt"
+        ],
+        "keyFindings": [
+          "CompileWorkerBriefing at service.go:2120 contains all required elements",
+          "All CLI references use 'cogent' prefix (20+ instances verified)",
+          "Zero 'fase' references found in service.go",
+          "Execution state instructions use '--execution-state done' and '--execution-state failed'",
+          "No references to '--execution-state checking' found",
+          "Skill loading implemented with multi-root search and fallback (loadSkillFile at line 2075)",
+          "Fallback content provided via fallbackSkillContent function (line 2045)",
+          "Worker contract includes skill_markdown field populated from loadSkillFile result",
+          "Briefing differentiates worker vs checker modes correctly",
+          "Git commit message format uses 'cogent(<scope>)' pattern (line 2188)"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: both PASSED. VAL-CROSS-001: Full build-test-install cycle completed successfully with all commands exiting 0 and binary functioning correctly. VAL-CROSS-002: CompileWorkerBriefing is internally consistent, uses 'cogent' CLI name throughout (zero 'fase' references), instructs workers to use '--execution-state done' (not 'checking'), and includes skill file loading with fallback logic."
+}

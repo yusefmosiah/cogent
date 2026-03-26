@@ -1,0 +1,57 @@
+{
+  "milestone": "contracts-and-cleanup",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SKILL-001",
+    "VAL-SKILL-002",
+    "VAL-SKILL-003",
+    "VAL-SKILL-004",
+    "VAL-CLEAN-001",
+    "VAL-CLEAN-002",
+    "VAL-CROSS-001",
+    "VAL-CROSS-002"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Created user-testing library with CLI testing guidance, concurrency limits (max 5), and flow validator guidance for CLI surface",
+      "source": "setup"
+    }
+  ],
+  "flowReports": [
+    {
+      "groupId": "skill-files",
+      "assertions": ["VAL-SKILL-001", "VAL-SKILL-002"],
+      "status": "all-passed",
+      "summary": "Both worker and checker skill files exist with complete protocol documentation including peer channel tools, verification steps, and check record creation."
+    },
+    {
+      "groupId": "skill-loading",
+      "assertions": ["VAL-SKILL-003", "VAL-SKILL-004"],
+      "status": "all-passed",
+      "summary": "CompileWorkerBriefing successfully loads skill files via loadSkillFile and includes content in briefing. Fallback mechanism provides hardcoded contract instructions when files are missing."
+    },
+    {
+      "groupId": "cleanup-verification",
+      "assertions": ["VAL-CLEAN-001", "VAL-CLEAN-002"],
+      "status": "all-passed",
+      "summary": "All removed attestation functions are gone (no definitions found). Full build/test/vet cycle completes successfully with exit code 0."
+    },
+    {
+      "groupId": "cross-area-integration",
+      "assertions": ["VAL-CROSS-001", "VAL-CROSS-002"],
+      "status": "all-passed",
+      "summary": "Full build-test-install cycle works end-to-end. Worker briefing is coherent, uses 'cogent' CLI name throughout, instructs '--execution-state done', and includes skill loading with fallback."
+    }
+  ],
+  "previousRound": null
+}
