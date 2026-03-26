@@ -10,12 +10,15 @@ import (
 
 // DigestItem represents a single notification event collected for digest delivery.
 type DigestItem struct {
-	Time    time.Time
-	WorkID  string
-	Title   string
-	Event   string // done / failed / check_pass / check_fail
-	Summary string
+	Time      time.Time
+	WorkID    string
+	Title     string
+	Objective string
+	Event     string // done / failed / check_pass / check_fail
+	Summary   string
 }
+
+type digestSender func(ctx context.Context, apiKey, to, subject, htmlBody string, attachments []ResendEmailAttachment)
 
 // DigestCollector accumulates notification events and flushes them as a single
 // HTML digest email. Thread-safe.
@@ -24,16 +27,18 @@ type DigestCollector struct {
 	items  []DigestItem
 	apiKey string
 	to     string
+	send   digestSender
 }
 
 // NewDigestCollector creates a DigestCollector that sends to the given address.
 // apiKey and to may be empty strings; Flush() is a no-op when either is absent.
 func NewDigestCollector(apiKey, to string) *DigestCollector {
-	return &DigestCollector{apiKey: apiKey, to: to}
+	return &DigestCollector{apiKey: apiKey, to: to, send: SendEmail}
 }
 
 // Collect enqueues a notification event for the next Flush.
 func (d *DigestCollector) Collect(item DigestItem) {
+	item = normalizeDigestItem(item)
 	if item.Time.IsZero() {
 		item.Time = time.Now()
 	}
@@ -61,9 +66,9 @@ func (d *DigestCollector) Flush(ctx context.Context) {
 		return
 	}
 
-	subject := fmt.Sprintf("[Cogent] digest: %d event(s)", len(batch))
+	subject := buildDigestSubject(batch)
 	html := buildDigestHTML(batch)
-	SendEmail(ctx, apiKey, to, subject, html, nil)
+	d.send(ctx, apiKey, to, subject, html, nil)
 }
 
 // buildDigestHTML renders a summary HTML email for a slice of DigestItems.
@@ -83,7 +88,11 @@ func buildDigestHTML(items []DigestItem) string {
     <div style="background:#1f2937;padding:20px 24px;">
       <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Cogent Digest</h1>
       <p style="margin:6px 0 0;color:#9ca3af;font-size:13px;">`)
-	fmt.Fprintf(&sb, "%d event(s) · %s", len(items), time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	fmt.Fprintf(&sb, "%d update(s)", len(items))
+	if counts := formatDigestEventCounts(items); counts != "" {
+		fmt.Fprintf(&sb, " · %s", escapeHTMLDigest(counts))
+	}
+	fmt.Fprintf(&sb, " · %s", time.Now().UTC().Format("2006-01-02 15:04 UTC"))
 	sb.WriteString(`</p>
     </div>
     <div style="padding:20px 24px;">
@@ -99,11 +108,12 @@ func buildDigestHTML(items []DigestItem) string {
 
 	for _, item := range items {
 		badgeColor, badgeBg := eventBadgeStyle(item.Event)
+		label := eventLabel(item.Event)
 		timeStr := item.Time.UTC().Format("15:04:05")
 
 		sb.WriteString(`<tr style="border-bottom:1px solid #f3f4f6;">`)
 		fmt.Fprintf(&sb, `<td style="padding:10px 12px 10px 0;font-size:12px;color:#6b7280;white-space:nowrap;">%s</td>`, escapeHTMLDigest(timeStr))
-		fmt.Fprintf(&sb, `<td style="padding:10px 12px 10px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;background:%s;color:%s;">%s</span></td>`, badgeBg, badgeColor, escapeHTMLDigest(item.Event))
+		fmt.Fprintf(&sb, `<td style="padding:10px 12px 10px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;background:%s;color:%s;">%s</span></td>`, badgeBg, badgeColor, escapeHTMLDigest(label))
 		sb.WriteString(`<td style="padding:10px 0;">`)
 		fmt.Fprintf(&sb, `<div style="font-size:13px;color:#1f2937;font-weight:500;">%s</div>`, escapeHTMLDigest(item.Title))
 		if item.WorkID != "" {
@@ -129,9 +139,89 @@ func buildDigestHTML(items []DigestItem) string {
 	return sb.String()
 }
 
+func buildDigestSubject(items []DigestItem) string {
+	if len(items) == 0 {
+		return "[Cogent] digest"
+	}
+	if len(items) == 1 {
+		item := normalizeDigestItem(items[0])
+		return fmt.Sprintf("[Cogent] %s — %s", eventLabel(item.Event), item.Title)
+	}
+
+	subject := fmt.Sprintf("[Cogent] %d updates", len(items))
+	if counts := formatDigestEventCounts(items); counts != "" {
+		subject += " (" + counts + ")"
+	}
+	if title := strings.TrimSpace(items[0].Title); title != "" {
+		subject += fmt.Sprintf(" — %s +%d more", title, len(items)-1)
+	}
+	return subject
+}
+
+func formatDigestEventCounts(items []DigestItem) string {
+	counts := make(map[string]int)
+	for _, item := range items {
+		counts[normalizeDigestEvent(item.Event)]++
+	}
+	order := []string{"done", "failed", "check_pass", "check_fail", "update"}
+	parts := make([]string, 0, len(order))
+	for _, event := range order {
+		if count := counts[event]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count, strings.ToLower(eventLabel(event))))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func normalizeDigestItem(item DigestItem) DigestItem {
+	item.WorkID = strings.TrimSpace(item.WorkID)
+	item.Title = strings.TrimSpace(item.Title)
+	item.Objective = strings.TrimSpace(item.Objective)
+	item.Event = normalizeDigestEvent(item.Event)
+	item.Summary = strings.TrimSpace(item.Summary)
+
+	if item.Title == "" {
+		item.Title = firstNonEmptyDigest(item.WorkID, "Untitled work item")
+	}
+	if item.Summary == "" {
+		item.Summary = firstNonEmptyDigest(item.Objective, defaultDigestSummary(item.Event))
+	}
+	return item
+}
+
+func normalizeDigestEvent(event string) string {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "done":
+		return "done"
+	case "failed":
+		return "failed"
+	case "check_pass":
+		return "check_pass"
+	case "check_fail":
+		return "check_fail"
+	default:
+		return "update"
+	}
+}
+
+func defaultDigestSummary(event string) string {
+	switch normalizeDigestEvent(event) {
+	case "done":
+		return "Work completed."
+	case "failed":
+		return "Work failed."
+	case "check_pass":
+		return "Check passed."
+	case "check_fail":
+		return "Check failed."
+	default:
+		return "Work updated."
+	}
+}
+
 // eventBadgeStyle returns text and background colours for a digest event type.
 func eventBadgeStyle(event string) (textColor, bgColor string) {
-	switch event {
+	switch normalizeDigestEvent(event) {
 	case "done", "check_pass":
 		return "#166534", "#dcfce7"
 	case "failed", "check_fail":
@@ -139,6 +229,30 @@ func eventBadgeStyle(event string) (textColor, bgColor string) {
 	default:
 		return "#1f2937", "#f3f4f6"
 	}
+}
+
+func eventLabel(event string) string {
+	switch normalizeDigestEvent(event) {
+	case "done":
+		return "Done"
+	case "failed":
+		return "Failed"
+	case "check_pass":
+		return "Check passed"
+	case "check_fail":
+		return "Check failed"
+	default:
+		return "Updated"
+	}
+}
+
+func firstNonEmptyDigest(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // escapeHTMLDigest escapes HTML special characters.

@@ -566,13 +566,7 @@ func openWithStateDirOverride(ctx context.Context, configPath, stateDirOverride 
 
 // sendWorkNotification collects a "done" event into the digest.
 func (s *Service) sendWorkNotification(_ context.Context, work core.WorkItemRecord, message string) {
-	s.DigestCollector.Collect(notify.DigestItem{
-		Time:    time.Now(),
-		WorkID:  work.WorkID,
-		Title:   work.Title,
-		Event:   "done",
-		Summary: message,
-	})
+	s.DigestCollector.Collect(digestItemForWork(work, "done", firstNonEmpty(message, work.Objective, "Work completed.")))
 }
 
 // collectCheckArtifacts collects screenshots from the check report's artifact paths
@@ -1051,24 +1045,38 @@ func (s *Service) sendAttestationNotification(_ context.Context, work core.WorkI
 	if attestation.Result == "passed" {
 		event = "check_pass"
 	}
-	s.DigestCollector.Collect(notify.DigestItem{
-		Time:    time.Now(),
-		WorkID:  work.WorkID,
-		Title:   work.Title,
-		Event:   event,
-		Summary: attestation.Summary,
-	})
+	s.DigestCollector.Collect(digestItemForWork(work, event, firstNonEmpty(attestation.Summary, formatAttestationDigestSummary(attestation), work.Objective)))
 }
 
 // sendWorkFailureNotification collects a "failed" event into the digest.
 func (s *Service) sendWorkFailureNotification(_ context.Context, work core.WorkItemRecord, message string) {
-	s.DigestCollector.Collect(notify.DigestItem{
-		Time:    time.Now(),
-		WorkID:  work.WorkID,
-		Title:   work.Title,
-		Event:   "failed",
-		Summary: message,
-	})
+	s.DigestCollector.Collect(digestItemForWork(work, "failed", firstNonEmpty(message, work.Objective, "Work failed.")))
+}
+
+func digestItemForWork(work core.WorkItemRecord, event, summary string) notify.DigestItem {
+	return notify.DigestItem{
+		Time:      time.Now(),
+		WorkID:    work.WorkID,
+		Title:     work.Title,
+		Objective: work.Objective,
+		Event:     event,
+		Summary:   strings.TrimSpace(summary),
+	}
+}
+
+func formatAttestationDigestSummary(attestation core.AttestationRecord) string {
+	result := strings.TrimSpace(attestation.Result)
+	if result == "" {
+		result = "updated"
+	}
+	summary := fmt.Sprintf("Attestation %s", result)
+	if verifier := strings.TrimSpace(attestation.VerifierKind); verifier != "" {
+		summary += " by " + verifier
+	}
+	if method := strings.TrimSpace(attestation.Method); method != "" {
+		summary += " via " + method
+	}
+	return summary + "."
 }
 
 // SendSpecEscalationEmail emails the human when a work item has failed checks 3+ times.
