@@ -1,0 +1,128 @@
+{
+  "groupId": "group1-channels",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell command execution (grep, go test, go build)",
+    "isolationNote": "No isolation needed - code inspection and tests are read-only"
+  },
+  "toolsUsed": ["go build", "go test", "grep"],
+  "assertions": [
+    {
+      "id": "VAL-CHAN-001",
+      "title": "New channel tools registered",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read internal/adapters/native/tools_coagent.go to verify tool registration",
+          "expected": "NewCoAgentTools() returns 5 tools: spawn_agent, post_message, read_messages, wait_for_message, close_agent",
+          "observed": "NewCoAgentTools() correctly returns all 5 channel tools with proper parameter definitions"
+        },
+        {
+          "action": "Run go build ./... to verify compilation",
+          "expected": "Build succeeds with exit code 0",
+          "observed": "Build completed successfully with exit code 0"
+        },
+        {
+          "action": "Verify tool registration test passes",
+          "expected": "TestNewCoAgentToolsRegistersChannelTools passes",
+          "observed": "Test passed (included in go test output)"
+        }
+      ],
+      "evidence": {
+        "codeInspection": [
+          "core-simplification/group1-channels/VAL-CHAN-001-tool-registration.txt",
+          "core-simplification/group1-channels/VAL-CHAN-001-tool-registration-test.txt"
+        ],
+        "buildOutput": "core-simplification/group1-channels/VAL-CHAN-001-build-output.txt",
+        "details": "All five new channel tools are correctly registered in NewCoAgentTools() function with proper JSON schema definitions and handler implementations"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CHAN-002",
+      "title": "Old coagent tools removed",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search internal/adapters/native/ for old tool names: send_turn, steer_session, list_sessions",
+          "expected": "Zero matches found in tool registration code",
+          "observed": "grep returned exit code 1 (no matches found) - old tools are completely removed"
+        },
+        {
+          "action": "Verify no references exist via ripgrep",
+          "expected": "No matches for send_turn|steer_session|list_sessions pattern",
+          "observed": "Grep tool returned 'No matches found'"
+        }
+      ],
+      "evidence": {
+        "searchOutput": "core-simplification/group1-channels/VAL-CHAN-002-old-tools-search.txt",
+        "details": "Comprehensive search across internal/adapters/native/ directory confirmed zero references to legacy coagent tools"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CHAN-003",
+      "title": "Channel message passing works",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test ./internal/adapters/native/... -run Channel -v",
+          "expected": "Channel message passing tests pass: posting messages, reading back with correct content/sender/role, maintaining order, interleaving from different senders",
+          "observed": "All channel tests passed including TestAgentChannelPostAndReadPreservesOrder, TestAgentChannelCursorReadsOnlyNewMessages, TestAgentChannelConcurrentPosts"
+        },
+        {
+          "action": "Verify message ordering test",
+          "expected": "TestAgentChannelPostAndReadPreservesOrder passes",
+          "observed": "Test passed - messages posted from worker-1, checker-1, worker-1 are read back in exact order"
+        },
+        {
+          "action": "Verify cursor-based reading",
+          "expected": "TestAgentChannelCursorReadsOnlyNewMessages passes",
+          "observed": "Test passed - cursor correctly tracks position and returns only new messages"
+        },
+        {
+          "action": "Verify concurrent posting",
+          "expected": "TestAgentChannelConcurrentPosts passes",
+          "observed": "Test passed - 32 concurrent posts from 4 agents maintain message integrity"
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-simplification/group1-channels/VAL-CHAN-003-004-test-output.txt",
+        "details": "All 8 channel-related tests passed: TestChannelManagerUsesWorkIDKey, TestAgentChannelPostAndReadPreservesOrder, TestAgentChannelCursorReadsOnlyNewMessages, TestAgentChannelWaitTimeoutAndDelivery, TestAgentChannelConcurrentPosts, TestAgentChannelCloseUnblocksWaiters, TestAgentChannelPostAfterCloseFails, TestNewCoAgentToolsRegistersChannelTools"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CHAN-004",
+      "title": "Wait-for-message timeout behavior",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test ./internal/adapters/native/... -run Channel -v",
+          "expected": "TestAgentChannelWaitTimeoutAndDelivery passes with both timeout and delivery subtests",
+          "observed": "Both subtests passed successfully"
+        },
+        {
+          "action": "Verify timeout subtest",
+          "expected": "wait_for_message returns timeout indication when no message arrives within 25ms deadline",
+          "observed": "Test passed - Wait() returned context.DeadlineExceeded error with empty messages and cursor 0"
+        },
+        {
+          "action": "Verify delivery subtest",
+          "expected": "wait_for_message returns message promptly when posted before 1s deadline",
+          "observed": "Test passed - Wait() received message posted after 20ms delay, returned correct content and cursor"
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-simplification/group1-channels/VAL-CHAN-003-004-test-output.txt",
+        "testCode": "core-simplification/group1-channels/VAL-CHAN-004-timeout-test-code.txt",
+        "details": "TestAgentChannelWaitTimeoutAndDelivery with subtests 'timeout' and 'delivery' both passed, confirming correct timeout behavior (25ms timeout triggers DeadlineExceeded) and prompt delivery behavior (message posted after 20ms is delivered within 1s deadline)"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assertions: all 4 passed. New channel tools (spawn_agent, post_message, read_messages, wait_for_message, close_agent) are correctly registered. Old tools (send_turn, steer_session, list_sessions) are completely removed. Channel message passing tests verify ordering, cursor-based reading, concurrent posting, and wait/timeout behavior all function correctly."
+}

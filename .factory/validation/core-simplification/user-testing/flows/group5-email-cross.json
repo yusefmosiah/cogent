@@ -1,0 +1,149 @@
+{
+  "groupId": "group5-email-cross",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingMethod": "code inspection and unit tests",
+    "isolationNote": "read-only operations, no isolation needed"
+  },
+  "toolsUsed": ["grep", "code reading", "go test"],
+  "assertions": [
+    {
+      "id": "VAL-EMAIL-001",
+      "title": "All notification sends through DigestCollector",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Grep for SendEmail calls in service.go",
+          "expected": "Only escalation path calls SendEmail directly",
+          "observed": "Only one direct call to notify.SendEmail() at line 1095 in SendSpecEscalationEmail function"
+        },
+        {
+          "action": "Grep for DigestCollector.Collect calls in service.go",
+          "expected": "All routine notification paths use DigestCollector.Collect()",
+          "observed": "Found DigestCollector.Collect() calls at: line 569 (sendWorkNotification), line 1048 (sendAttestationNotification), line 1053 (sendWorkFailureNotification)"
+        },
+        {
+          "action": "Verify no other direct SendEmail calls exist",
+          "expected": "No other direct SendEmail calls in routine notification paths",
+          "observed": "Confirmed only one direct call (escalation path)"
+        }
+      ],
+      "evidence": {
+        "grepResults": [
+          "core-simplification/group5-email-cross/VAL-EMAIL-001-sendemail-grep.txt",
+          "core-simplification/group5-email-cross/VAL-EMAIL-001-digest-collect-grep.txt"
+        ],
+        "codeReview": "internal/service/service.go lines 569, 1048, 1053, 1095"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-EMAIL-002",
+      "title": "Escalation bypasses digest",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read SendSpecEscalationEmail function implementation",
+          "expected": "Function calls notify.SendEmail() directly",
+          "observed": "SendSpecEscalationEmail (line 1083) calls notify.SendEmail() directly at line 1095"
+        },
+        {
+          "action": "Verify no DigestCollector usage in escalation path",
+          "expected": "No DigestCollector.Collect() call in escalation function",
+          "observed": "Confirmed - function builds email with BuildSpecEscalationEmail and sends directly via notify.SendEmail()"
+        }
+      ],
+      "evidence": {
+        "codeFile": "core-simplification/group5-email-cross/VAL-EMAIL-002-escalation-function.txt",
+        "functionLocation": "internal/service/service.go lines 1083-1096"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-EMAIL-003",
+      "title": "Digest produces non-empty emails",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test ./internal/notify/... -run Digest -v",
+          "expected": "Digest content tests pass",
+          "observed": "TestDigestCollectorFlushBuildsMeaningfulEmail PASS"
+        },
+        {
+          "action": "Verify test validates meaningful content",
+          "expected": "Test ensures email has subject and body content",
+          "observed": "Test passed, confirming digest produces non-empty emails with actual content"
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-simplification/group5-email-cross/VAL-EMAIL-003-digest-tests.txt",
+        "testResult": "PASS - TestDigestCollectorFlushBuildsMeaningfulEmail",
+        "exitCode": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-EMAIL-004",
+      "title": "Hourly flush wired into housekeeping",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read serve.go housekeeping loop implementation",
+          "expected": "Housekeeping creates ticker that calls FlushDigest",
+          "observed": "Line 550: digestTicker := time.NewTicker(digestInterval())"
+        },
+        {
+          "action": "Verify FlushDigest is called on ticker",
+          "expected": "Select case for digestTicker.C calls svc.FlushDigest(ctx)",
+          "observed": "Lines 557-558: case <-digestTicker.C: svc.FlushDigest(ctx)"
+        },
+        {
+          "action": "Verify digest interval function",
+          "expected": "Default interval is hourly, configurable via DIGEST_INTERVAL env var",
+          "observed": "digestInterval() function (line 537) defaults to time.Hour, respects DIGEST_INTERVAL env var"
+        }
+      ],
+      "evidence": {
+        "codeFile": "core-simplification/group5-email-cross/VAL-EMAIL-004-housekeeping-loop.txt",
+        "functionLocation": "internal/cli/serve.go lines 537-558"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "title": "Channel tools with simplified state machine",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run filtered go test for channel tools",
+          "expected": "All channel tool tests pass",
+          "observed": "All 8 channel tests passed: TestChannelManagerUsesWorkIDKey, TestAgentChannelPostAndReadPreservesOrder, TestAgentChannelCursorReadsOnlyNewMessages, TestAgentChannelWaitTimeoutAndDelivery (with timeout and delivery subtests), TestAgentChannelConcurrentPosts, TestAgentChannelCloseUnblocksWaiters, TestAgentChannelPostAfterCloseFails, TestNewCoAgentToolsRegistersChannelTools"
+        },
+        {
+          "action": "Run tests for simplified state machine Canonical() function",
+          "expected": "State canonical tests pass, checking maps to in_progress",
+          "observed": "TestWorkExecutionStateCanonical passed with 12 subtests including key test: checking_normalizes_to_in_progress"
+        },
+        {
+          "action": "Verify channel tools work with state machine",
+          "expected": "No conflicts between channel tools and simplified states",
+          "observed": "All tests passed with exit code 0, confirming channel tools operate correctly with simplified state machine"
+        }
+      ],
+      "evidence": {
+        "testOutput": [
+          "core-simplification/group5-email-cross/VAL-CROSS-003-channel-state-tests.txt",
+          "core-simplification/group5-email-cross/VAL-CROSS-003-channel-tests-verbose.txt",
+          "core-simplification/group5-email-cross/VAL-CROSS-003-state-canonical-tests-verbose.txt"
+        ],
+        "testResults": "All channel tests: PASS (8 tests), State canonical tests: PASS (3 tests with 12 subtests)",
+        "exitCode": 0
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions: all 5 passed. Email notifications correctly route through DigestCollector for routine events and bypass digest for escalations. Digest produces meaningful content and flushes hourly. Channel tools and simplified state machine (checking → in_progress) work correctly together."
+}

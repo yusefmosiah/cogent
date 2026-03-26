@@ -1,0 +1,88 @@
+{
+  "groupId": "group2-attestation-part1",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell command execution (grep, code reading)",
+    "isolationNote": "No isolation needed - code inspection is read-only"
+  },
+  "toolsUsed": ["ripgrep", "grep", "shell"],
+  "assertions": [
+    {
+      "id": "VAL-ATTEST-001",
+      "title": "Attestation spawning functions removed",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Grep for 'func spawnAttestationChildren' in Go files",
+          "expected": "Zero matches (exit code 1)",
+          "observed": "Exit code 1 - no matches found"
+        },
+        {
+          "action": "Grep for all ~28 attestation helper functions (attestationChildRuntime, attestationChildTitle, attestationChildObjective, attestationWorkerFindings, refreshParentAfterAttestationChild, refreshAttestationParentState, childMatchesCurrentAttempt, attestationNonce, currentAttemptEpoch, defaultRequiredAttestations, attestationPreferredAdapters, entryMatchesWorkRole, alternateAdapter, requiredAttestationsResolved, unsatisfiedAttestationSlots, etc.)",
+          "expected": "Zero function definition matches (exit code 1)",
+          "observed": "Exit code 1 - no function definitions found for these names"
+        }
+      ],
+      "evidence": {
+        "grepOutputs": [
+          "core-simplification/group2-attestation-part1/VAL-ATTEST-001-grep-spawnAttestationChildren.txt",
+          "core-simplification/group2-attestation-part1/VAL-ATTEST-001-grep-all-attestation-functions.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-ATTEST-002",
+      "title": "finishJob simplified",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read finishJob function in internal/service/service.go",
+          "expected": "Function does NOT call spawnAttestationChildren",
+          "observed": "Function contains only: state update, timestamp update, store.UpdateJob, syncWorkStateFromJob. No attestation spawning logic present."
+        },
+        {
+          "action": "Grep for any calls to spawnAttestationChildren in service.go",
+          "expected": "Zero matches",
+          "observed": "Exit code 1 - no calls to spawnAttestationChildren found"
+        }
+      ],
+      "evidence": {
+        "codeReview": "core-simplification/group2-attestation-part1/VAL-ATTEST-002-finishJob-function.txt",
+        "grepOutput": "core-simplification/group2-attestation-part1/VAL-ATTEST-002-finishJob-function.txt"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-ATTEST-003",
+      "title": "guardDoneTransition simplified",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read guardDoneTransition function in internal/service/service.go",
+          "expected": "Function only calls completionGateIssues, no attestation children checks",
+          "observed": "Function implementation: calls completionGateIssues, checks if issues exist, returns error if any. No attestation logic."
+        },
+        {
+          "action": "Read completionGateIssues function in internal/service/service.go",
+          "expected": "Function only checks for passing check record and required docs, no attestation children checks",
+          "observed": "Function checks: (1) hasPassingCheckRecord - requires passing check, (2) requiredDocIssues - checks required docs. Returns combined issues. No attestation children checks, no requiredAttestationsResolved, no unsatisfiedAttestationSlots calls."
+        },
+        {
+          "action": "Verify no attestation children checks in completion gate path",
+          "expected": "No calls to blockingAttestationsSatisfied, unsatisfiedAttestationSlots, or attestation children logic in guardDoneTransition/completionGateIssues",
+          "observed": "Grep shows blockingAttestationsSatisfied and similar functions exist elsewhere in service.go but are NOT called in guardDoneTransition or completionGateIssues code paths"
+        }
+      ],
+      "evidence": {
+        "codeReview": "core-simplification/group2-attestation-part1/VAL-ATTEST-003-guardDoneTransition-completionGateIssues.txt",
+        "verification": "core-simplification/group2-attestation-part1/VAL-ATTEST-003-guardDoneTransition-completionGateIssues.txt"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions for attestation removal: all 3 passed. VAL-ATTEST-001: Verified all ~28 attestation spawning functions are removed from service.go. VAL-ATTEST-002: Confirmed finishJob does not call spawnAttestationChildren. VAL-ATTEST-003: Confirmed guardDoneTransition and completionGateIssues only check for passing check record and required docs, with no attestation children checks."
+}

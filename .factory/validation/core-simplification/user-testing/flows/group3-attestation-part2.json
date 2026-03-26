@@ -1,0 +1,99 @@
+{
+  "groupId": "group3-attestation-part2",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell command execution (CLI, go test, go build)",
+    "binary": "cogent (installed at ~/.local/bin/cogent)",
+    "isolation": "No isolation needed - CLI help and tests are read-only"
+  },
+  "toolsUsed": ["shell", "grep", "go build", "go test"],
+  "assertions": [
+    {
+      "id": "VAL-ATTEST-004",
+      "title": "Manual attestation CLI preserved",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 'cogent work attest --help'",
+          "expected": "CLI command exists, compiles, and displays help with attestation flags",
+          "observed": "Command executed successfully with exit code 0. Help output shows all expected flags: --artifact, --blocking, --confidence, --job, --metadata, --method, --nonce, --result, --session, --summary, --supersedes, --verifier-identity, --verifier-kind"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": ["core-simplification/group3-attestation-part2/VAL-ATTEST-004-attest-help.txt"],
+        "exitCode": 0,
+        "commandRun": "cogent work attest --help"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-ATTEST-005",
+      "title": "CreateCheckRecord preserved",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search for CreateCheckRecord function definitions using grep",
+          "expected": "Function exists in service.go and store.go",
+          "observed": "Found 3 function definitions: Service.CreateCheckRecord (service.go:776), Service.CreateCheckRecordDirect (service.go:1024), Store.CreateCheckRecord (store.go:4236). All definitions present and properly typed."
+        },
+        {
+          "action": "Run 'cogent check create --help'",
+          "expected": "CLI command exists and displays help with check creation flags",
+          "observed": "Command executed successfully with exit code 0. Help output shows all expected flags: --build-ok, --checker-model, --diff-stat, --notes, --result, --screenshots, --test-output, --tests-failed, --tests-passed, --videos, --worker-model"
+        }
+      ],
+      "evidence": {
+        "grepOutput": ["core-simplification/group3-attestation-part2/VAL-ATTEST-005-CreateCheckRecord-grep.txt"],
+        "terminalOutput": ["core-simplification/group3-attestation-part2/VAL-ATTEST-005-check-create-help.txt"],
+        "exitCode": 0,
+        "functionsFound": [
+          "internal/service/service.go:776:func (s *Service) CreateCheckRecord",
+          "internal/service/service.go:1024:func (s *Service) CreateCheckRecordDirect",
+          "internal/store/store.go:4236:func (s *Store) CreateCheckRecord"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-ATTEST-006",
+      "title": "Build and tests pass after attestation removal",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 'go build ./...'",
+          "expected": "Build completes successfully with exit code 0",
+          "observed": "Build completed successfully with no errors, exit code 0"
+        },
+        {
+          "action": "Run filtered 'go test' (excluding codex and mcpserver packages)",
+          "expected": "All tests pass with exit code 0",
+          "observed": "All test packages passed: native (cached), opencode (cached), pi (cached), cli (0.554s), core (cached), events (cached), notify (cached), service (33.655s), store (cached). Exit code 0. No test failures."
+        }
+      ],
+      "evidence": {
+        "buildOutput": ["core-simplification/group3-attestation-part2/VAL-ATTEST-006-go-build.txt"],
+        "testOutput": ["core-simplification/group3-attestation-part2/VAL-ATTEST-006-go-test.txt"],
+        "exitCodes": {
+          "goBuild": 0,
+          "goTest": 0
+        },
+        "testPackageResults": [
+          "github.com/yusefmosiah/cogent/internal/adapters/native: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/adapters/opencode: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/adapters/pi: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/cli: ok 0.554s",
+          "github.com/yusefmosiah/cogent/internal/core: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/events: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/notify: ok (cached)",
+          "github.com/yusefmosiah/cogent/internal/service: ok 33.655s",
+          "github.com/yusefmosiah/cogent/internal/store: ok (cached)"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: all 3 passed. VAL-ATTEST-004 confirmed manual attestation CLI (cogent work attest) is preserved and functional. VAL-ATTEST-005 verified CreateCheckRecord function exists in service and store layers, with CLI command (cogent check create) working correctly. VAL-ATTEST-006 confirmed both go build and filtered go test pass completely after attestation removal, with all test packages passing (9 packages tested, 0 failures)."
+}

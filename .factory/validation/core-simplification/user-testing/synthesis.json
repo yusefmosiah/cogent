@@ -1,0 +1,79 @@
+{
+  "milestone": "core-simplification",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-CHAN-001",
+    "VAL-CHAN-002",
+    "VAL-CHAN-003",
+    "VAL-CHAN-004",
+    "VAL-ATTEST-001",
+    "VAL-ATTEST-002",
+    "VAL-ATTEST-003",
+    "VAL-ATTEST-004",
+    "VAL-ATTEST-005",
+    "VAL-ATTEST-006",
+    "VAL-MCP-001",
+    "VAL-MCP-002",
+    "VAL-STATE-001",
+    "VAL-STATE-002",
+    "VAL-STATE-003",
+    "VAL-EMAIL-001",
+    "VAL-EMAIL-002",
+    "VAL-EMAIL-003",
+    "VAL-EMAIL-004",
+    "VAL-CROSS-003"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "testingApproach": {
+    "surface": "CLI",
+    "tool": "Shell command execution",
+    "concurrency": {
+      "maxConcurrentValidators": 5,
+      "groups": 5,
+      "actualConcurrency": 5
+    },
+    "isolation": "No isolation needed - code inspection, build/test commands, and CLI help are read-only operations"
+  },
+  "flowReports": {
+    "group1-channels": {
+      "assertions": ["VAL-CHAN-001", "VAL-CHAN-002", "VAL-CHAN-003", "VAL-CHAN-004"],
+      "result": "all passed",
+      "summary": "New channel tools registered correctly, old tools removed, message passing and timeout behavior verified through unit tests"
+    },
+    "group2-attestation-part1": {
+      "assertions": ["VAL-ATTEST-001", "VAL-ATTEST-002", "VAL-ATTEST-003"],
+      "result": "all passed",
+      "summary": "All ~28 attestation spawning functions removed, finishJob simplified, guardDoneTransition now only checks for passing check record"
+    },
+    "group3-attestation-part2": {
+      "assertions": ["VAL-ATTEST-004", "VAL-ATTEST-005", "VAL-ATTEST-006"],
+      "result": "all passed",
+      "summary": "Manual attestation CLI preserved, CreateCheckRecord function and CLI preserved, build and tests pass after attestation removal"
+    },
+    "group4-mcp-state": {
+      "assertions": ["VAL-MCP-001", "VAL-MCP-002", "VAL-STATE-001", "VAL-STATE-002", "VAL-STATE-003"],
+      "result": "all passed",
+      "summary": "MCP server registers zero tools while preserving channel notification relay, state machine maps checking→in_progress, briefings use 'done' state, tests pass"
+    },
+    "group5-email-cross": {
+      "assertions": ["VAL-EMAIL-001", "VAL-EMAIL-002", "VAL-EMAIL-003", "VAL-EMAIL-004", "VAL-CROSS-003"],
+      "result": "all passed",
+      "summary": "Email notifications route through DigestCollector, escalation bypasses digest, digest produces meaningful content, hourly flush wired, channel tools work with simplified state machine"
+    }
+  },
+  "evidenceFiles": {
+    "flowReports": "/Users/wiz/fase/.factory/validation/core-simplification/user-testing/flows/",
+    "evidence": "/Users/wiz/.factory/missions/c0d4f526-fe3a-4bb4-ad2f-69766afd3976/evidence/core-simplification/",
+    "totalEvidenceFiles": 34
+  },
+  "previousRound": null
+}

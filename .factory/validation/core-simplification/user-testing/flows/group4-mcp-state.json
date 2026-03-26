@@ -1,0 +1,126 @@
+{
+  "groupId": "group4-mcp-state",
+  "testedAt": "2026-03-26T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/wiz/fase",
+    "testingTool": "Shell command execution (code reading, grep, go test)",
+    "isolationNote": "No isolation needed - code inspection and tests are read-only"
+  },
+  "toolsUsed": ["Read", "Grep", "Execute (go build, go test)"],
+  "assertions": [
+    {
+      "id": "VAL-MCP-001",
+      "title": "MCP server registers zero tools",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read New() function in internal/mcpserver/server.go",
+          "expected": "New() does not call registerTools or registerChannelTools",
+          "observed": "New() creates MCP server without calling registerTools or registerChannelTools. Comment states: 'Intentionally register zero MCP tools'"
+        },
+        {
+          "action": "Grep for registerTools and registerChannelTools calls",
+          "expected": "No calls to these functions from New()",
+          "observed": "registerTools defined at line 447 but never called from New(). registerChannelTools not found in file."
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["core-simplification/group4-mcp-state/VAL-MCP-001-New-function.txt"],
+        "grepResults": "registerTools function exists but is not called from New()",
+        "conclusion": "New() correctly registers zero tools"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MCP-002",
+      "title": "Channel notification relay preserved",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Grep for channel notification relay code in mcpserver",
+          "expected": "SendChannelEvent, runEventForwarder, and channelNotification exist",
+          "observed": "Found SendChannelEvent (line 283), runEventForwarder (line 326), channelNotification (line 269), and RunStdio (line 320)"
+        },
+        {
+          "action": "Run go build ./...",
+          "expected": "Build passes (exit code 0)",
+          "observed": "Build completed successfully with exit code 0"
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["core-simplification/group4-mcp-state/VAL-MCP-002-channel-relay.txt"],
+        "grepResults": "Channel relay functions preserved",
+        "buildOutput": "go build ./... exit code: 0"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-STATE-001",
+      "title": "Checking maps to in_progress",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read Canonical() function in internal/core/types.go",
+          "expected": "Canonical() maps WorkExecutionStateChecking to WorkExecutionStateInProgress",
+          "observed": "Canonical() function at line 344 maps both WorkExecutionStateChecking and WorkExecutionStateAwaitingAttestation to WorkExecutionStateInProgress"
+        },
+        {
+          "action": "Verify checking constant still exists for backward compatibility",
+          "expected": "WorkExecutionStateChecking defined and marked as valid",
+          "observed": "WorkExecutionStateChecking defined at line 307, Valid() returns true for it (line 322), but Canonical() normalizes it to in_progress"
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["core-simplification/group4-mcp-state/VAL-STATE-001-Canonical-function.txt"],
+        "codeReview": "Canonical() correctly maps checking → in_progress",
+        "comments": "Comment states: 'Legacy checking remains accepted for backward compatibility but canonicalizes to in_progress'"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-STATE-002",
+      "title": "Worker briefing signals done",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Grep for 'execution-state' in internal/service/service.go briefing code",
+          "expected": "Briefing uses '--execution-state done' for success, no references to 'checking'",
+          "observed": "Found '--execution-state done' at line 2114 for success and '--execution-state failed' at line 2116 for failure"
+        },
+        {
+          "action": "Grep for 'checking' in internal/service/service.go",
+          "expected": "No references to 'checking' state",
+          "observed": "No matches found for 'checking' in the entire file"
+        }
+      ],
+      "evidence": {
+        "codeSnippets": ["core-simplification/group4-mcp-state/VAL-STATE-002-briefing-done.txt"],
+        "grepResults": "execution-state commands use 'done' and 'failed', no 'checking'",
+        "briefingCommands": "updateDoneCmd and updateFailCmd use done/failed states only"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-STATE-003",
+      "title": "Tests pass with simplified states",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run filtered go test command per AGENTS.md",
+          "expected": "All tests pass (exit code 0)",
+          "observed": "All test packages passed: internal/adapters/native, internal/adapters/opencode, internal/adapters/pi, internal/cli, internal/core, internal/events, internal/notify, internal/service, internal/store"
+        }
+      ],
+      "evidence": {
+        "testOutput": ["core-simplification/group4-mcp-state/VAL-STATE-003-test-results.txt"],
+        "testCommand": "go list ./internal/... | grep -v codex | grep -v mcpserver | xargs env GOMAXPROCS=4 go test",
+        "exitCode": 0,
+        "conclusion": "All tests pass with simplified state machine"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions: all 5 passed. MCP server correctly registers zero tools while preserving channel notification relay. State machine correctly maps checking→in_progress and briefings use 'done' state. All tests pass."
+}
