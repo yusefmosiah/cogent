@@ -2042,6 +2042,78 @@ func (s *Service) Work(ctx context.Context, workID string) (*WorkShowResult, err
 	}, nil
 }
 
+func fallbackSkillContent(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "checker":
+		return strings.TrimSpace(`# Cogent Checker Contract
+
+- Review the parent work item thoroughly: inspect the code, diff, tests, notes, and evidence.
+- Record notes for your findings before attesting.
+- If the work involves a web UI: run Playwright e2e tests with 'cd mind-graph && npx playwright test'. Screenshots and videos are saved to mind-graph/test-results/ and will be attached to the attestation email automatically.
+- If no Playwright tests exist for web UI work, FAIL the attestation — backend-only tests are insufficient for web UI work.
+- REQUIRED: You MUST call 'cogent work attest <parent-work-id> --result passed|failed --message "<your finding summary>"' to submit your attestation result.
+- Use --result passed if the work meets its objective; use --result failed if it does not.
+- Do NOT create new work items, proposals, or child work. Only do what was assigned.
+- Do NOT call cogent work complete or cogent work fail.`) + "\n"
+	default:
+		return strings.TrimSpace(`# Cogent Worker Contract
+
+- Do the work, add notes as you go, then commit and update state before exiting.
+- REQUIRED before exit: git add -A && git commit -m "cogent(<scope>): <summary>"
+- REQUIRED on success: cogent work update <work-id> --execution-state done --message "<summary of what you did>"
+- REQUIRED on failure: cogent work update <work-id> --execution-state failed --message "<what went wrong>"
+- You MUST call one of the above before exiting. The supervisor cannot see your work otherwise.
+- REQUIRED: Report your results before exiting. Use 'cogent report "<summary of what you did, files changed, test results>"'. This notifies whoever dispatched you (supervisor or host).
+- Record notes for findings, risks, and open questions.
+- Run verification (tests, builds) and report results as notes.
+- If the work involves a web UI: you MUST add e2e tests (default: Playwright) covering all interactive features (buttons, drag, resize, navigation). Backend tests alone are insufficient — they cannot catch broken UI behavior.
+- Do NOT create new work items, proposals, or child work. Only do what was assigned.
+- Do NOT call cogent work attest — an independent agent handles attestation.`) + "\n"
+	}
+}
+
+func (s *Service) loadSkillFile(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+
+	seen := map[string]struct{}{}
+	roots := make([]string, 0, 3)
+	addRoot := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		root = filepath.Clean(root)
+		if _, ok := seen[root]; ok {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+
+	addRoot(s.docRepoRoot(context.Background()))
+	addRoot(s.Paths.StateDir)
+	if filepath.Base(strings.TrimSpace(s.Paths.StateDir)) == ".cogent" {
+		addRoot(filepath.Dir(strings.TrimSpace(s.Paths.StateDir)))
+	}
+
+	for _, root := range roots {
+		path := filepath.Join(root, "skills", "cogent", name, "SKILL.md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(data)) == "" {
+			break
+		}
+		return string(data)
+	}
+
+	return fallbackSkillContent(name)
+}
+
 // CompileWorkerBriefing deterministically compiles a worker briefing from
 // runtime state. This is the adapter-independent hydration contract — all
 // adapters consume the same compiled briefing.
@@ -2128,8 +2200,10 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 		"Do NOT call cogent work attest — an independent agent handles attestation.",
 		delegationNextAction(result.Work),
 	}
+	skillName := "worker"
 
 	if result.Work.Kind == "attest" {
+		skillName = "checker"
 		parentWorkID := "<parent-work-id>"
 		if parent != nil {
 			parentWorkID = parent.WorkID
@@ -2153,6 +2227,7 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 			delegationNextAction(result.Work),
 		}
 	}
+	skillMarkdown := s.loadSkillFile(skillName)
 
 	runtimeSection := map[string]any{
 		"runtime_version": "dev",
@@ -2236,6 +2311,8 @@ func (s *Service) CompileWorkerBriefing(ctx context.Context, workID, mode string
 			},
 			"write_commands": writeCommands,
 			"rules":          contractRules,
+			"skill_name":     skillName,
+			"skill_markdown": skillMarkdown,
 		},
 		"hydration": map[string]any{
 			"mode":                     mode,
@@ -6351,6 +6428,18 @@ func RenderWorkerBriefingMarkdown(r WorkHydrateResult) string {
 				if s, ok := rule.(string); ok {
 					fmt.Fprintf(&b, "- %s\n", s)
 				}
+			}
+		}
+		if skill, _ := wc["skill_markdown"].(string); strings.TrimSpace(skill) != "" {
+			title := "Embedded Skill"
+			if skillName, _ := wc["skill_name"].(string); strings.TrimSpace(skillName) != "" {
+				skillLabel := strings.TrimSpace(skillName)
+				title = fmt.Sprintf("%s Skill", strings.ToUpper(skillLabel[:1])+skillLabel[1:])
+			}
+			b.WriteString("\n## " + title + "\n\n")
+			b.WriteString(skill)
+			if !strings.HasSuffix(skill, "\n") {
+				b.WriteString("\n")
 			}
 		}
 	}

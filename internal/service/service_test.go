@@ -2698,6 +2698,100 @@ func TestSupervisorReviewGuidanceKeepsChecksEvidenceOnly(t *testing.T) {
 	}
 }
 
+func TestLoadSkillFileUsesRepoSkillAndFallback(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		svc, repoRoot := newRepoBackedTestService(t)
+		want := "# Worker Skill\n\nUse peer channels for self-check.\n"
+		mustWriteFile(t, filepath.Join(repoRoot, "skills", "cogent", "worker", "SKILL.md"), want)
+
+		if got := svc.loadSkillFile("worker"); got != want {
+			t.Fatalf("expected repo skill file content, got %q", got)
+		}
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		svc := newTestService(t)
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd: %v", err)
+		}
+		tmp := t.TempDir()
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("Chdir temp dir: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chdir(cwd); err != nil {
+				t.Fatalf("restore cwd: %v", err)
+			}
+		})
+
+		if got := svc.loadSkillFile("checker"); got != fallbackSkillContent("checker") {
+			t.Fatalf("expected fallback checker skill, got %q", got)
+		}
+	})
+}
+
+func TestCompileWorkerBriefingIncludesSkillMarkdownForWorkKinds(t *testing.T) {
+	svc, repoRoot := newRepoBackedTestService(t)
+	ctx := context.Background()
+
+	workerSkill := "# Worker Skill\n\nworker-marker\n"
+	checkerSkill := "# Checker Skill\n\nchecker-marker\n"
+	mustWriteFile(t, filepath.Join(repoRoot, "skills", "cogent", "worker", "SKILL.md"), workerSkill)
+	mustWriteFile(t, filepath.Join(repoRoot, "skills", "cogent", "checker", "SKILL.md"), checkerSkill)
+
+	workerWork, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "implement feature",
+		Objective: "ship the worker path",
+		Kind:      "feature",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork worker: %v", err)
+	}
+	checkerWork, err := svc.CreateWork(ctx, WorkCreateRequest{
+		Title:     "review feature",
+		Objective: "verify the worker path",
+		Kind:      "attest",
+	})
+	if err != nil {
+		t.Fatalf("CreateWork checker: %v", err)
+	}
+
+	cases := []struct {
+		name          string
+		workID        string
+		wantSkillName string
+		wantMarker    string
+	}{
+		{name: "worker", workID: workerWork.WorkID, wantSkillName: "worker", wantMarker: "worker-marker"},
+		{name: "checker", workID: checkerWork.WorkID, wantSkillName: "checker", wantMarker: "checker-marker"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			briefing, err := svc.CompileWorkerBriefing(ctx, tc.workID, "standard")
+			if err != nil {
+				t.Fatalf("CompileWorkerBriefing: %v", err)
+			}
+			workerContract, ok := briefing["worker_contract"].(map[string]any)
+			if !ok {
+				t.Fatalf("worker_contract missing or wrong type: %#v", briefing["worker_contract"])
+			}
+			if got, _ := workerContract["skill_name"].(string); got != tc.wantSkillName {
+				t.Fatalf("expected skill_name %q, got %q", tc.wantSkillName, got)
+			}
+			if got, _ := workerContract["skill_markdown"].(string); !strings.Contains(got, tc.wantMarker) {
+				t.Fatalf("expected skill markdown to include %q, got %q", tc.wantMarker, got)
+			}
+
+			rendered := RenderWorkerBriefingMarkdown(briefing)
+			if !strings.Contains(rendered, tc.wantMarker) {
+				t.Fatalf("expected rendered briefing to include %q, got:\n%s", tc.wantMarker, rendered)
+			}
+		})
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	stateDir := t.TempDir()
