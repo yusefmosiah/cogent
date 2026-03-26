@@ -1,0 +1,52 @@
+{
+  "milestone": "contracts-and-cleanup",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "build": {
+      "passed": true,
+      "command": "go build ./...",
+      "exitCode": 0
+    },
+    "test": {
+      "passed": true,
+      "command": "go list ./internal/... | grep -v 'github.com/yusefmosiah/cogent/internal/adapters/codex' | grep -v 'github.com/yusefmosiah/cogent/internal/mcpserver' | xargs env GOMAXPROCS=4 go test",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "go vet ./...",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance on E2E test update conventions: When to update existing tests vs when to treat test failures as blockers. Workers should update test expectations when the runtime behavior has intentionally changed (e.g., state machine simplification, feature removal), but should treat unexpected test failures as blockers requiring investigation.",
+      "evidence": "Feature final-cleanup updated 3 E2E test functions (TestWorkLifecycleCommands, TestDocsRequiredWorkBlocksCompletionUntilRepoDocsAlign, TestWorkArchiveCommands) to align with simplified runtime. Worker correctly updated tests to remove attestation child expectations and checking state references. However, no documented guidance exists on when test updates are appropriate.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Document the '--glob \"!.factory/**\"' exclusion pattern for stale-reference searches using ripgrep. When searching for old/stale references (like 'fase'), workers should exclude: go.sum, .git/**, and .factory/** to avoid false positives from git history and mission artifacts.",
+      "evidence": "Feature final-cleanup used 'rg \"fase\" --glob \"!go.sum\" --glob \"!.git/**\" --glob \"!.factory/**\"' correctly, but this pattern isn't documented. Future workers performing similar sweeps may not know to exclude .factory from searches.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md or .factory/library/architecture.md",
+      "suggestion": "Document that lifecycle and verification model documentation exists in 3 locations (README.md, docs/architecture.md, docs/cogent-work-runtime.md) and must be kept in sync when making changes to the work lifecycle, state machine, or verification model. Workers making architectural changes should check all three files for consistency.",
+      "evidence": "Feature final-cleanup updated all 3 files consistently (README.md lines 7, 39-47; docs/architecture.md lines 241-251, 409-419; docs/cogent-work-runtime.md lines 127-156). The duplication creates drift risk but isn't called out in guidance documents.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
