@@ -188,11 +188,8 @@ func New(svc *service.Service) *Server {
 		},
 	)
 	s := &Server{MCP: mcpServer, svc: svc, w: os.Stdout}
-	// Register MCP tools with request-scoped provenance tracking.
-	// Tools extract caller context from the request to determine proper Actor
-	// (supervisor vs mcp vs host) for emitted events.
-	registerTools(mcpServer, s)
-	registerChannelTools(mcpServer, s)
+	// Intentionally register zero MCP tools. The server still exposes
+	// channel notifications and session-scoped provenance without any tool surface.
 	return s
 }
 

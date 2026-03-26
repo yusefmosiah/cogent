@@ -8,27 +8,12 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/yusefmosiah/cogent/internal/core"
 	"github.com/yusefmosiah/cogent/internal/service"
 )
 
 // newTestServer creates a minimal Server for testing (no DB, events work via zero-value EventBus).
 func newTestServer() *Server {
 	return New(&service.Service{})
-}
-
-func newServiceBackedTestServer(t *testing.T) (*Server, *service.Service) {
-	t.Helper()
-	t.Setenv("COGENT_STATE_DIR", t.TempDir())
-	t.Setenv("COGENT_CONFIG_DIR", t.TempDir())
-	t.Setenv("COGENT_CACHE_DIR", t.TempDir())
-
-	svc, err := service.Open(context.Background(), "")
-	if err != nil {
-		t.Fatalf("open service: %v", err)
-	}
-	t.Cleanup(func() { _ = svc.Close() })
-	return New(svc), svc
 }
 
 func TestSendChannelEventStdioMode(t *testing.T) {
@@ -116,19 +101,12 @@ func TestSendChannelEventNoMetaOmitsField(t *testing.T) {
 	}
 }
 
-func TestReportMCPToolUsesBroadcastFuncInServeMode(t *testing.T) {
+func TestListToolsReturnsZeroTools(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	s := newTestServer()
 
-	var broadcasts []map[string]any
-	s.SetBroadcastFunc(func(_ string, data any) {
-		if m, ok := data.(map[string]any); ok {
-			broadcasts = append(broadcasts, m)
-		}
-	})
-
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	serverDone := make(chan struct{})
 	go func() {
@@ -143,101 +121,12 @@ func TestReportMCPToolUsesBroadcastFuncInServeMode(t *testing.T) {
 	}
 	defer func() { _ = session.Close() }()
 
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "report",
-		Arguments: map[string]any{"message": "task complete"},
-	})
+	result, err := session.ListTools(ctx, nil)
 	if err != nil {
-		t.Fatalf("call report tool: %v", err)
+		t.Fatalf("list tools: %v", err)
 	}
-	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("tool content type = %T, want *mcp.TextContent", result.Content[0])
-	}
-	var ack reportResult
-	if err := json.Unmarshal([]byte(text.Text), &ack); err != nil {
-		t.Fatalf("decode report result: %v", err)
-	}
-	if ack.Status != "sent" {
-		t.Errorf("report status = %q, want sent", ack.Status)
-	}
-
-	if len(broadcasts) != 1 {
-		t.Fatalf("broadcastFn called %d times, want 1", len(broadcasts))
-	}
-	if broadcasts[0]["content"] != "task complete" {
-		t.Errorf("broadcast content = %v, want 'task complete'", broadcasts[0]["content"])
-	}
-
-	cancel()
-	<-serverDone
-}
-
-func TestCheckRecordListMCPToolUsesCanonicalDefaultLimit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	s, svc := newServiceBackedTestServer(t)
-	work, err := svc.CreateWork(ctx, service.WorkCreateRequest{
-		Title:     "check list parity",
-		Objective: "verify canonical default list limit",
-	})
-	if err != nil {
-		t.Fatalf("create work: %v", err)
-	}
-
-	recordCount := core.DefaultCheckRecordListLimit - 1
-	for i := 0; i < recordCount; i++ {
-		if _, err := svc.CreateCheckRecord(ctx, service.CheckRecordCreateRequest{
-			WorkID: work.WorkID,
-			Result: "pass",
-			Report: core.CheckReport{
-				BuildOK:      true,
-				TestsPassed:  1,
-				TestOutput:   "go test ./internal/mcpserver\nok\tgithub.com/yusefmosiah/cogent/internal/mcpserver\t0.123s",
-				CheckerNotes: "canonical default limit",
-			},
-			CreatedBy: "test",
-		}); err != nil {
-			t.Fatalf("create check record %d: %v", i, err)
-		}
-	}
-
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	serverDone := make(chan struct{})
-	go func() {
-		defer close(serverDone)
-		_ = s.MCP.Run(ctx, serverTransport)
-	}()
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.1.0"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "check_record_list",
-		Arguments: map[string]any{"work_id": work.WorkID},
-	})
-	if err != nil {
-		t.Fatalf("call check_record_list tool: %v", err)
-	}
-	if len(result.Content) != 1 {
-		t.Fatalf("expected single result content item, got %d", len(result.Content))
-	}
-	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("tool content type = %T, want *mcp.TextContent", result.Content[0])
-	}
-
-	var records []core.CheckRecord
-	if err := json.Unmarshal([]byte(text.Text), &records); err != nil {
-		t.Fatalf("decode check list result: %v", err)
-	}
-	if len(records) != recordCount {
-		t.Fatalf("record count = %d, want %d", len(records), recordCount)
+	if len(result.Tools) != 0 {
+		t.Fatalf("tool count = %d, want 0", len(result.Tools))
 	}
 
 	cancel()
