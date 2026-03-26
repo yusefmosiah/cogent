@@ -1,0 +1,91 @@
+{
+  "milestone": "rename",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "build": {
+      "passed": true,
+      "command": "make build",
+      "exitCode": 0
+    },
+    "test": {
+      "passed": true,
+      "command": "go list ./internal/... | grep -v 'github.com/yusefmosiah/cogent/internal/adapters/codex' | grep -v 'github.com/yusefmosiah/cogent/internal/mcpserver' | xargs env GOMAXPROCS=4 go test",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "go vet ./...",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Fixed copy-paste error in .factory/library/architecture.md: 'cogent (formerly cogent)' → 'cogent (formerly fase)'",
+      "sourceFeature": "rename-docs-and-final-sweep"
+    },
+    {
+      "target": "library",
+      "description": "Fixed arrow notation in .factory/library/architecture.md: 'cmd/cogent/' (→ 'cmd/cogent/')' → 'cmd/cogent/' (formerly 'cmd/fase/')'",
+      "sourceFeature": "rename-docs-and-final-sweep"
+    },
+    {
+      "target": "library",
+      "description": "Fixed arrow notation in .factory/library/architecture.md: '.cogent/' → '.cogent/' to '.cogent/' (formerly '.fase/')",
+      "sourceFeature": "rename-docs-and-final-sweep"
+    },
+    {
+      "target": "library",
+      "description": "Fixed arrow notation in .factory/missions/cogent-simplification.md: '.cogent/' → '.cogent/' to '.fase/' → '.cogent/'",
+      "sourceFeature": "rename-docs-and-final-sweep"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance: Environment variables should follow the pattern COGENT_* (e.g., COGENT_STATE_DIR, COGENT_CONFIG_DIR, COGENT_CACHE_DIR, COGENT_EXECUTABLE) to match the binary name convention.",
+      "evidence": "Feature rename-binary-cli-statedir initially left environment variables as FASE_*, which were later corrected in rename-docs-and-final-sweep (commit a5ba451). The naming convention was not documented, leading to this cross-feature gap.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance: When documenting historical renames, use 'X (formerly Y)' or 'Y → X' notation. Always verify the old name appears before the new name to avoid copy-paste errors.",
+      "evidence": "Feature rename-docs-and-final-sweep added .factory/library/architecture.md with errors like 'cogent (formerly cogent)' and '.cogent/ → .cogent/' instead of showing the actual transition from fase to cogent. This pattern appeared in multiple locations.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify policy: Should migration logic (e.g., auto-renaming .fase/ to .cogent/) be permanent or temporary? Feature rename-binary-cli-statedir implemented migration in commit 90ea93d, but it was removed in commit a5ba451, creating a gap where users upgrading after the final sweep won't have automatic migration.",
+      "evidence": "Migration code added in 90ea93d and removed in a5ba451. Handoff for a5ba451 mentions 'simplified stale repo-state path tests' but doesn't explain the migration removal decision. This affects user experience for external users upgrading from fase to cogent.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify whether .factory/missions/ directory files should be committed to the repository or remain ephemeral. Currently cogent-simplification.md is committed but contains pre-rename context that's confusing post-rename.",
+      "evidence": "File .factory/missions/cogent-simplification.md was committed in a5ba451 with pre-rename notation. When read after the rename is complete, the historical context can be confusing.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills/go-worker/SKILL.md",
+      "suggestion": "Add step: For rename operations, after completing documentation updates, review all 'formerly X' and 'X → Y' notations to verify old names appear before new names. This catches copy-paste errors where the same name appears on both sides.",
+      "evidence": "Feature rename-docs-and-final-sweep added comprehensive documentation but contained multiple instances of copy-paste errors in rename notation. The go-worker skill doesn't include documentation quality checks specific to rename operations.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills/go-worker/SKILL.md",
+      "suggestion": "Consider adding guidance for gh CLI operations (GitHub repository management) as these differ from code changes. Current skill treats them as manual verification which works but isn't optimized.",
+      "evidence": "Feature rename-github-repo successfully used gh CLI operations via manual verification steps. The go-worker skill doesn't have specific patterns for GitHub operations, though the general procedure was sufficient.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

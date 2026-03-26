@@ -1,6 +1,6 @@
 # Architecture
 
-Key architectural decisions and patterns for the cogent (formerly cogent) codebase.
+Key architectural decisions and patterns for the cogent (formerly fase) codebase.
 
 **What belongs here:** Architectural decisions, discovered patterns, module boundaries.
 **What does NOT belong here:** Service ports/commands (use `.factory/services.yaml`).
@@ -9,7 +9,7 @@ Key architectural decisions and patterns for the cogent (formerly cogent) codeba
 
 ## Module Structure
 
-- `cmd/cogent/` (→ `cmd/cogent/`) — CLI entry point (cobra)
+- `cmd/cogent/` (formerly `cmd/fase/`) — CLI entry point (cobra)
 - `internal/service/` — Core service (~9300 lines), work lifecycle, briefings, notifications
 - `internal/store/` — SQLite persistence layer (~4000 lines)
 - `internal/core/` — Types, constants, work states
@@ -28,4 +28,4 @@ Key architectural decisions and patterns for the cogent (formerly cogent) codeba
 - Event bus (`EventBus`) for internal notifications
 - Housekeeping loop in serve.go: 30s tick for WAL checkpoint, lease reconciliation, stall/orphan detection; hourly tick for digest flush
 - Config from TOML file + environment variables
-- State directory (`.cogent/` → `.cogent/`): SQLite DB, supervisor brief, raw stdout
+- State directory (`.cogent/`, formerly `.fase/`): SQLite DB, supervisor brief, raw stdout

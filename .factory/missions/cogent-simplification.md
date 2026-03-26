@@ -37,7 +37,7 @@ Claude, Codex, Factory, Pi, Gemini, OpenCode adapters exist as subprocess wrappe
 - Go module: `github.com/yusefmosiah/cogent` → `github.com/yusefmosiah/cogent`
 - Binary: `cogent` → `cogent`
 - CLI commands: `cogent work ...` → `cogent work ...`
-- State directory: `.cogent/` → `.cogent/`
+- State directory: `.fase/` → `.cogent/`
 - All imports, references, docs, README, SKILL.md files
 - Git commit prefixes: `cogent(...)` → `cogent(...)`
 - Worker/checker briefings reference `cogent` CLI commands — update all
