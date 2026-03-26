@@ -712,20 +712,16 @@ func TestWorkLifecycleCommands(t *testing.T) {
 	if show.Work.CurrentJobID != runResult.Job.JobID {
 		t.Fatalf("expected current job %q, got %+v", runResult.Job.JobID, show.Work)
 	}
-	if show.Work.ExecutionState != "checking" {
-		t.Fatalf("expected checking execution state, got %+v", show.Work)
+	if show.Work.ExecutionState != "in_progress" {
+		t.Fatalf("expected in_progress execution state until verification lands, got %+v", show.Work)
 	}
 	if show.Work.ApprovalState != "none" {
 		t.Fatalf("expected none approval state before attestation, got %+v", show.Work)
 	}
-	var attestationChildren []cliWorkItem
 	for i := range show.Children {
 		if show.Children[i].Kind == "attest" {
-			attestationChildren = append(attestationChildren, show.Children[i])
+			t.Fatalf("did not expect spawned attestation child after completion, got %+v", show.Children)
 		}
-	}
-	if len(attestationChildren) == 0 {
-		t.Fatalf("expected spawned attestation child, got %+v", show.Children)
 	}
 	foundJob := false
 	for _, job := range show.Jobs {
@@ -786,8 +782,8 @@ func TestWorkLifecycleCommands(t *testing.T) {
 	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
 		t.Fatalf("unmarshal work show after check/doc: %v\n%s", err, showOutput)
 	}
-	if show.Work.ExecutionState != "checking" {
-		t.Fatalf("expected passing check to keep work in checking until attestation resolves, got %+v", show.Work)
+	if show.Work.ExecutionState != "in_progress" {
+		t.Fatalf("expected passing check to keep work in_progress until attestation resolves, got %+v", show.Work)
 	}
 	if len(show.CheckRecords) == 0 || show.CheckRecords[0].CheckID != checkRecord.CheckID {
 		t.Fatalf("expected check record in canonical work show bundle, got %+v", show.CheckRecords)
@@ -799,19 +795,13 @@ func TestWorkLifecycleCommands(t *testing.T) {
 		t.Fatalf("expected artifacts in canonical work show bundle after check evidence, got %+v", show.Artifacts)
 	}
 
-	for _, attestationChild := range attestationChildren {
-		nonce, _ := attestationChild.Metadata["attestation_nonce"].(string)
-		if strings.TrimSpace(nonce) == "" {
-			t.Fatalf("expected attestation nonce on child, got %+v", attestationChild)
-		}
-		attestOutput := runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "attest", attestationChild.WorkID, "--nonce", nonce, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
-		var attestation cliAttestationPayload
-		if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
-			t.Fatalf("unmarshal attestation payload: %v\n%s", err, attestOutput)
-		}
-		if attestation.Work.ExecutionState != "done" || attestation.Work.ApprovalState != "none" {
-			t.Fatalf("expected attestation child to complete cleanly, got %+v", attestation.Work)
-		}
+	attestOutput := runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "attest", childWork.WorkID, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
+	var attestation cliAttestationPayload
+	if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
+		t.Fatalf("unmarshal attestation payload: %v\n%s", err, attestOutput)
+	}
+	if attestation.Work.ExecutionState != "done" || attestation.Work.ApprovalState != "pending" {
+		t.Fatalf("expected direct attestation to complete work and request approval, got %+v", attestation.Work)
 	}
 	showOutput = runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "show", childWork.WorkID)
 	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
@@ -1088,41 +1078,30 @@ func TestDocsRequiredWorkBlocksCompletionUntilRepoDocsAlign(t *testing.T) {
 	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
 		t.Fatalf("unmarshal work show: %v\n%s", err, showOutput)
 	}
-	if show.Work.ExecutionState != "checking" {
-		t.Fatalf("expected checking after completed run, got %+v", show.Work)
+	if show.Work.ExecutionState != "in_progress" {
+		t.Fatalf("expected in_progress after completed run until verification lands, got %+v", show.Work)
 	}
-
-	var attestationChildren []cliWorkItem
 	for i := range show.Children {
 		if show.Children[i].Kind == "attest" {
-			attestationChildren = append(attestationChildren, show.Children[i])
+			t.Fatalf("did not expect spawned attestation child, got %+v", show.Children)
 		}
-	}
-	if len(attestationChildren) == 0 {
-		t.Fatalf("expected attestation child, got %+v", show.Children)
 	}
 
-	for _, attestationChild := range attestationChildren {
-		nonce, _ := attestationChild.Metadata["attestation_nonce"].(string)
-		if strings.TrimSpace(nonce) == "" {
-			t.Fatalf("expected attestation nonce, got %+v", attestationChild)
-		}
-		attestOutput := runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "attest", attestationChild.WorkID, "--nonce", nonce, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
-		var attestation cliAttestationPayload
-		if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
-			t.Fatalf("unmarshal attestation output: %v\n%s", err, attestOutput)
-		}
-		if attestation.Work.ExecutionState != "done" {
-			t.Fatalf("expected attestation child to finish, got %+v", attestation.Work)
-		}
+	attestOutput := runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "attest", work.WorkID, "--result", "passed", "--summary", "Attestation passed", "--verifier-kind", "deterministic", "--method", "test")
+	var attestation cliAttestationPayload
+	if err := json.Unmarshal([]byte(attestOutput), &attestation); err != nil {
+		t.Fatalf("unmarshal attestation output: %v\n%s", err, attestOutput)
+	}
+	if attestation.Work.ExecutionState != "in_progress" {
+		t.Fatalf("expected docs-required work to remain in_progress while required docs drift, got %+v", attestation.Work)
 	}
 
 	showOutput = runCogentWithEnv(t, binary, configPath, projectDir, env, "--json", "work", "show", work.WorkID)
 	if err := json.Unmarshal([]byte(showOutput), &show); err != nil {
 		t.Fatalf("unmarshal work show after attestation: %v\n%s", err, showOutput)
 	}
-	if show.Work.ExecutionState != "checking" {
-		t.Fatalf("expected docs-required work to remain checking until repo doc exists, got %+v", show.Work)
+	if show.Work.ExecutionState != "in_progress" {
+		t.Fatalf("expected docs-required work to remain in_progress until repo doc exists, got %+v", show.Work)
 	}
 	if len(show.Work.RequiredDocs) != 1 || show.Work.RequiredDocs[0] != "docs/review-bundle.md" {
 		t.Fatalf("expected required docs in runtime output, got %+v", show.Work)
@@ -1327,6 +1306,17 @@ func TestWorkArchiveCommands(t *testing.T) {
 	var work cliWorkItem
 	if err := json.Unmarshal([]byte(workOutput), &work); err != nil {
 		t.Fatalf("unmarshal work create: %v\n%s", err, workOutput)
+	}
+
+	checkOutput := runCogent(t, binary, configPath, "--json", "check", "create", work.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/cogent\nok\tgithub.com/yusefmosiah/cogent/cmd/cogent\t0.111s", "--notes", "verified archived filtering")
+	var checkRecord struct {
+		CheckID string `json:"check_id"`
+	}
+	if err := json.Unmarshal([]byte(checkOutput), &checkRecord); err != nil {
+		t.Fatalf("unmarshal check output: %v\n%s", err, checkOutput)
+	}
+	if checkRecord.CheckID == "" {
+		t.Fatalf("expected check record id before archiving, got %+v", checkRecord)
 	}
 
 	archiveOutput := runCogent(t, binary, configPath, "--json", "work", "archive", work.WorkID, "--message", "created by mistake")

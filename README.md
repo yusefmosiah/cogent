@@ -4,7 +4,7 @@
 
 It gives you:
 - a **work graph** (SQLite) that tracks work items, dependency edges, attestations, approvals, and promotions,
-- a **canonical lifecycle** with one state machine: `ready → claimed → in_progress → checking → blocked → done / failed / cancelled / archived`,
+- a **canonical lifecycle** with one state machine: `ready → claimed → in_progress → blocked → done / failed / cancelled / archived`,
 - a **command vocabulary** for mutating work state: create, claim, release, block, attest, approve, promote, hydrate,
 - a **verification model** where checks produce evidence and blocking attestation policy gates completion,
 - **6 adapter CLIs** (Codex, Claude, Factory, Pi, Gemini, OpenCode) for dispatching work to coding agents,
@@ -36,24 +36,23 @@ Every work item follows one state machine defined in `internal/core/types.go`:
 | `ready` | Available for assignment |
 | `claimed` | Assigned to a worker, not yet started |
 | `in_progress` | Worker is actively executing |
-| `checking` | Evidence collection / verification in progress |
 | `blocked` | Waiting on a dependency or external input |
 | `done` | Completed and verified |
 | `failed` | Terminal failure |
 | `cancelled` | Explicitly cancelled |
 | `archived` | Retained for history, no longer active |
 
-The deprecated alias `awaiting_attestation` is normalized to `checking` on read and rejected on new writes.
+Legacy `checking` and deprecated `awaiting_attestation` are accepted for backward-compatible reads and normalized to `in_progress`.
 
 ### Verification Model
 
 Checks are evidence, not approval. The pipeline:
 
 1. **Evidence collection** — workers and automated checks produce `AttestationRecord` entries against a work item.
-2. **Blocking attestation policy** — each work item declares `required_attestations` slots. Slots marked `blocking: true` must be satisfied before the item can transition to `done`.
-3. **Attestation freeze** — once the attestation requirement set is frozen (`attestation_frozen_at`), no new required slots can be added. Escalations after freeze are recorded with explicit provenance (`escalated_at`, `escalation_by`, `escalation_reason`).
-4. **Docs as verification** — repository docs are first-class verification evidence. `required_docs` on a work item declares which documents must exist and be current. Doc drift is a check failure, not a separate concern.
-5. **Completion gating** — the supervisor/service layer enforces that all blocking attestation slots are satisfied before allowing `done`. The work graph, not the agent, owns completion authority.
+2. **Completion gating** — the supervisor/service layer requires a passing check record and any declared `required_docs` to align before allowing `done`.
+3. **Attestation policy** — work items may still declare `required_attestations` slots. These remain durable review evidence and can gate approval flows even after execution reaches `done`.
+4. **Attestation freeze** — once the attestation requirement set is frozen (`attestation_frozen_at`), no new required slots can be added. Escalations after freeze are recorded with explicit provenance (`escalated_at`, `escalation_by`, `escalation_reason`).
+5. **Docs as verification** — repository docs are first-class verification evidence. `required_docs` on a work item declares which documents must exist and be current. Doc drift blocks completion until the repo matches the recorded document.
 
 ### Usage and Surface Model
 

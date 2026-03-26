@@ -127,12 +127,9 @@ Defined in `internal/core/types.go:287`:
 ```
 ready ──(claim)──> claimed ──(start)──> in_progress
   ^                  │                     │
-  │                  │(release)            ├──> awaiting_attestation
-  │                  v                     │          │
-  │                ready                   ├──> blocked
-  │                                        │
-  │                                        v
-  │                              done / failed / cancelled
+  │                  │(release)            ├──> blocked
+  │                  v                     ├──> done / failed / cancelled
+  │                ready                   │
   │                                        │
   │                                        v
   │                                     archived
@@ -141,12 +138,14 @@ Terminal: done, failed, cancelled, archived
 ```
 
 Full state set: `ready`, `claimed`, `in_progress`,
-`awaiting_attestation`, `blocked`, `done`, `failed`, `cancelled`,
-`archived`.
+`blocked`, `done`, `failed`, `cancelled`, `archived`.
+
+Legacy aliases `checking` and `awaiting_attestation` are still accepted on
+read for backward compatibility and normalize to `in_progress`.
 
 Transition guards (`internal/service/service.go:1988`):
-- Cannot transition to `done` or `archived` if attestation policy has
-  unresolved blocking attestations.
+- Cannot transition to `done` or `archived` without a passing check record,
+  or while required docs are missing/stale.
 - Moving to `done` with an attestation policy auto-sets
   `approval_state = pending`.
 
@@ -157,7 +156,7 @@ Defined in `internal/core/types.go:322`:
 `none` -> `pending` -> `verified` | `rejected`
 
 Approval requires all blocking attestations to have a passing result.
-Checked by `requiredAttestationsResolved()` before `ApproveWork` succeeds.
+Checked by `blockingAttestationsSatisfied()` before `ApproveWork` succeeds.
 
 ### 3.3 Lock States
 

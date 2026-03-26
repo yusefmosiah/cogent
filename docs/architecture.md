@@ -238,11 +238,11 @@ The MCP server declares `"claude/channel": {}` in its experimental capabilities.
   "jsonrpc": "2.0",
   "method": "notifications/claude/channel",
   "params": {
-    "content": "Work item work_01ABC (My task): work_updated [in_progress → awaiting_attestation]",
+    "content": "Work item work_01ABC (My task): work_updated [in_progress → done]",
     "meta": {
       "work_id": "work_01ABC",
       "kind": "work_updated",
-      "state": "awaiting_attestation",
+      "state": "done",
       "prev_state": "in_progress"
     }
   }
@@ -251,7 +251,7 @@ The MCP server declares `"claude/channel": {}` in its experimental capabilities.
 
 A `sync.Mutex` (`Server.mu`) serializes writes so channel notifications never interleave with MCP protocol frames.
 
-The `notify_host` tool (registered via `registerChannelTools`) lets the supervisor or any worker push an arbitrary message back to the Claude Code host session.
+Channel notifications remain enabled even though MCP tool registration is disabled.
 
 ---
 
@@ -409,12 +409,9 @@ stateDiagram-v2
     ready --> claimed : work_claim
     claimed --> ready : release
     claimed --> in_progress : job starts
-    in_progress --> awaiting_attestation : worker exits with state
     in_progress --> done : worker marks done
     in_progress --> failed : worker marks failed
     in_progress --> blocked : blocking dependency surfaces
-    awaiting_attestation --> done : all attestations pass
-    awaiting_attestation --> failed : blocking attestation fails
     done --> archived : archive
     failed --> ready : reopen
     cancelled --> archived : archive
