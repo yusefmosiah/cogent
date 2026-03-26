@@ -2698,26 +2698,6 @@ func TestSupervisorReviewGuidanceKeepsChecksEvidenceOnly(t *testing.T) {
 	}
 }
 
-func TestAttestationChildRuntimePinsUITaggedWorkToStrongModels(t *testing.T) {
-	svc := newTestService(t)
-	parent := core.WorkItemRecord{
-		WorkID:    "work_ui_456",
-		Title:     "UI attestation",
-		Objective: "verify mind-graph/index.html",
-		Metadata: map[string]any{
-			"tags": []string{"ui"},
-		},
-	}
-
-	adapters, models := svc.attestationChildRuntime(parent, "native", 0)
-	if len(adapters) != 1 || adapters[0] != "claude" {
-		t.Fatalf("expected claude adapter for UI work, got %v", adapters)
-	}
-	if len(models) != 2 || models[0] != "claude-opus-4-6" || models[1] != "claude-sonnet-4-6" {
-		t.Fatalf("expected strong multimodal model preference for UI work, got %v", models)
-	}
-}
-
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	stateDir := t.TempDir()
@@ -2786,6 +2766,27 @@ func createTestSessionAndJob(t *testing.T, svc *Service, job core.JobRecord) (co
 		t.Fatalf("CreateSessionAndJob: %v", err)
 	}
 	return session, job
+}
+
+func mustCreatePassingCheckRecord(t *testing.T, svc *Service, workID string) core.CheckRecord {
+	t.Helper()
+	record, err := svc.CreateCheckRecord(context.Background(), CheckRecordCreateRequest{
+		WorkID:       workID,
+		Result:       "pass",
+		CheckerModel: "claude-sonnet-4-6",
+		WorkerModel:  "gpt-5.4-mini",
+		CreatedBy:    "checker",
+		Report: core.CheckReport{
+			BuildOK:      true,
+			TestsPassed:  1,
+			TestOutput:   "go test ./internal/service",
+			CheckerNotes: "verified implementation behavior",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckRecord: %v", err)
+	}
+	return record
 }
 
 func TestSetDocContentNormalizesAuthoritativeRepoPath(t *testing.T) {
@@ -2960,6 +2961,7 @@ func TestRequiredDocsGateBlocksDoneUntilRepoDocAligned(t *testing.T) {
 	if _, _, err := svc.SetDocContent(ctx, work.WorkID, repoFile, "Review Bundle", "# Review\nupdated\n", "markdown"); err != nil {
 		t.Fatalf("SetDocContent updated: %v", err)
 	}
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 
 	updated, err := svc.UpdateWork(ctx, WorkUpdateRequest{
 		WorkID:         work.WorkID,
@@ -3018,6 +3020,7 @@ func TestSyncWorkStateFromJobLeavesDocsRequiredWorkCheckingUntilDocsAlign(t *tes
 	job2 := job
 	job2.JobID = core.GenerateID("job")
 	job2.UpdatedAt = time.Now().UTC()
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 	if err := svc.syncWorkStateFromJob(ctx, job2, nil); err != nil {
 		t.Fatalf("syncWorkStateFromJob aligned docs: %v", err)
 	}
@@ -3063,6 +3066,7 @@ func TestAttestAndApproveWorkRespectRequiredDocsGate(t *testing.T) {
 		t.Fatalf("UpdateWork checking: %v", err)
 	}
 
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 	_, updated, err := svc.AttestWork(ctx, WorkAttestRequest{
 		WorkID:       work.WorkID,
 		Result:       "passed",
@@ -3178,13 +3182,13 @@ func TestWorkJSONNormalizesDeprecatedExecutionState(t *testing.T) {
 	}
 }
 
-func TestAttestationGateBlocksArchive(t *testing.T) {
+func TestCompletionGateBlocksArchiveWithoutPassingCheck(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
 	work, err := svc.CreateWork(ctx, WorkCreateRequest{
 		Title:     "gate test",
-		Objective: "must not archive without attestation",
+		Objective: "must not archive without a passing check",
 		RequiredAttestations: []core.RequiredAttestation{
 			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
 		},
@@ -3200,17 +3204,17 @@ func TestAttestationGateBlocksArchive(t *testing.T) {
 		CreatedBy:      "test",
 	})
 	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput when archiving with unresolved attestations, got %v", err)
+		t.Fatalf("expected ErrInvalidInput when archiving without a passing check, got %v", err)
 	}
 }
 
-func TestAttestationGateBlocksDone(t *testing.T) {
+func TestCompletionGateBlocksDoneWithoutPassingCheck(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
 	work, err := svc.CreateWork(ctx, WorkCreateRequest{
 		Title:     "gate test done",
-		Objective: "must not set done without attestation",
+		Objective: "must not set done without a passing check",
 		RequiredAttestations: []core.RequiredAttestation{
 			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
 		},
@@ -3226,17 +3230,17 @@ func TestAttestationGateBlocksDone(t *testing.T) {
 		CreatedBy:      "test",
 	})
 	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput when setting done with unresolved attestations, got %v", err)
+		t.Fatalf("expected ErrInvalidInput when setting done without a passing check, got %v", err)
 	}
 }
 
-func TestAttestationGateAllowsArchiveAfterAttestation(t *testing.T) {
+func TestCompletionGateAllowsArchiveAfterPassingCheck(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
 	work, err := svc.CreateWork(ctx, WorkCreateRequest{
 		Title:     "gate allow archive",
-		Objective: "archive after attestation passes",
+		Objective: "archive after check passes",
 		RequiredAttestations: []core.RequiredAttestation{
 			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
 		},
@@ -3245,39 +3249,29 @@ func TestAttestationGateAllowsArchiveAfterAttestation(t *testing.T) {
 		t.Fatalf("CreateWork: %v", err)
 	}
 
-	_, _, err = svc.AttestWork(ctx, WorkAttestRequest{
-		WorkID:       work.WorkID,
-		Result:       "passed",
-		Summary:      "looks good",
-		VerifierKind: "attestation",
-		Method:       "automated_review",
-		CreatedBy:    "verifier",
-	})
-	if err != nil {
-		t.Fatalf("AttestWork: %v", err)
-	}
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 
 	updated, err := svc.UpdateWork(ctx, WorkUpdateRequest{
 		WorkID:         work.WorkID,
 		ExecutionState: core.WorkExecutionStateArchived,
-		Message:        "archive after attestation",
+		Message:        "archive after passing check",
 		CreatedBy:      "test",
 	})
 	if err != nil {
-		t.Fatalf("UpdateWork archive after attestation: %v", err)
+		t.Fatalf("UpdateWork archive after passing check: %v", err)
 	}
 	if updated.ExecutionState != core.WorkExecutionStateArchived {
 		t.Fatalf("expected archived state, got %s", updated.ExecutionState)
 	}
 }
 
-func TestAttestationGateAllowsDoneAfterAttestation(t *testing.T) {
+func TestCompletionGateAllowsDoneAfterPassingCheck(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
 	work, err := svc.CreateWork(ctx, WorkCreateRequest{
 		Title:     "gate allow done",
-		Objective: "done after attestation passes",
+		Objective: "done after check passes",
 		RequiredAttestations: []core.RequiredAttestation{
 			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
 		},
@@ -3286,26 +3280,16 @@ func TestAttestationGateAllowsDoneAfterAttestation(t *testing.T) {
 		t.Fatalf("CreateWork: %v", err)
 	}
 
-	_, _, err = svc.AttestWork(ctx, WorkAttestRequest{
-		WorkID:       work.WorkID,
-		Result:       "passed",
-		Summary:      "looks good",
-		VerifierKind: "attestation",
-		Method:       "automated_review",
-		CreatedBy:    "verifier",
-	})
-	if err != nil {
-		t.Fatalf("AttestWork: %v", err)
-	}
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 
 	updated, err := svc.UpdateWork(ctx, WorkUpdateRequest{
 		WorkID:         work.WorkID,
 		ExecutionState: core.WorkExecutionStateDone,
-		Message:        "done after attestation",
+		Message:        "done after passing check",
 		CreatedBy:      "test",
 	})
 	if err != nil {
-		t.Fatalf("UpdateWork done after attestation: %v", err)
+		t.Fatalf("UpdateWork done after passing check: %v", err)
 	}
 	if updated.ExecutionState != core.WorkExecutionStateDone {
 		t.Fatalf("expected done state, got %s", updated.ExecutionState)
@@ -3369,6 +3353,7 @@ func TestAttestWorkAutoFillsSingleUnsatisfiedSlot(t *testing.T) {
 		t.Fatalf("CreateWork: %v", err)
 	}
 
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 	record, updated, err := svc.AttestWork(ctx, WorkAttestRequest{
 		WorkID:    work.WorkID,
 		Result:    "passed",
@@ -3385,7 +3370,7 @@ func TestAttestWorkAutoFillsSingleUnsatisfiedSlot(t *testing.T) {
 		t.Fatalf("expected method to be autofilled, got %q", record.Method)
 	}
 	if updated.ExecutionState != core.WorkExecutionStateDone {
-		t.Fatalf("expected done state after autofilled attestation, got %s", updated.ExecutionState)
+		t.Fatalf("expected done state after autofilled attestation with passing check, got %s", updated.ExecutionState)
 	}
 }
 
@@ -3474,6 +3459,7 @@ func TestAttestationGateNoAttestationsRequired(t *testing.T) {
 	if len(work.RequiredAttestations) != 0 {
 		t.Fatalf("expected no required attestations for attest-kind work, got %d", len(work.RequiredAttestations))
 	}
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
 
 	for _, state := range []core.WorkExecutionState{
 		core.WorkExecutionStateDone,
@@ -4251,180 +4237,13 @@ func TestResetWorkClearsAttestationNonce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAttestationRecords: %v", err)
 	}
-	if requiredAttestationsResolved(*reset, attestations) {
-		t.Fatal("expected prior-attempt attestation to be ignored after reset")
-	}
-}
-
-// TestAttestationChildEpochAwareness verifies VAL-LIFECYCLE-004:
-// Attestation child creation is idempotent per-epoch.
-func TestAttestationChildEpochAwareness(t *testing.T) {
-	svc := newTestService(t)
-	ctx := context.Background()
-
-	parent, err := svc.CreateWork(ctx, WorkCreateRequest{
-		Title:     "epoch-aware parent",
-		Objective: "test attestation child epoch awareness",
-		RequiredAttestations: []core.RequiredAttestation{
-			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateWork: %v", err)
-	}
-	if parent.AttemptEpoch != 1 {
-		t.Fatalf("expected AttemptEpoch 1, got %d", parent.AttemptEpoch)
-	}
-	job1 := core.JobRecord{
-		JobID:     core.GenerateID("job"),
-		SessionID: core.GenerateID("ses"),
-		Adapter:   "codex",
-		State:     core.JobStateCompleted,
-		Summary:   map[string]any{"model": "gpt-5.4"},
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-	if err := svc.spawnAttestationChildren(ctx, *parent, job1); err != nil {
-		t.Fatalf("spawnAttestationChildren attempt 1: %v", err)
+	if len(attestations) != 1 {
+		t.Fatalf("expected 1 attestation before reset, got %d", len(attestations))
 	}
 
-	children, err := svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren: %v", err)
-	}
-	if len(children) != 1 {
-		t.Fatalf("expected 1 attestation child after first spawn, got %d", len(children))
-	}
-	child1 := children[0]
-	if child1.AttemptEpoch != 1 {
-		t.Fatalf("expected child1 attempt epoch 1, got %d", child1.AttemptEpoch)
-	}
-	if child1.Metadata["attempt_epoch"] != 1.0 {
-		t.Fatalf("expected child1 metadata epoch 1, got %v", child1.Metadata["attempt_epoch"])
-	}
-
-	// Replaying the same fanout for the same attempt should be idempotent.
-	currentParent, err := svc.store.GetWorkItem(ctx, parent.WorkID)
-	if err != nil {
-		t.Fatalf("GetWorkItem: %v", err)
-	}
-	if err := svc.spawnAttestationChildren(ctx, currentParent, job1); err != nil {
-		t.Fatalf("spawnAttestationChildren replay: %v", err)
-	}
-	children, err = svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren replay: %v", err)
-	}
-	if len(children) != 1 {
-		t.Fatalf("expected idempotent child fanout for same epoch, got %d children", len(children))
-	}
-
-	// Reset to attempt 2 and ensure a fresh child set is created.
-	parent, err = svc.ResetWork(ctx, WorkResetRequest{
-		WorkID:    parent.WorkID,
-		Reason:    "second attempt",
-		CreatedBy: "test",
-	})
-	if err != nil {
-		t.Fatalf("ResetWork: %v", err)
-	}
-	if parent.AttemptEpoch != 2 {
-		t.Fatalf("expected AttemptEpoch 2, got %d", parent.AttemptEpoch)
-	}
-	job2 := core.JobRecord{
-		JobID:     core.GenerateID("job"),
-		SessionID: core.GenerateID("ses"),
-		Adapter:   "codex",
-		State:     core.JobStateCompleted,
-		Summary:   map[string]any{"model": "gpt-5.4"},
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-	if err := svc.spawnAttestationChildren(ctx, *parent, job2); err != nil {
-		t.Fatalf("spawnAttestationChildren attempt 2: %v", err)
-	}
-
-	children, err = svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren attempt 2: %v", err)
-	}
-	if len(children) != 2 {
-		t.Fatalf("expected historical and current child after reset, got %d", len(children))
-	}
-
-	var child2 core.WorkItemRecord
-	for _, child := range children {
-		if child.AttemptEpoch == 2 {
-			child2 = child
-			break
-		}
-	}
-	if child2.WorkID == "" {
-		t.Fatal("expected a fresh attempt-2 attestation child")
-	}
-	if child1.WorkID == child2.WorkID {
-		t.Fatal("expected different work IDs for children from different epochs")
-	}
-	if child2.Metadata["attempt_epoch"] != 2.0 {
-		t.Fatalf("expected child2 metadata epoch 2, got %v", child2.Metadata["attempt_epoch"])
-	}
-}
-
-// TestAttestationEpochMismatchRejection verifies that attestations from
-// prior epochs cannot satisfy current attempt requirements.
-func TestAttestationEpochMismatchRejection(t *testing.T) {
-	svc := newTestService(t)
-	ctx := context.Background()
-
-	parent, err := svc.CreateWork(ctx, WorkCreateRequest{
-		Title:     "epoch mismatch test",
-		Objective: "test epoch mismatch rejection",
-		RequiredAttestations: []core.RequiredAttestation{
-			{VerifierKind: "attestation", Method: "automated_review", Blocking: true},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateWork: %v", err)
-	}
-
-	// Set up parent at attempt 2
-	parent.AttemptEpoch = 2
-	parent.Metadata = map[string]any{"attestation_nonce": "nonce-for-attempt-2"}
-	parent.ExecutionState = core.WorkExecutionStateAwaitingAttestation
-	if err := svc.store.UpdateWorkItem(ctx, *parent); err != nil {
-		t.Fatalf("UpdateWorkItem: %v", err)
-	}
-
-	// Create attestation child for attempt 1 (wrong epoch)
-	child, err := svc.CreateWork(ctx, WorkCreateRequest{
-		Title:     "Attest for parent",
-		Objective: "test attestation",
-		Kind:      "attest",
-		Metadata: map[string]any{
-			"parent_work_id":    parent.WorkID,
-			"attestation_nonce": "nonce-for-attempt-2",
-			"attempt_epoch":     1, // Wrong epoch!
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateWork: %v", err)
-	}
-
-	// Attempt attestation should fail due to epoch mismatch
-	_, _, err = svc.AttestWork(ctx, WorkAttestRequest{
-		WorkID:       child.WorkID,
-		Result:       "passed",
-		Summary:      "looks good",
-		Nonce:        "nonce-for-attempt-2",
-		VerifierKind: "attestation",
-		Method:       "automated_review",
-		CreatedBy:    "verifier",
-	})
-	if err == nil {
-		t.Fatal("expected epoch mismatch error, got nil")
-	}
-	if !strings.Contains(err.Error(), "epoch mismatch") {
-		t.Fatalf("expected 'epoch mismatch' error, got: %v", err)
+	mustCreatePassingCheckRecord(t, svc, work.WorkID)
+	if _, err := svc.ApproveWork(ctx, work.WorkID, "approver", "old attestation must not satisfy new attempt"); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "blocking attestation policy unresolved") {
+		t.Fatalf("expected approval to require a fresh attestation after reset, got %v", err)
 	}
 }
 
@@ -4444,7 +4263,6 @@ func TestSyncWorkStateFromJobMapping(t *testing.T) {
 		{"running maps to in_progress", "", nil, core.JobStateRunning, core.WorkExecutionStateInProgress},
 		{"waiting_input maps to in_progress", "", nil, core.JobStateWaitingInput, core.WorkExecutionStateInProgress},
 		{"completed task maps to checking", "", nil, core.JobStateCompleted, core.WorkExecutionStateChecking},
-		{"completed attestation child maps to done", "attest", nil, core.JobStateCompleted, core.WorkExecutionStateDone},
 		{"failed maps to failed", "", nil, core.JobStateFailed, core.WorkExecutionStateFailed},
 		{"cancelled maps to cancelled", "", nil, core.JobStateCancelled, core.WorkExecutionStateCancelled},
 		{"blocked maps to blocked", "", nil, core.JobStateBlocked, core.WorkExecutionStateBlocked},
@@ -4491,183 +4309,6 @@ func TestSyncWorkStateFromJobMapping(t *testing.T) {
 					tt.jobState, tt.wantWorkState, updated.ExecutionState)
 			}
 		})
-	}
-}
-
-// TestParentAggregationFromChildren verifies VAL-LIFECYCLE-004:
-// Parent aggregation resolves deterministically from child outcomes.
-func TestParentAggregationFromChildren(t *testing.T) {
-	svc := newTestService(t)
-	ctx := context.Background()
-
-	parent, err := svc.CreateWork(ctx, WorkCreateRequest{
-		Title:     "parent aggregation test",
-		Objective: "test parent state from child outcomes",
-		RequiredAttestations: []core.RequiredAttestation{
-			{VerifierKind: "attestation", Method: "review1", Blocking: true},
-			{VerifierKind: "attestation", Method: "review2", Blocking: true},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateWork parent: %v", err)
-	}
-	job := core.JobRecord{
-		JobID:     core.GenerateID("job"),
-		SessionID: core.GenerateID("ses"),
-		Adapter:   "codex",
-		State:     core.JobStateCompleted,
-		Summary:   map[string]any{"model": "gpt-5.4"},
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-	if err := svc.spawnAttestationChildren(ctx, *parent, job); err != nil {
-		t.Fatalf("spawnAttestationChildren: %v", err)
-	}
-
-	children, err := svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren: %v", err)
-	}
-	if len(children) != 2 {
-		t.Fatalf("expected 2 attestation children, got %d", len(children))
-	}
-
-	var child1, child2 core.WorkItemRecord
-	for _, child := range children {
-		slotIdx, _ := metadataInt(child.Metadata, "slot_index")
-		switch slotIdx {
-		case 0:
-			child1 = child
-		case 1:
-			child2 = child
-		}
-	}
-	if child1.WorkID == "" || child2.WorkID == "" {
-		t.Fatalf("expected both attestation slots to be present, got %+v", children)
-	}
-
-	// Complete child1
-	if _, err := svc.UpdateWork(ctx, WorkUpdateRequest{
-		WorkID:         child1.WorkID,
-		ExecutionState: core.WorkExecutionStateDone,
-		ForceDone:      true,
-	}); err != nil {
-		t.Fatalf("UpdateWork child1: %v", err)
-	}
-
-	// Refresh parent state (child1 done, child2 pending)
-	if err := svc.refreshAttestationParentState(ctx, parent.WorkID); err != nil {
-		t.Fatalf("refreshAttestationParentState: %v", err)
-	}
-
-	// Parent should still be checking (child2 not done)
-	parentItem, _ := svc.store.GetWorkItem(ctx, parent.WorkID)
-	if parentItem.ExecutionState != core.WorkExecutionStateChecking {
-		t.Fatalf("expected checking with one child done, got %s", parentItem.ExecutionState)
-	}
-
-	// Fail child2
-	if _, err := svc.UpdateWork(ctx, WorkUpdateRequest{
-		WorkID:         child2.WorkID,
-		ExecutionState: core.WorkExecutionStateFailed,
-	}); err != nil {
-		t.Fatalf("UpdateWork child2: %v", err)
-	}
-
-	// Refresh parent state (child1 done, child2 failed)
-	if err := svc.refreshAttestationParentState(ctx, parent.WorkID); err != nil {
-		t.Fatalf("refreshAttestationParentState: %v", err)
-	}
-
-	// Parent should be failed (blocking child failed)
-	parentItem, _ = svc.store.GetWorkItem(ctx, parent.WorkID)
-	if parentItem.ExecutionState != core.WorkExecutionStateFailed {
-		t.Fatalf("expected failed state with blocking child failed, got %s", parentItem.ExecutionState)
-	}
-}
-
-func TestResetWorkIgnoresHistoricalAttestationChildren(t *testing.T) {
-	svc := newTestService(t)
-	ctx := context.Background()
-
-	parent, err := svc.CreateWork(ctx, WorkCreateRequest{
-		Title:     "historical child test",
-		Objective: "old attestation children must not leak into new attempts",
-		RequiredAttestations: []core.RequiredAttestation{
-			{VerifierKind: "attestation", Method: "review", Blocking: true},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateWork: %v", err)
-	}
-
-	job := func() core.JobRecord {
-		return core.JobRecord{
-			JobID:     core.GenerateID("job"),
-			SessionID: core.GenerateID("ses"),
-			Adapter:   "codex",
-			State:     core.JobStateCompleted,
-			Summary:   map[string]any{"model": "gpt-5.4"},
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
-		}
-	}
-
-	if err := svc.spawnAttestationChildren(ctx, *parent, job()); err != nil {
-		t.Fatalf("spawnAttestationChildren attempt 1: %v", err)
-	}
-
-	children, err := svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren attempt 1: %v", err)
-	}
-	if len(children) != 1 {
-		t.Fatalf("expected 1 child in attempt 1, got %d", len(children))
-	}
-
-	if _, err := svc.UpdateWork(ctx, WorkUpdateRequest{
-		WorkID:         children[0].WorkID,
-		ExecutionState: core.WorkExecutionStateFailed,
-	}); err != nil {
-		t.Fatalf("UpdateWork failed child: %v", err)
-	}
-	if err := svc.refreshAttestationParentState(ctx, parent.WorkID); err != nil {
-		t.Fatalf("refreshAttestationParentState attempt 1: %v", err)
-	}
-
-	parent, err = svc.ResetWork(ctx, WorkResetRequest{
-		WorkID:    parent.WorkID,
-		Reason:    "retry after failed review",
-		CreatedBy: "test",
-	})
-	if err != nil {
-		t.Fatalf("ResetWork: %v", err)
-	}
-	if parent.AttemptEpoch != 2 {
-		t.Fatalf("expected AttemptEpoch 2 after reset, got %d", parent.AttemptEpoch)
-	}
-
-	if err := svc.spawnAttestationChildren(ctx, *parent, job()); err != nil {
-		t.Fatalf("spawnAttestationChildren attempt 2: %v", err)
-	}
-	if err := svc.refreshAttestationParentState(ctx, parent.WorkID); err != nil {
-		t.Fatalf("refreshAttestationParentState attempt 2: %v", err)
-	}
-
-	parentItem, err := svc.store.GetWorkItem(ctx, parent.WorkID)
-	if err != nil {
-		t.Fatalf("GetWorkItem: %v", err)
-	}
-	if parentItem.ExecutionState != core.WorkExecutionStateChecking {
-		t.Fatalf("expected new attempt to remain checking, got %s", parentItem.ExecutionState)
-	}
-
-	children, err = svc.store.ListWorkChildren(ctx, parent.WorkID, 10)
-	if err != nil {
-		t.Fatalf("ListWorkChildren attempt 2: %v", err)
-	}
-	if len(children) != 2 {
-		t.Fatalf("expected historical and fresh child to coexist, got %d", len(children))
 	}
 }
 
