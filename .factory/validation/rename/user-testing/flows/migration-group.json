@@ -1,0 +1,58 @@
+{
+  "groupId": "migration-group",
+  "testedAt": "2026-03-25T22:23:00Z",
+  "isolation": {
+    "testingSurface": "CLI commands with state directory",
+    "isolatedTestDirectory": "/var/folders/28/gwvkv0wn6lq64jvqvmny5xnw0000gn/T/tmp.pzguYEMRBc",
+    "binaryPath": "/Users/wiz/.local/bin/cogent",
+    "isolationMethod": "HOME environment variable override"
+  },
+  "toolsUsed": ["shell", "ls", "cat"],
+  "assertions": [
+    {
+      "id": "VAL-RENAME-003",
+      "title": "State directory migration",
+      "status": "fail",
+      "steps": [
+        {
+          "action": "Create temporary test directory with .fase/ containing test content",
+          "expected": "Test directory created with .fase/test-file.txt and .fase/state.json",
+          "observed": "Test directory created successfully with test content"
+        },
+        {
+          "action": "Run: HOME={{TEMP_DIR}} cogent --help",
+          "expected": ".fase/ renamed to .cogent/, original contents preserved",
+          "observed": ".fase/ still exists, .cogent/ was not created - migration did not occur"
+        },
+        {
+          "action": "Run: HOME={{TEMP_DIR}} cogent version",
+          "expected": "Migration triggered if not done by previous command",
+          "observed": ".fase/ still exists, .cogent/ was not created"
+        },
+        {
+          "action": "Run: HOME={{TEMP_DIR}} cogent work list",
+          "expected": "Migration triggered when accessing state directory",
+          "observed": ".fase/ still exists, .cogent/ was not created"
+        },
+        {
+          "action": "Verify file contents",
+          "expected": "Original test content preserved in .cogent/",
+          "observed": "Original content remains in .fase/ - migration never occurred"
+        }
+      ],
+      "evidence": {
+        "terminalOutputs": [
+          "rename/migration-group/VAL-RENAME-003-before-ls.txt",
+          "rename/migration-group/VAL-RENAME-003-cogent-help-output.txt",
+          "rename/migration-group/VAL-RENAME-003-after-ls.txt"
+        ],
+        "consoleErrors": "N/A - CLI tool",
+        "network": "N/A - CLI tool"
+      },
+      "issues": "Migration from .fase/ to .cogent/ is not implemented. Code investigation revealed MigrateLegacyRepoStateDirFrom() in internal/core/paths.go (lines 198-200) is a stub that returns nil without performing any migration. The function is called from ResolvePathsForRepo() but has no implementation. No references to '.fase' exist in the Go codebase, confirming migration logic was never implemented."
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 1 assertion: VAL-RENAME-003 FAILED. The state directory migration from .fase/ to .cogent/ is not implemented - MigrateLegacyRepoStateDirFrom() is a no-op stub function. The .fase/ directory remains unchanged after running cogent commands, and .cogent/ is never created."
+}

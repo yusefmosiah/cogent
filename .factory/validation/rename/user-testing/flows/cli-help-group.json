@@ -1,0 +1,76 @@
+{
+  "groupId": "cli-help-group",
+  "testedAt": "2026-03-25T22:30:00Z",
+  "isolation": {
+    "testingSurface": "CLI commands",
+    "workingDirectory": "/Users/wiz/fase",
+    "binaryPath": "/Users/wiz/.local/bin/cogent",
+    "isolationNotes": "Read-only commands, no isolation needed"
+  },
+  "toolsUsed": ["shell"],
+  "assertions": [
+    {
+      "id": "VAL-RENAME-001",
+      "title": "Binary named cogent",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Verify binary exists at /Users/wiz/.local/bin/cogent",
+          "expected": "Binary file named 'cogent' exists",
+          "observed": "Binary exists: -rwxr-xr-x@ 1 wiz  staff  23004178 Mar 25 22:21 /Users/wiz/.local/bin/cogent"
+        },
+        {
+          "action": "Run 'cogent --help'",
+          "expected": "Help output displays with 'cogent' as command name",
+          "observed": "Help output shows 'Usage: cogent [command]' with all subcommands properly listed"
+        },
+        {
+          "action": "Search for 'fase' references in help output",
+          "expected": "No references to 'fase' found",
+          "observed": "grep -i 'fase' returned no matches - all references use 'cogent'"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": [
+          "rename/cli-help-group/binary-verification.txt",
+          "rename/cli-help-group/VAL-RENAME-001-cogent-help.txt"
+        ],
+        "verification": "grep -i fase found zero matches in help output"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-RENAME-002",
+      "title": "CLI commands reference cogent",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 'cogent work list'",
+          "expected": "Command responds, error messages use 'cogent' not 'fase'",
+          "observed": "Error message: 'cogent serve is not running — start it with 'cogent serve'' - correctly uses 'cogent'"
+        },
+        {
+          "action": "Run 'cogent check create --help'",
+          "expected": "Help output uses 'cogent' references",
+          "observed": "Help shows 'Usage: cogent check create <work-id> [flags]' with proper flag documentation"
+        },
+        {
+          "action": "Search for 'fase' references in all command outputs",
+          "expected": "No references to 'fase' found",
+          "observed": "grep -i 'fase' returned no matches in work list or check create outputs"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": [
+          "rename/cli-help-group/VAL-RENAME-002-work-list.txt",
+          "rename/cli-help-group/VAL-RENAME-002-check-create-help.txt"
+        ],
+        "verification": "grep -i fase found zero matches in all command outputs"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: 2 passed. Binary is correctly named 'cogent', all CLI help and error messages use 'cogent' consistently with no 'fase' references."
+}

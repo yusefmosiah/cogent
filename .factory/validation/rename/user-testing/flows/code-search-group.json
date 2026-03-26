@@ -1,0 +1,57 @@
+{
+  "groupId": "code-search-group",
+  "testedAt": "2026-03-25T00:00:00Z",
+  "isolation": {
+    "surface": "CLI commands (gh, ripgrep)",
+    "workingDirectory": "/Users/wiz/fase",
+    "isolation": "none (read-only operations)"
+  },
+  "toolsUsed": ["gh", "git", "ripgrep"],
+  "assertions": [
+    {
+      "id": "VAL-RENAME-006",
+      "title": "GitHub repo renamed",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Execute: gh repo view --json name",
+          "expected": "JSON output with name 'cogent'",
+          "observed": "{\"name\":\"cogent\"}"
+        },
+        {
+          "action": "Execute: git remote -v",
+          "expected": "Remote URLs containing 'cogent'",
+          "observed": "origin git@github.com:yusefmosiah/cogent.git (fetch/push)"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": [
+          "rename/code-search-group/VAL-RENAME-006-gh-repo-view.txt",
+          "rename/code-search-group/VAL-RENAME-006-git-remote.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-RENAME-007",
+      "title": "No remaining fase references in Go source",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Execute: rg 'fase' --type go -l",
+          "expected": "Exit code 1 (zero matches found)",
+          "observed": "Exit code 1 - no matches found in Go source files"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": [
+          "rename/code-search-group/VAL-RENAME-007-ripgrep-fase.txt"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: both passed. GitHub repo successfully renamed to 'cogent' (confirmed via gh CLI and git remote). All 'fase' references successfully removed from Go source code (ripgrep found zero matches)."
+}

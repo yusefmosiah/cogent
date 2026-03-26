@@ -1,0 +1,68 @@
+{
+  "milestone": "rename",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 7,
+    "passed": 6,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-RENAME-001",
+    "VAL-RENAME-002",
+    "VAL-RENAME-004",
+    "VAL-RENAME-005",
+    "VAL-RENAME-006",
+    "VAL-RENAME-007"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-RENAME-003",
+      "reason": "State directory migration from .fase/ to .cogent/ is not implemented. MigrateLegacyRepoStateDirFrom() in internal/core/paths.go (lines 198-200) is a stub function that returns nil without performing any migration logic."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added 'Flow Validator Guidance: CLI' section with isolation boundaries, constraints for safe concurrent testing, and evidence collection guidelines",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null,
+  "flowReports": [
+    {
+      "groupId": "cli-help-group",
+      "assertions": ["VAL-RENAME-001", "VAL-RENAME-002"],
+      "status": "pass",
+      "summary": "Binary correctly named 'cogent', all CLI help and error messages use 'cogent' consistently with no 'fase' references."
+    },
+    {
+      "groupId": "migration-group",
+      "assertions": ["VAL-RENAME-003"],
+      "status": "fail",
+      "summary": "State directory migration from .fase/ to .cogent/ is not implemented - MigrateLegacyRepoStateDirFrom() is a no-op stub function."
+    },
+    {
+      "groupId": "build-group",
+      "assertions": ["VAL-RENAME-004", "VAL-RENAME-005"],
+      "status": "pass",
+      "summary": "Module path correctly updated to github.com/yusefmosiah/cogent. All build, test, and vet commands completed successfully."
+    },
+    {
+      "groupId": "code-search-group",
+      "assertions": ["VAL-RENAME-006", "VAL-RENAME-007"],
+      "status": "pass",
+      "summary": "GitHub repo successfully renamed to 'cogent'. All 'fase' references removed from Go source code."
+    }
+  ],
+  "details": {
+    "concurrencyUsed": 4,
+    "maxConcurrency": 5,
+    "isolationStrategy": "CLI commands are mostly read-only. Migration test used isolated temp directory with HOME override.",
+    "servicesStarted": [],
+    "servicesUsed": [],
+    "testingSurface": "CLI"
+  }
+}
