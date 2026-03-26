@@ -406,7 +406,6 @@ type WorkAttestRequest struct {
 	SignerPubkey            string         `json:"signer_pubkey,omitempty"`
 }
 
-
 type WorkShowResult struct {
 	Work         core.WorkItemRecord       `json:"work"`
 	Children     []core.WorkItemRecord     `json:"children,omitempty"`
@@ -577,7 +576,7 @@ func (s *Service) sendWorkNotification(_ context.Context, work core.WorkItemReco
 }
 
 // collectCheckArtifacts collects screenshots from the check report's artifact paths
-// and from .fase/artifacts/<work-id>/screenshots/ in the project root.
+// and from .cogent/artifacts/<work-id>/screenshots/ in the project root.
 func (s *Service) collectCheckArtifacts(ctx context.Context, workID string, cr core.CheckRecord) []notify.ResendEmailAttachment {
 	var attachments []notify.ResendEmailAttachment
 
@@ -601,10 +600,10 @@ func (s *Service) collectCheckArtifacts(ctx context.Context, workID string, cr c
 		return attachments
 	}
 
-	// Fallback: look in .fase/artifacts/<work-id>/screenshots/ under the project root.
+	// Fallback: look in .cogent/artifacts/<work-id>/screenshots/ under the project root.
 	projectRoot := s.findProjectRoot(ctx, workID)
 	if projectRoot != "" {
-		screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+		screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
 		if found := collectScreenshots(screenshotDir); len(found) > 0 {
 			return found
 		}
@@ -632,7 +631,7 @@ func (s *Service) collectScreenshotPaths(ctx context.Context, workID string, cr 
 	// Try to find additional screenshots from the fallback directory
 	projectRoot := s.findProjectRoot(ctx, workID)
 	if projectRoot != "" {
-		screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+		screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
 		if err := filepath.WalkDir(screenshotDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
@@ -653,7 +652,7 @@ func (s *Service) collectScreenshotPaths(ctx context.Context, workID string, cr 
 }
 
 // gitMainRepoRoot returns the main repository root from any path in the repo or a worktree.
-// Worktrees in this project follow the pattern <mainRepo>/.fase/worktrees/<workID>.
+// Worktrees in this project follow the pattern <mainRepo>/.cogent/worktrees/<workID>.
 // Unlike "git rev-parse --show-toplevel", this always returns the main repo root.
 func gitMainRepoRoot(ctx context.Context, cwd string) (string, error) {
 	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
@@ -661,8 +660,8 @@ func gitMainRepoRoot(ctx context.Context, cwd string) (string, error) {
 		return "", err
 	}
 	top := strings.TrimSpace(string(out))
-	// Strip worktree suffix: <mainRepo>/.fase/worktrees/<workID> → <mainRepo>
-	const worktreeMarker = string(os.PathSeparator) + ".fase" + string(os.PathSeparator) + "worktrees" + string(os.PathSeparator)
+	// Strip worktree suffix: <mainRepo>/.cogent/worktrees/<workID> → <mainRepo>
+	const worktreeMarker = string(os.PathSeparator) + ".cogent" + string(os.PathSeparator) + "worktrees" + string(os.PathSeparator)
 	if idx := strings.Index(top, worktreeMarker); idx >= 0 {
 		return top[:idx], nil
 	}
@@ -687,7 +686,7 @@ func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
 }
 
 // collectPlaywrightAttachments looks up the job CWD for the work item and
-// returns any PNG screenshots found in .fase/artifacts/<work-id>/screenshots/ or test-results directories.
+// returns any PNG screenshots found in .cogent/artifacts/<work-id>/screenshots/ or test-results directories.
 func (s *Service) collectPlaywrightAttachments(ctx context.Context, workID string) []notify.ResendEmailAttachment {
 	// First, try to find screenshots in the persistent artifacts directory.
 	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
@@ -696,10 +695,10 @@ func (s *Service) collectPlaywrightAttachments(ctx context.Context, workID strin
 	}
 	cwd := verifyRepoPath(jobs)
 	if cwd != "" && cwd != "." {
-		// Try main project root .fase/artifacts/<work-id>/screenshots/ first.
+		// Try main project root .cogent/artifacts/<work-id>/screenshots/ first.
 		// Use gitMainRepoRoot so worktree paths resolve to the main repo, not the worktree.
 		if projectRoot, err := gitMainRepoRoot(ctx, cwd); err == nil {
-			screenshotDir := filepath.Join(projectRoot, ".fase", "artifacts", workID, "screenshots")
+			screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
 			if attachments := collectScreenshots(screenshotDir); len(attachments) > 0 {
 				return attachments
 			}
@@ -951,7 +950,7 @@ func (s *Service) ListCheckRecords(ctx context.Context, workID string, limit int
 
 func (s *Service) checkArtifactDir(ctx context.Context, workID string) string {
 	if projectRoot := s.findProjectRoot(ctx, workID); projectRoot != "" {
-		return filepath.Join(projectRoot, ".fase", "artifacts", workID)
+		return filepath.Join(projectRoot, ".cogent", "artifacts", workID)
 	}
 	return filepath.Join(s.Paths.StateDir, "artifacts", workID)
 }
@@ -3192,7 +3191,6 @@ func (s *Service) UpdateWork(ctx context.Context, req WorkUpdateRequest) (*core.
 		s.sendWorkFailureNotification(context.Background(), work, req.Message)
 	}
 
-
 	return &work, nil
 }
 
@@ -3684,7 +3682,6 @@ func (s *Service) SignAttestationRecord(ctx context.Context, attestationID, sign
 	return s.store.UpdateAttestationSignature(ctx, attestationID, signature)
 }
 
-
 func (s *Service) AddWorkNote(ctx context.Context, req WorkNoteRequest) (*core.WorkNoteRecord, error) {
 	if strings.TrimSpace(req.Body) == "" {
 		return nil, fmt.Errorf("%w: note body must not be empty", ErrInvalidInput)
@@ -3919,7 +3916,7 @@ func (s *Service) docRepoRoot(ctx context.Context) string {
 		if root, err := gitMainRepoRoot(ctx, base); err == nil && root != "" {
 			return root
 		}
-		if filepath.Base(base) == ".fase" {
+		if filepath.Base(base) == ".cogent" {
 			return filepath.Dir(base)
 		}
 	}

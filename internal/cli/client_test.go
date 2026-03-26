@@ -105,7 +105,7 @@ func TestDoGetErrorResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if err.Error() != "fase serve: work item not found" {
+	if err.Error() != "cogent serve: work item not found" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

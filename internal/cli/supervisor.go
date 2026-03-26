@@ -116,10 +116,10 @@ func rotationIndexForEntry(adapter string, pool []rotationEntry) int {
 func newSupervisorCommand(_ *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "supervisor",
-		Short: "Supervisor commands (use 'fase serve --auto' for agentic supervisor)",
-		Long:  `The deterministic supervisor has been removed. Use 'fase serve --auto' with the agentic supervisor (ADR-0041).`,
+		Short: "Supervisor commands (use 'cogent serve --auto' for agentic supervisor)",
+		Long:  `The deterministic supervisor has been removed. Use 'cogent serve --auto' with the agentic supervisor (ADR-0041).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("the standalone supervisor has been removed; use 'fase serve --auto' for the agentic supervisor (ADR-0041)")
+			return fmt.Errorf("the standalone supervisor has been removed; use 'cogent serve --auto' for the agentic supervisor (ADR-0041)")
 		},
 	}
 

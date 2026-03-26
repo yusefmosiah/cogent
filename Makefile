@@ -1,10 +1,10 @@
 .PHONY: build install test lint
 
 build:
-	go build -o build/fase ./cmd/fase
+	go build -o build/cogent ./cmd/cogent
 
 install:
-	go build -o $(HOME)/.local/bin/fase ./cmd/fase
+	go build -o $(HOME)/.local/bin/cogent ./cmd/cogent
 
 test:
 	go test ./internal/...

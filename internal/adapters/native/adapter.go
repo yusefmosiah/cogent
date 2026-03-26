@@ -65,7 +65,7 @@ func (a *Adapter) StartRun(ctx context.Context, req adapterapi.StartRunRequest) 
 func (a *Adapter) ContinueRun(ctx context.Context, req adapterapi.ContinueRunRequest) (*adapterapi.RunHandle, error) {
 	// Load persisted session history from disk if available.
 	// The native adapter doesn't keep sessions in memory across processes —
-	// history is persisted to .fase/native-sessions/<id>.json after each turn.
+	// history is persisted to .cogent/native-sessions/<id>.json after each turn.
 	var history []Message
 	if req.CanonicalSessionID != "" {
 		if state, err := loadSessionState(req.CWD, req.CanonicalSessionID); err == nil {

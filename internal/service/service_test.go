@@ -1876,7 +1876,7 @@ func TestDetachedWorkerEnvIncludesRuntimePaths(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("EXISTING_VAR", "present")
 
-	env := svc.detachedWorkerEnv("/opt/fase/bin/fase")
+	env := svc.detachedWorkerEnv("/opt/cogent/bin/cogent")
 	envMap := make(map[string]string, len(env))
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -1886,7 +1886,7 @@ func TestDetachedWorkerEnvIncludesRuntimePaths(t *testing.T) {
 		envMap[key] = value
 	}
 
-	if got := envMap["FASE_EXECUTABLE"]; got != "/opt/fase/bin/fase" {
+	if got := envMap["FASE_EXECUTABLE"]; got != "/opt/cogent/bin/cogent" {
 		t.Fatalf("expected executable path to be propagated, got %q", got)
 	}
 	if got := envMap["FASE_CONFIG_DIR"]; got != "/tmp/fase-config" {
@@ -1901,7 +1901,7 @@ func TestDetachedWorkerEnvIncludesRuntimePaths(t *testing.T) {
 	if got := envMap["EXISTING_VAR"]; got != "present" {
 		t.Fatalf("expected existing env var to be preserved, got %q", got)
 	}
-	if got := envMap["PATH"]; got != "/opt/fase/bin:/usr/bin:/bin" {
+	if got := envMap["PATH"]; got != "/opt/cogent/bin:/usr/bin:/bin" {
 		t.Fatalf("expected PATH to be prefixed with executable dir, got %q", got)
 	}
 }
@@ -1909,14 +1909,14 @@ func TestDetachedWorkerEnvIncludesRuntimePaths(t *testing.T) {
 func TestDetachedExecutablePathPrefersCurrentBinaryOutsideGoTest(t *testing.T) {
 	t.Setenv("FASE_EXECUTABLE", "/stale/fase")
 	original := osExecutable
-	osExecutable = func() (string, error) { return "/opt/fase/bin/fase", nil }
+	osExecutable = func() (string, error) { return "/opt/cogent/bin/cogent", nil }
 	defer func() { osExecutable = original }()
 
 	got, err := detachedExecutablePath()
 	if err != nil {
 		t.Fatalf("detachedExecutablePath returned error: %v", err)
 	}
-	if got != "/opt/fase/bin/fase" {
+	if got != "/opt/cogent/bin/cogent" {
 		t.Fatalf("expected current executable to win over stale env override, got %q", got)
 	}
 }
@@ -2189,7 +2189,7 @@ func setTestExecutable(t *testing.T) {
 			return
 		}
 		testBinaryPath = filepath.Join(dir, "fase")
-		cmd := exec.Command("go", "build", "-o", testBinaryPath, "./cmd/fase")
+		cmd := exec.Command("go", "build", "-o", testBinaryPath, "./cmd/cogent")
 		cmd.Dir = filepath.Join("..", "..")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -2198,7 +2198,7 @@ func setTestExecutable(t *testing.T) {
 		}
 	})
 	if testBinaryErr != nil {
-		t.Fatalf("build fase binary: %v", testBinaryErr)
+		t.Fatalf("build cogent binary: %v", testBinaryErr)
 	}
 
 	t.Setenv("FASE_EXECUTABLE", testBinaryPath)
@@ -2737,7 +2737,7 @@ func newTestService(t *testing.T) *Service {
 func newRepoBackedTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 	repoRoot := t.TempDir()
-	stateDir := filepath.Join(repoRoot, ".fase")
+	stateDir := filepath.Join(repoRoot, ".cogent")
 	configDir := t.TempDir()
 	cacheDir := t.TempDir()
 	t.Setenv("FASE_STATE_DIR", stateDir)
@@ -3500,7 +3500,7 @@ func TestPersistCheckScreenshots(t *testing.T) {
 	workID := "work_test123"
 
 	// Create a mock job with worktree
-	worktreeDir := filepath.Join(projectRoot, ".fase", "worktrees", workID)
+	worktreeDir := filepath.Join(projectRoot, ".cogent", "worktrees", workID)
 	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
@@ -3614,8 +3614,8 @@ func TestPersistCheckScreenshots(t *testing.T) {
 	// Verify the files were copied to the artifacts directory.
 	// Use realpath to handle symlinks on macOS
 	expectedPaths := map[string][]byte{
-		filepath.Join(projectRoot, ".fase", "artifacts", work.WorkID, "screenshots", "test-1.png"):  testData,
-		filepath.Join(projectRoot, ".fase", "artifacts", work.WorkID, "screenshots", "test-1.webm"): videoData,
+		filepath.Join(projectRoot, ".cogent", "artifacts", work.WorkID, "screenshots", "test-1.png"):  testData,
+		filepath.Join(projectRoot, ".cogent", "artifacts", work.WorkID, "screenshots", "test-1.webm"): videoData,
 	}
 	normalizedNewPaths := make(map[string]bool, len(newPaths))
 	for _, path := range newPaths {
@@ -3680,7 +3680,7 @@ func TestPersistCheckScreenshots(t *testing.T) {
 }
 
 // TestGitMainRepoRoot verifies that gitMainRepoRoot resolves the main repo root
-// even when the CWD is inside a git worktree at .fase/worktrees/<workID>.
+// even when the CWD is inside a git worktree at .cogent/worktrees/<workID>.
 func TestGitMainRepoRoot(t *testing.T) {
 	mainRepo := t.TempDir()
 	workID := "work_testworktree"
@@ -3709,7 +3709,7 @@ func TestGitMainRepoRoot(t *testing.T) {
 	}
 
 	// Create a real git worktree at the project's standard path.
-	worktreesDir := filepath.Join(mainRepo, ".fase", "worktrees")
+	worktreesDir := filepath.Join(mainRepo, ".cogent", "worktrees")
 	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

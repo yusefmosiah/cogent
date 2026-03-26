@@ -185,7 +185,7 @@ func TestNeedsCompressionClaudeModelNeedsMore(t *testing.T) {
 func TestSupervisorContextPath(t *testing.T) {
 	t.Parallel()
 	path := supervisorContextPath("/project")
-	expected := filepath.Join("/project", ".fase", "supervisor-context.md")
+	expected := filepath.Join("/project", ".cogent", "supervisor-context.md")
 	if path != expected {
 		t.Fatalf("expected %q, got %q", expected, path)
 	}
@@ -234,8 +234,8 @@ func TestSaveAndLoadSupervisorContext(t *testing.T) {
 func TestSaveSupervisorContextCreatesDirectory(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	targetDir := filepath.Join(dir, ".fase")
-	// Remove .fase if it exists
+	targetDir := filepath.Join(dir, ".cogent")
+	// Remove .cogent if it exists
 	os.RemoveAll(targetDir)
 
 	if err := saveSupervisorContext(dir, "test summary"); err != nil {

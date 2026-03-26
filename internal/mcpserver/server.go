@@ -417,7 +417,7 @@ type checkRecordCreateInput struct {
 	TestsFailed  int      `json:"tests_failed,omitempty" jsonschema:"number of tests that failed"`
 	TestOutput   string   `json:"test_output,omitempty" jsonschema:"test output (truncated to 50KB)"`
 	DiffStat     string   `json:"diff_stat,omitempty" jsonschema:"git diff --stat output"`
-	Screenshots  []string `json:"screenshots,omitempty" jsonschema:"absolute paths to screenshots in .fase/artifacts/<work-id>/screenshots/"`
+	Screenshots  []string `json:"screenshots,omitempty" jsonschema:"absolute paths to screenshots in .cogent/artifacts/<work-id>/screenshots/"`
 	Videos       []string `json:"videos,omitempty" jsonschema:"absolute paths to video recordings"`
 	CheckerNotes string   `json:"checker_notes,omitempty" jsonschema:"free-form observations from the checker"`
 	CheckerModel string   `json:"checker_model,omitempty" jsonschema:"model that performed the check"`

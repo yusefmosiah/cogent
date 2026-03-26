@@ -33,7 +33,7 @@ type agenticSupervisor struct {
 }
 
 func newAgenticSupervisor(svc *service.Service, cwd string, hub *wsHub, adapter, model string, sessionManager *mcpserver.SessionManager) *agenticSupervisor {
-	// Load adapter/model from .fase/supervisor-brief.md if not set via flags.
+	// Load adapter/model from .cogent/supervisor-brief.md if not set via flags.
 	if adapter == "" || model == "" {
 		briefAdapter, briefModel := parseSupervisorBrief(svc.Paths.StateDir)
 		if adapter == "" {
@@ -44,7 +44,7 @@ func newAgenticSupervisor(svc *service.Service, cwd string, hub *wsHub, adapter,
 		}
 	}
 	if adapter == "" || model == "" {
-		fmt.Fprintf(os.Stderr, "supervisor: adapter=%q model=%q — set supervisor_adapter/supervisor_model in .fase/supervisor-brief.md\n", adapter, model)
+		fmt.Fprintf(os.Stderr, "supervisor: adapter=%q model=%q — set supervisor_adapter/supervisor_model in .cogent/supervisor-brief.md\n", adapter, model)
 	}
 	return &agenticSupervisor{
 		svc:            svc,
@@ -321,7 +321,7 @@ func formatEvents(events []service.WorkEvent) string {
 			fmt.Fprintf(&b, "[check:%s] %s (%s) check_id=%s\n",
 				result, title, ev.WorkID, checkID)
 			fmt.Fprintf(&b, "  → Call check_record_show %s to read the report, then:\n", checkID)
-			fmt.Fprintf(&b, "     If result=pass: call 'fase work update %s --execution-state done'\n", ev.WorkID)
+			fmt.Fprintf(&b, "     If result=pass: call 'cogent work update %s --execution-state done'\n", ev.WorkID)
 			fmt.Fprintf(&b, "     If result=fail: call check_record_list %s to count failures, then send_back or escalate\n", ev.WorkID)
 		}
 	}
@@ -411,7 +411,7 @@ func (s *agenticSupervisor) notifyHost(message, msgType string) {
 }
 
 // parseSupervisorBrief reads supervisor_adapter and supervisor_model from
-// .fase/supervisor-brief.md. Format: "supervisor_adapter: claude" on its own line.
+// .cogent/supervisor-brief.md. Format: "supervisor_adapter: claude" on its own line.
 func parseSupervisorBrief(stateDir string) (adapter, model string) {
 	data, err := os.ReadFile(filepath.Join(stateDir, "supervisor-brief.md"))
 	if err != nil {

@@ -15,8 +15,8 @@ func newDispatchCommand(root *rootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "dispatch [work-id]",
-		Short: "Dispatch the next ready work item via fase serve",
-		Long: `Dispatches a single work item for execution via the running fase serve process.
+		Short: "Dispatch the next ready work item via cogent serve",
+		Long: `Dispatches a single work item for execution via the running cogent serve process.
 
 Without arguments, picks the highest-priority ready item.
 With a work-id argument, dispatches that specific item (must be ready).`,

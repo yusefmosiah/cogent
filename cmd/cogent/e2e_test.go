@@ -770,7 +770,7 @@ func TestWorkLifecycleCommands(t *testing.T) {
 		t.Fatalf("expected doc path in doc-set response, got %+v", docSet.Doc)
 	}
 
-	checkOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "check", "create", childWork.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/fase\nok\tgithub.com/yusefmosiah/cogent/cmd/fase\t0.111s", "--notes", "verified canonical review bundle")
+	checkOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "check", "create", childWork.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/cogent\nok\tgithub.com/yusefmosiah/cogent/cmd/cogent\t0.111s", "--notes", "verified canonical review bundle")
 	var checkRecord struct {
 		CheckID string `json:"check_id"`
 		Result  string `json:"result"`
@@ -1072,7 +1072,7 @@ func TestDocsRequiredWorkBlocksCompletionUntilRepoDocsAlign(t *testing.T) {
 		t.Fatalf("expected tracked doc without repo file yet, got %+v", docSet.Doc)
 	}
 
-	checkOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "check", "create", work.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/fase\nok\tgithub.com/yusefmosiah/cogent/cmd/fase\t0.111s", "--notes", "verified canonical review bundle")
+	checkOutput := runFaseWithEnv(t, binary, configPath, projectDir, env, "--json", "check", "create", work.WorkID, "--result", "pass", "--build-ok", "--tests-passed", "1", "--test-output", "go test ./cmd/cogent\nok\tgithub.com/yusefmosiah/cogent/cmd/cogent\t0.111s", "--notes", "verified canonical review bundle")
 	var checkRecord struct {
 		CheckID string `json:"check_id"`
 	}
@@ -1521,12 +1521,12 @@ func TestDispatchCompletionNotificationReachesMCPProxy(t *testing.T) {
 func buildFaseBinary(t *testing.T) string {
 	t.Helper()
 
-	binary := filepath.Join(t.TempDir(), "fase")
-	cmd := exec.Command("go", "build", "-o", binary, "./cmd/fase")
+	binary := filepath.Join(t.TempDir(), "cogent")
+	cmd := exec.Command("go", "build", "-o", binary, "./cmd/cogent")
 	cmd.Dir = filepath.Join("..", "..")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("build fase binary: %v\n%s", err, output)
+		t.Fatalf("build cogent binary: %v\n%s", err, output)
 	}
 	return binary
 }
@@ -1684,7 +1684,7 @@ func runFase(t *testing.T, binary, configPath string, args ...string) string {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run fase %v: %v\n%s", args, err, output)
+		t.Fatalf("run cogent %v: %v\n%s", args, err, output)
 	}
 	return string(output)
 }
@@ -1697,7 +1697,7 @@ func runFaseWithEnv(t *testing.T, binary, configPath, dir string, env []string, 
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run fase %v: %v\n%s", args, err, output)
+		t.Fatalf("run cogent %v: %v\n%s", args, err, output)
 	}
 	return string(output)
 }
@@ -1713,7 +1713,7 @@ func runFaseExpectError(t *testing.T, binary, configPath string, args ...string)
 	)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("expected fase command to fail: %v\n%s", args, output)
+		t.Fatalf("expected cogent command to fail: %v\n%s", args, output)
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {

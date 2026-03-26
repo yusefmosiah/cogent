@@ -564,7 +564,7 @@ type CheckReport struct {
 	TestsFailed  int      `json:"tests_failed"`
 	TestOutput   string   `json:"test_output,omitempty"` // truncated to 50KB
 	DiffStat     string   `json:"diff_stat,omitempty"`
-	Screenshots  []string `json:"screenshots,omitempty"` // paths relative to .fase/artifacts/<work-id>/
+	Screenshots  []string `json:"screenshots,omitempty"` // paths relative to .cogent/artifacts/<work-id>/
 	Videos       []string `json:"videos,omitempty"`
 	CheckerNotes string   `json:"checker_notes,omitempty"`
 }

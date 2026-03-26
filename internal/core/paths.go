@@ -21,8 +21,10 @@ type Paths struct {
 }
 
 const (
-	projectStateDirName = ".fase"
-	projectSlug         = "fase"
+	projectStateDirName       = ".cogent"
+	legacyProjectStateDirName = ".fase"
+	projectSlug               = "cogent"
+	legacyProjectSlug         = "fase"
 )
 
 func ResolvePaths() (Paths, error) {
@@ -35,7 +37,7 @@ func ResolvePaths() (Paths, error) {
 }
 
 // ResolveRepoStateDir finds the git repo root from cwd and returns the
-// repository-local .fase state directory. If FASE_STATE_DIR is set, it
+// repository-local .cogent state directory. If FASE_STATE_DIR is set, it
 // is returned directly so that isolated environments (e.g. tests) always
 // resolve to the configured state directory.
 func ResolveRepoStateDir() string {
@@ -50,28 +52,24 @@ func ResolveRepoStateDir() string {
 }
 
 // ResolveRepoStateDirFrom walks upward from startDir and returns the repo-local
-// .fase state directory.
+// .cogent state directory.
 func ResolveRepoStateDirFrom(startDir string) string {
-	dir := startDir
-	for {
-		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
-			return filepath.Join(dir, projectStateDirName)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
+	if repoRoot := repoRootFromStartDir(startDir); repoRoot != "" {
+		return filepath.Join(repoRoot, projectStateDirName)
 	}
+	return ""
 }
 
 // ResolvePathsForRepo resolves paths scoped to the current git repo.
-// If in a git repo, uses <repo-root>/.fase/ for state.
+// If in a git repo, uses <repo-root>/.cogent/ for state.
 // Otherwise falls back to global XDG paths.
 func ResolvePathsForRepo() (Paths, error) {
 	// Explicit override always wins
 	if os.Getenv("FASE_STATE_DIR") != "" {
 		return ResolvePaths()
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		_ = MigrateLegacyRepoStateDirFrom(cwd, nil)
 	}
 	repoState := ResolveRepoStateDir()
 	if repoState == "" {
@@ -109,8 +107,8 @@ func ResolvePathsFromEnv(home string, getenv func(string) string) (Paths, error)
 		StateDir:      stateDir,
 		CacheDir:      cacheDir,
 		ConfigPath:    filepath.Join(configDir, "config.toml"),
-		DBPath:        filepath.Join(stateDir, "fase.db"),
-		PrivateDBPath: filepath.Join(stateDir, "fase-private.db"),
+		DBPath:        filepath.Join(stateDir, stateFilePrefix(stateDir)+".db"),
+		PrivateDBPath: filepath.Join(stateDir, stateFilePrefix(stateDir)+"-private.db"),
 		JobsDir:       filepath.Join(stateDir, "jobs"),
 		RawDir:        filepath.Join(stateDir, "raw"),
 		TransfersDir:  filepath.Join(stateDir, "transfers"),
@@ -134,6 +132,10 @@ func ExpandPath(path string) (string, error) {
 }
 
 func EnsurePaths(paths Paths) error {
+	if err := migrateLegacyStateFiles(paths.StateDir, nil); err != nil {
+		return err
+	}
+
 	dirs := []string{
 		paths.ConfigDir,
 		paths.StateDir,
@@ -167,7 +169,7 @@ func ensureGitignore(stateDir string) {
 	gitignorePath := filepath.Join(repoRoot, ".gitignore")
 
 	if data, err := os.ReadFile(gitignorePath); err == nil {
-		if strings.Contains(string(data), ".fase/") {
+		if strings.Contains(string(data), projectStateDirName+"/") {
 			return
 		}
 	}
@@ -177,7 +179,7 @@ func ensureGitignore(stateDir string) {
 		return
 	}
 	defer f.Close()
-	_, _ = f.WriteString("\n# fase local state — track public DB, ignore private DB and artifacts\n.fase/raw/\n.fase/jobs/\n.fase/transfers/\n.fase/debriefs/\n.fase/fase.db-shm\n.fase/fase.db-wal\n.fase/fase-private.db\n.fase/fase-private.db-shm\n.fase/fase-private.db-wal\n")
+	_, _ = f.WriteString("\n# cogent local state — track public DB, ignore private DB and artifacts\n.cogent/raw/\n.cogent/jobs/\n.cogent/transfers/\n.cogent/debriefs/\n.cogent/cogent.db-shm\n.cogent/cogent.db-wal\n.cogent/cogent-private.db\n.cogent/cogent-private.db-shm\n.cogent/cogent-private.db-wal\n")
 }
 
 func resolveDir(override, xdgBase, home, fallbackBase string) (string, error) {
@@ -193,6 +195,76 @@ func resolveDir(override, xdgBase, home, fallbackBase string) (string, error) {
 
 func stateFilePrefix(_ string) string {
 	return projectSlug
+}
+
+func MigrateLegacyRepoStateDirFrom(startDir string, logf func(string, ...any)) error {
+	repoRoot := repoRootFromStartDir(startDir)
+	if repoRoot == "" {
+		return nil
+	}
+
+	legacyDir := filepath.Join(repoRoot, legacyProjectStateDirName)
+	stateDir := filepath.Join(repoRoot, projectStateDirName)
+	if fileExists(legacyDir) && !fileExists(stateDir) {
+		if err := os.Rename(legacyDir, stateDir); err != nil {
+			return fmt.Errorf("rename legacy state dir: %w", err)
+		}
+		logMigration(logf, "migrated state directory from %s to %s", legacyDir, stateDir)
+	}
+
+	return migrateLegacyStateFiles(stateDir, logf)
+}
+
+func migrateLegacyStateFiles(stateDir string, logf func(string, ...any)) error {
+	if !fileExists(stateDir) {
+		return nil
+	}
+
+	legacyToCurrent := [][2]string{
+		{legacyProjectSlug + ".db", projectSlug + ".db"},
+		{legacyProjectSlug + ".db-shm", projectSlug + ".db-shm"},
+		{legacyProjectSlug + ".db-wal", projectSlug + ".db-wal"},
+		{legacyProjectSlug + "-private.db", projectSlug + "-private.db"},
+		{legacyProjectSlug + "-private.db-shm", projectSlug + "-private.db-shm"},
+		{legacyProjectSlug + "-private.db-wal", projectSlug + "-private.db-wal"},
+	}
+	for _, pair := range legacyToCurrent {
+		oldPath := filepath.Join(stateDir, pair[0])
+		newPath := filepath.Join(stateDir, pair[1])
+		if !fileExists(oldPath) || fileExists(newPath) {
+			continue
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return fmt.Errorf("rename legacy state file %s to %s: %w", oldPath, newPath, err)
+		}
+		logMigration(logf, "migrated state file from %s to %s", oldPath, newPath)
+	}
+	return nil
+}
+
+func repoRootFromStartDir(startDir string) string {
+	dir := startDir
+	for {
+		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func logMigration(logf func(string, ...any), format string, args ...any) {
+	if logf != nil {
+		logf(format, args...)
+	}
 }
 
 func expandUser(path string) (string, error) {

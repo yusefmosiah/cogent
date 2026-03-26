@@ -275,11 +275,20 @@ func NewRootCommand() *cobra.Command {
 	opts := &rootOptions{}
 
 	cmd := &cobra.Command{
-		Use:           "fase",
+		Use:           "cogent",
 		Aliases:       []string{},
 		Short:         "Run coding-agent CLIs behind one local contract",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil
+			}
+			return core.MigrateLegacyRepoStateDirFrom(cwd, func(format string, args ...any) {
+				fmt.Fprintf(cmd.ErrOrStderr(), format+"\n", args...)
+			})
+		},
 	}
 
 	cmd.PersistentFlags().StringVar(&opts.configPath, "config", "", "path to config.toml")
@@ -858,7 +867,7 @@ func newArtifactsCommand(root *rootOptions) *cobra.Command {
 	attachCmd.Flags().StringVar(&attachOpts.workID, "work", "", "attach artifact to a work item's current job/session")
 	attachCmd.Flags().StringVar(&attachOpts.path, "path", "", "file path to attach")
 	attachCmd.Flags().StringVar(&attachOpts.kind, "kind", "", "artifact kind override")
-	attachCmd.Flags().BoolVar(&attachOpts.copy, "copy", true, "copy the file into fase state for durability")
+	attachCmd.Flags().BoolVar(&attachOpts.copy, "copy", true, "copy the file into cogent state for durability")
 	attachCmd.Flags().StringVar(&attachOpts.metadata, "metadata", "", "JSON object metadata")
 	_ = attachCmd.MarkFlagRequired("path")
 
@@ -870,7 +879,7 @@ func newHistoryCommand(root *rootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "history",
-		Short: "Search canonical local fase history",
+		Short: "Search canonical local cogent history",
 	}
 
 	searchCmd := &cobra.Command{
@@ -1242,10 +1251,10 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		Use:   "update <work-id>",
 		Short: "Append a structured work update and mutate current work state",
 		Example: `  # Transition work to checking (worker finished implementation)
-  fase work update work_123 --execution-state checking --message "Implementation complete"
+  cogent work update work_123 --execution-state checking --message "Implementation complete"
 
   # Mark work as done (requires all attestations resolved)
-  fase work update work_123 --execution-state done --message "All checks passed"
+  cogent work update work_123 --execution-state done --message "All checks passed"
 
   # Valid execution states: ready, claimed, in_progress, checking, blocked, done, failed, cancelled, archived
   # Note: awaiting_attestation is deprecated; use checking instead`,
@@ -1428,7 +1437,7 @@ func newWorkCommand(root *rootOptions) *cobra.Command {
 		Short: "Import tracked doc content, auto-creating linked work if needed",
 		Long: `Imports document content (from file or inline) into the runtime review bundle.
 The stored record always keeps an authoritative repo-relative path linked to one work item.
-If no work-id is given, fase auto-creates the linked work item from the doc content.
+If no work-id is given, cogent auto-creates the linked work item from the doc content.
 The repo file at that path remains authoritative; doc-set is an import/bootstrap helper.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -2077,7 +2086,7 @@ The repo file at that path remains authoritative; doc-set is an import/bootstrap
 
 	checkCmd := &cobra.Command{
 		Use:   "check <work-id>",
-		Short: "Submit a check record (legacy alias of `fase check create`)",
+		Short: "Submit a check record (legacy alias of `cogent check create`)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := struct {
@@ -2553,7 +2562,7 @@ func newDashboardCommand(root *rootOptions) *cobra.Command {
 func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print the fase version",
+		Short: "Print the cogent version",
 		Run: func(cmd *cobra.Command, args []string) {
 			cmd.Println(version)
 		},

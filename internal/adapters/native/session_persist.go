@@ -24,7 +24,7 @@ type sessionState struct {
 
 // sessionsDir returns the directory for persisted native sessions.
 func sessionsDir(cwd string) string {
-	return filepath.Join(cwd, ".fase", "native-sessions")
+	return filepath.Join(cwd, ".cogent", "native-sessions")
 }
 
 // sessionPath returns the file path for a session.

@@ -22,16 +22,16 @@ import (
 //     into a summary using a lightweight LLM call.
 //  3. Replace old turns with the summary block.
 //  4. Keep the summary + recent turns within budget.
-//  5. Persist a supervisor context file (.fase/supervisor-context.md)
+//  5. Persist a supervisor context file (.cogent/supervisor-context.md)
 //     that survives session restarts.
 type historyCompressor struct {
 	client      LLMClient
 	modelID     string
 	apiFormat   string
 	mu          sync.Mutex
-	compressed  bool       // whether compression has been applied this session
-	lastSummary string     // last generated summary (for reuse)
-	cwd         string     // working directory for supervisor context file
+	compressed  bool   // whether compression has been applied this session
+	lastSummary string // last generated summary (for reuse)
+	cwd         string // working directory for supervisor context file
 }
 
 // compressionThreshold is the fraction of the context window at which
@@ -55,22 +55,22 @@ func contextWindowForModel(modelID string) int {
 	// Map of model prefix -> context window size in tokens.
 	windows := map[string]int{
 		// Claude models (Anthropic / z.ai / Bedrock)
-		"claude-opus-4-6":       200000,
-		"claude-sonnet-4-6":     200000,
-		"claude-haiku-4-5":      200000,
-		"claude-sonnet-4-5":     200000,
-		"claude-3-5-sonnet":     200000,
-		"claude-3-opus":         200000,
-		"claude-3-haiku":        200000,
-		"us.anthropic.claude-":  200000,
-		"anthropic.claude-":     200000,
-		"glm-":                  128000,
+		"claude-opus-4-6":      200000,
+		"claude-sonnet-4-6":    200000,
+		"claude-haiku-4-5":     200000,
+		"claude-sonnet-4-5":    200000,
+		"claude-3-5-sonnet":    200000,
+		"claude-3-opus":        200000,
+		"claude-3-haiku":       200000,
+		"us.anthropic.claude-": 200000,
+		"anthropic.claude-":    200000,
+		"glm-":                 128000,
 		// OpenAI models (ChatGPT / Responses API)
-		"gpt-5":                 200000,
-		"gpt-4":                 128000,
-		"o3":                    200000,
-		"o4":                    200000,
-		"codex-mini":            200000,
+		"gpt-5":      200000,
+		"gpt-4":      128000,
+		"o3":         200000,
+		"o4":         200000,
+		"codex-mini": 200000,
 	}
 	for prefix, window := range windows {
 		if strings.HasPrefix(modelID, prefix) {
@@ -254,7 +254,7 @@ func generateSummary(ctx context.Context, client LLMClient, apiFormat string, tu
 // supervisorContextPath returns the path to the persistent supervisor
 // context file that survives session restarts.
 func supervisorContextPath(cwd string) string {
-	return filepath.Join(cwd, ".fase", "supervisor-context.md")
+	return filepath.Join(cwd, ".cogent", "supervisor-context.md")
 }
 
 // loadSupervisorContext loads the persistent supervisor context from disk.

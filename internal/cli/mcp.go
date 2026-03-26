@@ -24,20 +24,20 @@ import (
 func newMCPCommand(root *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Run fase as an MCP server",
+		Short: "Run cogent as an MCP server",
 	}
 
 	stdioCmd := &cobra.Command{
 		Use:   "stdio",
 		Short: "Run MCP server over stdio (for Claude Code and other MCP clients)",
-		Long: `WARNING: 'fase mcp stdio' opens the database directly. If 'fase serve' is
+		Long: `WARNING: 'cogent mcp stdio' opens the database directly. If 'cogent serve' is
 also running, this creates concurrent writers which can corrupt the database.
-Use 'fase mcp proxy' instead — it routes through serve's HTTP API.`,
+Use 'cogent mcp proxy' instead — it routes through serve's HTTP API.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Warn if serve is already running — concurrent DB access causes corruption.
 			if info, err := loadServeInfo(); err == nil {
-				fmt.Fprintf(os.Stderr, "WARNING: fase serve is running (pid %d, port %d). Using 'fase mcp stdio' "+
-					"alongside serve risks database corruption. Use 'fase mcp proxy' instead.\n", info.PID, info.Port)
+				fmt.Fprintf(os.Stderr, "WARNING: cogent serve is running (pid %d, port %d). Using 'cogent mcp stdio' "+
+					"alongside serve risks database corruption. Use 'cogent mcp proxy' instead.\n", info.PID, info.Port)
 			}
 			svc, err := service.Open(context.Background(), root.configPath)
 			if err != nil {
@@ -74,16 +74,16 @@ Use 'fase mcp proxy' instead — it routes through serve's HTTP API.`,
 
 	proxyCmd := &cobra.Command{
 		Use:   "proxy",
-		Short: "Proxy MCP stdio to the running fase serve HTTP endpoint",
-		Long: `Reads serve.json to find the running fase serve port, then proxies
+		Short: "Proxy MCP stdio to the running cogent serve HTTP endpoint",
+		Long: `Reads serve.json to find the running cogent serve port, then proxies
 MCP requests from stdin to serve's /mcp endpoint over HTTP. This avoids
 the WAL split problem where a separate DB connection sees stale data.
 
-Use this in .mcp.json instead of 'fase mcp stdio'.`,
+Use this in .mcp.json instead of 'cogent mcp stdio'.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			info, err := loadServeInfo()
 			if err != nil {
-				return fmt.Errorf("fase serve is not running: %w", err)
+				return fmt.Errorf("cogent serve is not running: %w", err)
 			}
 			baseURL := fmt.Sprintf("http://localhost:%d/mcp", info.Port)
 			return runMCPProxy(cmd.Context(), baseURL)

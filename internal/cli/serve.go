@@ -191,18 +191,18 @@ func newServeCommand(root *rootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the fase service: web UI, API, and housekeeping",
-		Long: `Starts the fase service: mind-graph web UI, HTTP API, and background
+		Short: "Run the cogent service: web UI, API, and housekeeping",
+		Long: `Starts the cogent service: mind-graph web UI, HTTP API, and background
 housekeeping (lease reconciliation, stall detection).
 
 By default, no work is auto-dispatched. Use --auto to enable autonomous
 claiming and execution of ready work items.
 
 Examples:
-  fase serve                          # UI + API + housekeeping
-  fase serve --auto                   # also auto-dispatch ready work
-  fase serve --host 0.0.0.0           # accessible via Tailscale/LAN
-  fase serve --no-browser             # don't open browser on start`,
+  cogent serve                          # UI + API + housekeeping
+  cogent serve --auto                   # also auto-dispatch ready work
+  cogent serve --host 0.0.0.0           # accessible via Tailscale/LAN
+  cogent serve --no-browser             # don't open browser on start`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runServe(cmd, root, port, host, auto, noUI, noBrowser, devAssets, supAdapter, supModel, envFile)
 		},
@@ -231,7 +231,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// Guard: prevent duplicate serve instances on same project.
 	if existingInfo, err := loadServeInfo(); err == nil {
 		if syscall.Kill(existingInfo.PID, 0) == nil {
-			return fmt.Errorf("fase serve is already running (pid %d, port %d). Kill it first or use the existing instance", existingInfo.PID, existingInfo.Port)
+			return fmt.Errorf("cogent serve is already running (pid %d, port %d). Kill it first or use the existing instance", existingInfo.PID, existingInfo.Port)
 		}
 		// Stale serve.json — remove it
 		os.Remove(filepath.Join(core.ResolveRepoStateDir(), "serve.json"))
@@ -409,7 +409,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	if auto {
 		mode = "serve --auto"
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "fase %s: %s (pid %d)\n", mode, url, os.Getpid())
+	fmt.Fprintf(cmd.OutOrStdout(), "cogent %s: %s (pid %d)\n", mode, url, os.Getpid())
 
 	// Auto-open browser
 	if !noUI && !noBrowser {
@@ -424,7 +424,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	fmt.Fprintln(cmd.OutOrStdout(), "\nfase serve: shutting down...")
+	fmt.Fprintln(cmd.OutOrStdout(), "\ncogent serve: shutting down...")
 	cancel() // stops housekeeping and supervisor goroutines
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -432,14 +432,14 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	_ = server.Shutdown(shutdownCtx)
 
 	wg.Wait()
-	fmt.Fprintln(cmd.OutOrStdout(), "fase serve: stopped")
+	fmt.Fprintln(cmd.OutOrStdout(), "cogent serve: stopped")
 	return nil
 }
 
 // runHousekeeping runs periodic maintenance without dispatching work:
 // - Reconcile expired leases (orphaned claims)
 // - Detect stalled jobs (no output for 10 minutes)
-// - Dispatch verification for completed jobs (from fase dispatch)
+// - Dispatch verification for completed jobs (from cogent dispatch)
 // loadDotEnv reads a .env file and sets environment variables.
 // Existing vars are NOT overwritten. No dependency on external packages.
 // If path is empty, reads ".env" from cwd.
@@ -474,10 +474,10 @@ func loadDotEnv(paths ...string) {
 }
 
 // createWorktree creates a git worktree for isolated worker execution.
-// Returns the worktree path. Branch name: fase/work/<work-id>.
+// Returns the worktree path. Branch name: cogent/work/<work-id>.
 func createWorktree(repoRoot, workID string) (string, error) {
-	worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
-	branch := "fase/work/" + workID
+	worktreeDir := filepath.Join(repoRoot, ".cogent", "worktrees", workID)
+	branch := "cogent/work/" + workID
 
 	// Clean up stale branch/worktree from previous failed dispatch.
 	rmCmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
@@ -497,11 +497,11 @@ func createWorktree(repoRoot, workID string) (string, error) {
 
 // mergeWorktree merges a worktree branch back to main and cleans up.
 func mergeWorktree(repoRoot, workID string) error {
-	branch := "fase/work/" + workID
-	worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
+	branch := "cogent/work/" + workID
+	worktreeDir := filepath.Join(repoRoot, ".cogent", "worktrees", workID)
 
 	// Merge branch into current HEAD (main).
-	mergeCmd := exec.Command("git", "merge", "--no-ff", "-m", fmt.Sprintf("fase: merge %s", workID), branch)
+	mergeCmd := exec.Command("git", "merge", "--no-ff", "-m", fmt.Sprintf("cogent: merge %s", workID), branch)
 	mergeCmd.Dir = repoRoot
 	if out, err := mergeCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git merge %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
@@ -522,8 +522,8 @@ func mergeWorktree(repoRoot, workID string) error {
 
 // cleanupWorktree removes a worktree without merging (for failed work).
 func cleanupWorktree(repoRoot, workID string) {
-	worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
-	branch := "fase/work/" + workID
+	worktreeDir := filepath.Join(repoRoot, ".cogent", "worktrees", workID)
+	branch := "cogent/work/" + workID
 
 	rmCmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
 	rmCmd.Dir = repoRoot
@@ -565,7 +565,7 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 			_, _ = svc.ReconcileExpiredLeases(ctx)
 
 			// Check for stalled jobs and completed jobs needing verification
-			rawDir := filepath.Join(cwd, ".fase", "raw", "stdout")
+			rawDir := filepath.Join(cwd, ".cogent", "raw", "stdout")
 			entries, err := os.ReadDir(rawDir)
 			if err != nil {
 				continue
@@ -713,7 +713,7 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub, rep
 					// Merge worktree branch into main after attestation pass.
 					if ev.WorkID != "" && repoRoot != "" {
 						go func(workID string) {
-							worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
+							worktreeDir := filepath.Join(repoRoot, ".cogent", "worktrees", workID)
 							if _, statErr := os.Stat(worktreeDir); statErr == nil {
 								if mergeErr := mergeWorktree(repoRoot, workID); mergeErr != nil {
 									fmt.Fprintf(os.Stderr, "worktree merge failed for %s: %v — cleaning up\n", workID, mergeErr)
@@ -726,7 +726,7 @@ func runChangeWatcher(ctx context.Context, svc *service.Service, hub *wsHub, rep
 					// Cleanup worktree without merging on failure.
 					if ev.WorkID != "" && repoRoot != "" {
 						go func(workID string) {
-							worktreeDir := filepath.Join(repoRoot, ".fase", "worktrees", workID)
+							worktreeDir := filepath.Join(repoRoot, ".cogent", "worktrees", workID)
 							if _, statErr := os.Stat(worktreeDir); statErr == nil {
 								cleanupWorktree(repoRoot, workID)
 							}
@@ -1635,7 +1635,7 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 
 	// Supervisor status
 	mux.HandleFunc("/api/supervisor/status", func(w http.ResponseWriter, r *http.Request) {
-		supPath := filepath.Join(cwd, ".fase", "supervisor.json")
+		supPath := filepath.Join(cwd, ".cogent", "supervisor.json")
 		supData, _ := os.ReadFile(supPath)
 		var sup any
 		if len(supData) > 0 {
@@ -2112,7 +2112,7 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 		writeJSONHTTP(w, 200, result)
 	})
 
-	// GET /api/history/search — search canonical local fase history
+	// GET /api/history/search — search canonical local cogent history
 	mux.HandleFunc("/api/history/search", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		limit := 20
@@ -2289,7 +2289,7 @@ func registerAPIHandlers(mux *http.ServeMux, svc *service.Service, cwd string, h
 
 	// GET /api/dashboard — show live supervisor and work graph status
 	mux.HandleFunc("/api/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		supPath := filepath.Join(cwd, ".fase", "supervisor.json")
+		supPath := filepath.Join(cwd, ".cogent", "supervisor.json")
 		supData, _ := os.ReadFile(supPath)
 
 		allWork, err := svc.ListWork(r.Context(), service.WorkListRequest{Limit: 500})
