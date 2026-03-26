@@ -1,0 +1,63 @@
+{
+  "groupId": "migration-fix",
+  "testedAt": "2026-03-25T22:35:00Z",
+  "isolation": {
+    "type": "temporary directory",
+    "testDirectory": "/var/folders/28/gwvkv0wn6lq64jvqvmny5xnw0000gn/T/tmp.qXLNHhK5BG",
+    "description": "Created isolated temporary git repository with .fase/ directory containing test files"
+  },
+  "toolsUsed": ["shell", "cogent CLI"],
+  "assertions": [
+    {
+      "id": "VAL-RENAME-003",
+      "title": "State directory migration",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Create temporary git repository with .fase/ directory",
+          "expected": "Test environment set up with .fase/ containing test files",
+          "observed": "Created test repo with .fase/test.txt, .fase/jobs/job1.json, .fase/raw/output.txt"
+        },
+        {
+          "action": "Verify initial state: .fase/ exists, .cogent/ does not",
+          "expected": ".fase/ directory present, .cogent/ directory absent",
+          "observed": "ls showed .fase/ present, .cogent/ absent as expected"
+        },
+        {
+          "action": "Run 'cogent list' command from test directory",
+          "expected": "Migration message appears, command may fail due to server not running",
+          "observed": "Migration message 'migrated legacy repo state dir from .../tmp.qXLNHhK5BG/.fase to .../tmp.qXLNHhK5BG/.cogent' appeared, command errored with 'cogent serve is not running' (expected)"
+        },
+        {
+          "action": "Verify post-migration state: .fase/ gone, .cogent/ exists",
+          "expected": ".fase/ directory absent, .cogent/ directory present",
+          "observed": ".fase/ no longer exists, .cogent/ directory present"
+        },
+        {
+          "action": "Verify all original files migrated with contents intact",
+          "expected": "All files from .fase/ present in .cogent/ with identical contents",
+          "observed": "All 3 files migrated: test.txt='test data 1', jobs/job1.json='test data 2', raw/output.txt='test data 3' - all contents preserved"
+        }
+      ],
+      "evidence": {
+        "terminalOutput": [
+          "rename/migration-fix/VAL-RENAME-003-before-migration.txt",
+          "rename/migration-fix/VAL-RENAME-003-migration-trigger.txt",
+          "rename/migration-fix/VAL-RENAME-003-after-migration.txt"
+        ],
+        "migrationMessage": "migrated legacy repo state dir from /var/folders/28/gwvkv0wn6lq64jvqvmny5xnw0000gn/T/tmp.qXLNHhK5BG/.fase to /var/folders/28/gwvkv0wn6lq64jvqvmny5xnw0000gn/T/tmp.qXLNHhK5BG/.cogent"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Had to use 'cogent list' instead of 'cogent --help' to trigger migration - --help command did not produce stderr output showing migration message",
+      "resolved": true,
+      "resolution": "Used 'cogent list' which properly outputs to stderr, allowing migration message to be visible",
+      "affectedAssertions": ["VAL-RENAME-003"]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 1 assertion: VAL-RENAME-003 passed. Migration from .fase/ to .cogent/ works correctly when running any cogent command in a git repository. The .fase/ directory is successfully renamed to .cogent/ and all original contents (files and directory structure) are preserved intact."
+}
