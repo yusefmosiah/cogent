@@ -15,7 +15,7 @@ ready → doing → checking → report → done
 **Worker** — does the work. Any model.
 - Writes code in a worktree
 - Commits: `cogent(<work-id>): <summary>`
-- Signals: `cogent work update <id> --execution-state checking`
+- Signals: `cogent work update <id> --execution-state done`
 - Does NOT decide if the work is good
 
 **Checker** — produces evidence. Different model from worker.

@@ -1,0 +1,21 @@
+{
+  "featureId": "simplify-state-machine",
+  "reviewedAt": "2026-03-26T04:15:00Z",
+  "commitId": "f91de7c177bf4083807d5f3c2acfde1be259d28e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Excellent implementation of state machine simplification. The worker systematically collapsed the legacy 'checking' state into canonical 'in_progress', updated all briefing strings to use 'done' instead of 'checking', removed attestation-frozen logic from syncWorkStateFromJob, and comprehensively updated tests. All five requirements from the feature description were fulfilled correctly. Code changes are thorough, consistent across all layers (core types, service, CLI, tests), and maintain backward compatibility. Build, filtered tests, and vet all pass.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The spec documentation in docs/spec-check-flow.md still references the old behavior where workers signal '--execution-state checking', but the implementation now has workers signal '--execution-state done'. This documentation is out of sync with the current state machine design.",
+      "evidence": "docs/spec-check-flow.md line 18: 'Signals: cogent work update <id> --execution-state checking'. Compare to internal/service/service.go line 2114 which now uses '--execution-state done' in the worker briefing."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The implementation correctly simplifies the state machine by collapsing 'checking' into 'in_progress', updating worker briefings to signal 'done' instead of 'checking', removing references to checker auto-dispatch from supervisor guidance, simplifying syncWorkStateFromJob to keep completed work 'in_progress' until completion gates clear, and updating all relevant tests. The code is clean, thorough, and maintains backward compatibility. All validators pass. One minor documentation gap noted in docs/spec-check-flow.md which still references the old checking state behavior."
+}

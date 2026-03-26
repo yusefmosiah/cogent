@@ -1,0 +1,21 @@
+{
+  "featureId": "remove-attestation-children",
+  "reviewedAt": "2026-03-26T04:20:00.000Z",
+  "commitId": "6a1bcc4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The attestation child fanout machinery was completely and cleanly removed from service.go (~836 net lines). All 28+ attestation spawning functions are gone, finishJob was simplified to skip attestation child creation, and completionGateIssues now only checks for a passing check record plus required docs. Manual attestation APIs (AttestWork, CreateCheckRecord, SignAttestationRecord) were correctly preserved. The implementation is thorough with no orphaned references, all tests updated appropriately, and all validators (build, test, vet) passing.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md contains outdated service.go line count (~9300 lines) after the attestation removal reduced it to 8808 lines. This is a minor documentation staleness issue that doesn't affect functionality.",
+      "evidence": "AGENTS.md line 20: 'internal/service/service.go (~9300 lines)' vs actual: wc -l shows 8808 lines"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS: Attestation child fanout machinery completely removed from service.go. All ~28 functions deleted (spawnAttestationChildren, attestationChildRuntime, attestationChildTitle, attestationChildObjective, attestationWorkerFindings, refreshParentAfterAttestationChild, refreshAttestationParentState, and all related helpers). finishJob simplified to skip attestation spawning. completionGateIssues rewritten to only check for passing check record and required docs. Manual attestation APIs preserved: AttestWork (cogent work attest --help works), CreateCheckRecord (cogent check create --help works), SignAttestationRecord, sendAttestationNotification. Tests updated: removed TestParentAggregationFromChildren, TestResetWorkIgnoresHistoricalAttestationChildren, updated TestAttestationEpochMismatchRejection and TestSyncWorkStateFromJobMapping. All validators pass: go build ./... (exit 0), go test filtered (exit 0, all tests pass), go vet ./... (exit 0). No dead code, no orphaned references, clean implementation. Fulfills VAL-ATTEST-001 through VAL-ATTEST-006."
+}
