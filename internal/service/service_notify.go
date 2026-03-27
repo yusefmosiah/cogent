@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,4 +165,190 @@ func proofBundleDocRefs(records []core.DocContentRecord) []string {
 		refs = append(refs, fmt.Sprintf("%s(%s)", record.DocID, record.Path))
 	}
 	return refs
+}
+func (s *Service) sendWorkNotification(_ context.Context, work core.WorkItemRecord, message string) {
+	s.DigestCollector.Collect(digestItemForWork(work, "done", firstNonEmpty(message, work.Objective, "Work completed.")))
+}
+
+// collectCheckArtifacts collects screenshots from the check report's artifact paths
+// and from .cogent/artifacts/<work-id>/screenshots/ in the project root.
+func (s *Service) collectCheckArtifacts(ctx context.Context, workID string, cr core.CheckRecord) []notify.ResendEmailAttachment {
+	var attachments []notify.ResendEmailAttachment
+
+	// Collect screenshots referenced directly in the check report.
+	for _, screenshotPath := range cr.Report.Screenshots {
+		contentType, ok := playwrightArtifactContentType(screenshotPath)
+		if !ok {
+			continue
+		}
+		data, err := os.ReadFile(screenshotPath)
+		if err != nil {
+			continue
+		}
+		attachments = append(attachments, notify.ResendEmailAttachment{
+			Filename:    filepath.Base(screenshotPath),
+			Content:     base64.StdEncoding.EncodeToString(data),
+			ContentType: contentType,
+		})
+	}
+	if len(attachments) > 0 {
+		return attachments
+	}
+
+	// Fallback: look in .cogent/artifacts/<work-id>/screenshots/ under the project root.
+	projectRoot := s.findProjectRoot(ctx, workID)
+	if projectRoot != "" {
+		screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
+		if found := collectScreenshots(screenshotDir); len(found) > 0 {
+			return found
+		}
+	}
+
+	// Final fallback: Playwright test-results directories.
+	return s.collectPlaywrightAttachments(ctx, workID)
+}
+
+// collectScreenshotPaths gathers Playwright artifact paths for a check record,
+// including both explicit paths and those from fallback directories.
+// This ensures screenshots are available for inline HTML and videos for attachments.
+func (s *Service) collectScreenshotPaths(ctx context.Context, workID string, cr core.CheckRecord) []string {
+	seen := make(map[string]bool)
+	var paths []string
+
+	// Start with explicit paths from the check report
+	for _, p := range cr.Report.Screenshots {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+
+	// Try to find additional screenshots from the fallback directory
+	projectRoot := s.findProjectRoot(ctx, workID)
+	if projectRoot != "" {
+		screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
+		if err := filepath.WalkDir(screenshotDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if _, ok := playwrightArtifactContentType(path); ok {
+				if !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
+			}
+			return nil
+		}); err != nil {
+			// Ignore walk errors; we'll use what we found
+		}
+	}
+
+	return paths
+}
+
+// gitMainRepoRoot returns the main repository root from any path in the repo or a worktree.
+// Worktrees in this project follow the pattern <mainRepo>/.cogent/worktrees/<workID>.
+// Unlike "git rev-parse --show-toplevel", this always returns the main repo root.
+func gitMainRepoRoot(ctx context.Context, cwd string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	top := strings.TrimSpace(string(out))
+	// Strip worktree suffix: <mainRepo>/.cogent/worktrees/<workID> → <mainRepo>
+	const worktreeMarker = string(os.PathSeparator) + ".cogent" + string(os.PathSeparator) + "worktrees" + string(os.PathSeparator)
+	if idx := strings.Index(top, worktreeMarker); idx >= 0 {
+		return top[:idx], nil
+	}
+	return top, nil
+}
+
+// findProjectRoot finds the main git repo root from the job CWD for a work item.
+func (s *Service) findProjectRoot(ctx context.Context, workID string) string {
+	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
+	if err != nil || len(jobs) == 0 {
+		return ""
+	}
+	cwd := verifyRepoPath(jobs)
+	if cwd == "" || cwd == "." {
+		return ""
+	}
+	root, err := gitMainRepoRoot(ctx, cwd)
+	if err != nil {
+		return ""
+	}
+	return root
+}
+
+// collectPlaywrightAttachments looks up the job CWD for the work item and
+// returns any PNG screenshots found in .cogent/artifacts/<work-id>/screenshots/ or test-results directories.
+func (s *Service) collectPlaywrightAttachments(ctx context.Context, workID string) []notify.ResendEmailAttachment {
+	// First, try to find screenshots in the persistent artifacts directory.
+	jobs, err := s.store.ListJobsByWork(ctx, workID, 10)
+	if err != nil || len(jobs) == 0 {
+		return nil
+	}
+	cwd := verifyRepoPath(jobs)
+	if cwd != "" && cwd != "." {
+		// Try main project root .cogent/artifacts/<work-id>/screenshots/ first.
+		// Use gitMainRepoRoot so worktree paths resolve to the main repo, not the worktree.
+		if projectRoot, err := gitMainRepoRoot(ctx, cwd); err == nil {
+			screenshotDir := filepath.Join(projectRoot, ".cogent", "artifacts", workID, "screenshots")
+			if attachments := collectScreenshots(screenshotDir); len(attachments) > 0 {
+				return attachments
+			}
+		}
+	}
+
+	// Fallback: check multiple possible locations in the job CWD for Playwright artifacts.
+	if cwd == "" || cwd == "." {
+		return nil
+	}
+	for _, subdir := range []string{"test-results", "tests/test-results", "mind-graph/test-results"} {
+		dir := filepath.Join(cwd, subdir)
+		if attachments := collectScreenshots(dir); len(attachments) > 0 {
+			return attachments
+		}
+	}
+	return nil
+}
+
+// collectScreenshots walks dir recursively and returns Playwright screenshots/videos as base64 attachments.
+func collectScreenshots(dir string) []notify.ResendEmailAttachment {
+	var attachments []notify.ResendEmailAttachment
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		contentType, ok := playwrightArtifactContentType(path)
+		if !ok {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		attachments = append(attachments, notify.ResendEmailAttachment{
+			Filename:    d.Name(),
+			Content:     base64.StdEncoding.EncodeToString(data),
+			ContentType: contentType,
+		})
+		return nil
+	})
+	return attachments
+}
+
+func playwrightArtifactContentType(path string) (string, bool) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".webm":
+		return "video/webm", true
+	case ".mp4", ".mov":
+		return "video/mp4", true
+	default:
+		return "", false
+	}
 }
