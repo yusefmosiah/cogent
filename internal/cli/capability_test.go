@@ -46,7 +46,7 @@ func TestPreviewCapabilitiesWithWorkerToken(t *testing.T) {
 		JobID:   "job_123",
 		WorkID:  "work_456",
 		Role:    "worker",
-		Adapter: "codex",
+		Adapter: "claude",
 		Model:   "gpt-5.4-mini",
 	}, []string{core.CapWorkUpdate, core.CapWorkNoteAdd})
 

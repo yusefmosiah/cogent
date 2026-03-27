@@ -25,13 +25,8 @@ type DefaultsConfig struct {
 }
 
 type AdaptersConfig struct {
-	Codex    AdapterConfig `toml:"codex"`
-	Claude   AdapterConfig `toml:"claude"`
-	Factory  AdapterConfig `toml:"factory"`
-	Pi       AdapterConfig `toml:"pi"`
-	Gemini   AdapterConfig `toml:"gemini"`
-	OpenCode AdapterConfig `toml:"opencode"`
-	Native   AdapterConfig `toml:"native"`
+	Claude AdapterConfig `toml:"claude"`
+	Native AdapterConfig `toml:"native"`
 }
 
 type AdapterConfig struct {
@@ -82,13 +77,8 @@ func DefaultConfig(paths Paths) Config {
 			JSON: false,
 		},
 		Adapters: AdaptersConfig{
-			Codex:    AdapterConfig{Binary: "codex", Enabled: true},
-			Claude:   AdapterConfig{Binary: "claude", Enabled: true},
-			Factory:  AdapterConfig{Binary: "droid", Enabled: true},
-			Pi:       AdapterConfig{Binary: "pi", Enabled: true},
-			Gemini:   AdapterConfig{Binary: "gemini", Enabled: true},
-			OpenCode: AdapterConfig{Binary: "opencode", Enabled: true},
-			Native:   AdapterConfig{Binary: "codex", Enabled: true},
+			Claude: AdapterConfig{Binary: "claude", Enabled: true},
+			Native: AdapterConfig{Binary: "cogent", Enabled: true},
 		},
 	}
 }
@@ -97,16 +87,6 @@ func (c AdaptersConfig) ByName(name string) (AdapterConfig, bool) {
 	switch name {
 	case "claude":
 		return c.Claude, true
-	case "codex":
-		return c.Codex, true
-	case "factory":
-		return c.Factory, true
-	case "gemini":
-		return c.Gemini, true
-	case "opencode":
-		return c.OpenCode, true
-	case "pi":
-		return c.Pi, true
 	case "native":
 		return c.Native, true
 	default:

@@ -11,9 +11,6 @@ import (
 	"time"
 
 	"github.com/yusefmosiah/cogent/internal/adapterapi"
-	"github.com/yusefmosiah/cogent/internal/adapters/codex"
-	"github.com/yusefmosiah/cogent/internal/adapters/opencode"
-	"github.com/yusefmosiah/cogent/internal/adapters/pi"
 	"github.com/yusefmosiah/cogent/internal/core"
 )
 
@@ -341,11 +338,7 @@ func (a *LiveAdapter) buildRegistry(cwd string, manager *coAgentManager) (*ToolR
 }
 
 func defaultCoAgentAdapters(svc any, codexBinary string) map[string]adapterapi.LiveAgentAdapter {
-	live := map[string]adapterapi.LiveAgentAdapter{
-		"codex":    codex.NewLiveAdapter(defaultBinary(codexBinary, "codex")),
-		"opencode": opencode.NewLiveAdapter("opencode"),
-		"pi":       pi.NewLiveAdapter("pi"),
-	}
+	live := map[string]adapterapi.LiveAgentAdapter{}
 	nativeAdapter := NewLiveAdapter(svc, nil)
 	live["native"] = nativeAdapter
 	nativeAdapter.SetCoAgents(live)

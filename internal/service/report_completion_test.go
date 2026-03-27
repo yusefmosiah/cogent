@@ -74,7 +74,7 @@ func TestReportJobCompletionPostsChannelNotification(t *testing.T) {
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Status:        "completed",
-		OriginAdapter: "codex",
+		OriginAdapter: "claude",
 		CWD:           t.TempDir(),
 		Metadata:      map[string]any{},
 	}
@@ -85,7 +85,7 @@ func TestReportJobCompletionPostsChannelNotification(t *testing.T) {
 		JobID:     "job_test123",
 		SessionID: session.SessionID,
 		WorkID:    work.WorkID,
-		Adapter:   "codex",
+		Adapter:   "claude",
 		State:     core.JobStateCompleted,
 		CWD:       session.CWD,
 		CreatedAt: now,

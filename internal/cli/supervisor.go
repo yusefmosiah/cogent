@@ -24,11 +24,8 @@ var workRotation = []rotationEntry{
 	{adapter: "native", model: "chatgpt/gpt-5.4-mini"},
 	{adapter: "native", model: "zai/glm-5-turbo"},
 	{adapter: "native", model: "bedrock/claude-haiku-4-5"},
-	{adapter: "codex", model: "gpt-5.4"},
-	{adapter: "codex", model: "gpt-5.4-mini"},
 	{adapter: "claude", model: "claude-sonnet-4-6"},
 	{adapter: "claude", model: "claude-haiku-4-5"},
-	{adapter: "opencode", model: "zai-coding-plan/glm-5-turbo"},
 }
 
 // globalRotationIdx is incremented each time we dispatch without prior history.
@@ -47,7 +44,7 @@ func pickAdapterModelWithFallback(item core.WorkItemRecord, jobs []core.JobRecor
 		pool = workRotation
 	}
 	if len(pool) == 0 {
-		return "codex", "gpt-5.4"
+		return "native", "chatgpt/gpt-5.4-mini"
 	}
 
 	// 1. If item has preferred adapters + models, use the first match in pool.

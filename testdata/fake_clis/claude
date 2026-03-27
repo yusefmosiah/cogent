@@ -2,12 +2,136 @@
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ]; then
-  printf '%s\n' 'fake-claude 0.0.1'
-  exit 0
+mode="run"
+session_id="claude-session-456"
+last_message=""
+prompt=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version|-v)
+      printf '%s\n' 'fake-claude 0.0.1'
+      exit 0
+      ;;
+    auth)
+      shift
+      if [ "${1:-}" = "status" ]; then
+        printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+        exit 0
+      fi
+      ;;
+    --resume)
+      mode="resume"
+      shift
+      session_id="${1:-claude-session-456}"
+      ;;
+    -o)
+      shift
+      last_message="$1"
+      ;;
+    -p)
+      shift
+      prompt="$1"
+      ;;
+    --print|--verbose)
+      ;;
+    --output-format|--permission-mode|--model)
+      shift
+      ;;
+    -*)
+      ;;
+    *)
+      prompt="$1"
+      ;;
+  esac
+  shift
+done
+
+if [ "$mode" = "run" ] || [ "$mode" = "resume" ]; then
+  if [ -z "$prompt" ]; then
+    prompt="$(cat || true)"
+  fi
 fi
-if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
-  printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
-  exit 0
+
+emit_result() {
+  text="$1"
+  printf '%s\n' "{\"type\":\"system\",\"session_id\":\"$session_id\"}"
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$text\"}]}}"
+  printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.001234,\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":400,\"cache_read_input_tokens\":300,\"output_tokens\":20},\"modelUsage\":{\"claude-sonnet-4-6\":{\"inputTokens\":100,\"outputTokens\":20,\"cacheReadInputTokens\":300,\"cacheCreationInputTokens\":400,\"costUSD\":0.001234}}}"
+}
+
+if [ "$mode" = "resume" ]; then
+  if printf '%s' "$prompt" | grep -qi 'writing a cogent debrief'; then
+    emit_result "# Objective\nExplain the current task state.\n\n# Completed\n- Finished the prior task.\n\n# Current State\nThe repository is in a recoverable state.\n\n# Outstanding Work\n- Review the latest changes.\n\n# Risks\n- The next agent should verify behavior before proceeding.\n\n# Important Files\n/tmp/fake-file.go\n\n# Recommended Next Step\nReview the recent changes and continue from there."
+    if [ -n "$last_message" ]; then
+      cat > "$last_message" <<'EOF'
+# Objective
+Explain the current task state.
+
+# Completed
+- Finished the prior task.
+
+# Current State
+The repository is in a recoverable state.
+
+# Outstanding Work
+- Review the latest changes.
+
+# Risks
+- The next agent should verify behavior before proceeding.
+
+# Important Files
+/tmp/fake-file.go
+
+# Recommended Next Step
+Review the recent changes and continue from there.
+EOF
+    fi
+  else
+    emit_result "Claude continued the task"
+    if [ -n "$last_message" ]; then
+      printf '%s\n' 'Claude continued the task' > "$last_message"
+    fi
+  fi
+elif printf '%s' "$prompt" | grep -qi 'recursive cogent orchestration'; then
+  printf '%s\n' "{\"type\":\"system\",\"session_id\":\"$session_id\"}"
+  plan_json="$(printf '%s' 'plan stage' | "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json run --adapter claude --cwd "$PWD" --stdin)"
+  plan_job="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"]["job_id"])')"
+  "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json status --wait "$plan_job" >/dev/null
+  implement_json="$(printf '%s' 'implement stage' | "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json run --adapter claude --cwd "$PWD" --stdin)"
+  implement_job="$(printf '%s' "$implement_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"]["job_id"])')"
+  "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json status --wait "$implement_job" >/dev/null
+  verify_json="$(printf '%s' 'verify stage' | "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json run --adapter claude --cwd "$PWD" --stdin)"
+  verify_job="$(printf '%s' "$verify_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"]["job_id"])')"
+  "$COGENT_EXECUTABLE" --config "$COGENT_CONFIG_PATH" --json status --wait "$verify_job" >/dev/null
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Recursive orchestration completed. plan=$plan_job implement=$implement_job verify=$verify_job\"}]}}"
+  printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"$session_id\",\"total_cost_usd\":0.005,\"usage\":{\"input_tokens\":1800,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":500,\"output_tokens\":120},\"modelUsage\":{\"claude-sonnet-4-6\":{\"inputTokens\":1800,\"outputTokens\":120,\"cacheReadInputTokens\":500,\"cacheCreationInputTokens\":0,\"costUSD\":0.005}}}"
+elif printf '%s' "$prompt" | grep -qi 'hang'; then
+  trap 'exit 130' INT TERM
+  printf '%s\n' "{\"type\":\"system\",\"session_id\":\"$session_id\"}"
+  while :; do
+    sleep 1
+  done
+elif printf '%s' "$prompt" | grep -qi 'slow'; then
+  printf '%s\n' "{\"type\":\"system\",\"session_id\":\"$session_id\"}"
+  sleep 1
+  emit_result "Claude slow task completed"
+elif printf '%s' "$prompt" | grep -qi 'plan stage'; then
+  emit_result "Plan stage completed"
+elif printf '%s' "$prompt" | grep -qi 'implement stage'; then
+  emit_result "Implement stage completed"
+elif printf '%s' "$prompt" | grep -qi 'verify stage'; then
+  emit_result "Verify stage completed"
+elif printf '%s' "$prompt" | grep -qi 'review stage'; then
+  emit_result "Review stage completed"
+elif printf '%s' "$prompt" | grep -qi 'red team stage'; then
+  emit_result "Red-team stage completed"
+elif printf '%s' "$prompt" | grep -qi 'security report stage'; then
+  emit_result "Security report stage completed"
+else
+  cat "$script_dir/../fixtures/claude/success.jsonl"
 fi
-cat "$script_dir/../fixtures/claude/success.jsonl"
+
+if [ -n "$last_message" ] && [ "$mode" != "resume" ]; then
+  printf '%s\n' 'Claude completed the task' > "$last_message"
+fi

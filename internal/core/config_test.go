@@ -15,8 +15,8 @@ func TestLoadConfigParsesAdapterTraits(t *testing.T) {
 
 	configPath := filepath.Join(tempDir, "config.toml")
 	configBody := []byte(`
-[adapters.codex]
-binary = "codex"
+[adapters.native]
+binary = "cogent"
 enabled = true
 summary = "primary code-editing adapter"
 speed = "fast"
@@ -40,17 +40,17 @@ source = "manual"
 		t.Fatalf("LoadConfig returned error: %v", err)
 	}
 
-	if cfg.Adapters.Codex.Summary != "primary code-editing adapter" {
-		t.Fatalf("unexpected summary: %q", cfg.Adapters.Codex.Summary)
+	if cfg.Adapters.Native.Summary != "primary code-editing adapter" {
+		t.Fatalf("unexpected summary: %q", cfg.Adapters.Native.Summary)
 	}
-	if cfg.Adapters.Codex.Speed != "fast" {
-		t.Fatalf("unexpected speed: %q", cfg.Adapters.Codex.Speed)
+	if cfg.Adapters.Native.Speed != "fast" {
+		t.Fatalf("unexpected speed: %q", cfg.Adapters.Native.Speed)
 	}
-	if cfg.Adapters.Codex.Cost != "high" {
-		t.Fatalf("unexpected cost: %q", cfg.Adapters.Codex.Cost)
+	if cfg.Adapters.Native.Cost != "high" {
+		t.Fatalf("unexpected cost: %q", cfg.Adapters.Native.Cost)
 	}
-	if len(cfg.Adapters.Codex.Tags) != 2 || cfg.Adapters.Codex.Tags[0] != "default" || cfg.Adapters.Codex.Tags[1] != "tools" {
-		t.Fatalf("unexpected tags: %#v", cfg.Adapters.Codex.Tags)
+	if len(cfg.Adapters.Native.Tags) != 2 || cfg.Adapters.Native.Tags[0] != "default" || cfg.Adapters.Native.Tags[1] != "tools" {
+		t.Fatalf("unexpected tags: %#v", cfg.Adapters.Native.Tags)
 	}
 	if len(cfg.Pricing.Models) != 1 {
 		t.Fatalf("expected one pricing override, got %d", len(cfg.Pricing.Models))
