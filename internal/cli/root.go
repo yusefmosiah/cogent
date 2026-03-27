@@ -321,7 +321,6 @@ func NewRootCommand() *cobra.Command {
 		newServeCommand(opts),
 		newDispatchCommand(opts),
 		newProjectCommand(opts),
-		newMCPCommand(opts),
 		newLoginCommand(opts),
 		newVersionCommand(),
 	)

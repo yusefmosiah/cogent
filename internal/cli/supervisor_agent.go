@@ -12,27 +12,25 @@ import (
 	"time"
 
 	"github.com/yusefmosiah/cogent/internal/core"
-	"github.com/yusefmosiah/cogent/internal/mcpserver"
 	"github.com/yusefmosiah/cogent/internal/service"
 )
 
 // agenticSupervisor runs the supervisor as a regular adapter session (ADR-0041).
-// The LLM has Cogent MCP tools and handles all dispatch/attestation logic.
+// The LLM handles all dispatch/attestation logic.
 // The Go code just manages the session lifecycle.
 type agenticSupervisor struct {
-	svc            *service.Service
-	cwd            string
-	hub            *wsHub
-	adapter        string
-	model          string
-	sessionManager *mcpserver.SessionManager // MCP session manager for provenance tracking (VAL-SUPERVISOR-003)
+	svc     *service.Service
+	cwd     string
+	hub     *wsHub
+	adapter string
+	model   string
 
 	mu     sync.Mutex
 	paused bool
 	hostCh chan string
 }
 
-func newAgenticSupervisor(svc *service.Service, cwd string, hub *wsHub, adapter, model string, sessionManager *mcpserver.SessionManager) *agenticSupervisor {
+func newAgenticSupervisor(svc *service.Service, cwd string, hub *wsHub, adapter, model string) *agenticSupervisor {
 	// Load adapter/model from .cogent/supervisor-brief.md if not set via flags.
 	if adapter == "" || model == "" {
 		briefAdapter, briefModel := parseSupervisorBrief(svc.Paths.StateDir)
@@ -47,13 +45,12 @@ func newAgenticSupervisor(svc *service.Service, cwd string, hub *wsHub, adapter,
 		fmt.Fprintf(os.Stderr, "supervisor: adapter=%q model=%q — set supervisor_adapter/supervisor_model in .cogent/supervisor-brief.md\n", adapter, model)
 	}
 	return &agenticSupervisor{
-		svc:            svc,
-		cwd:            cwd,
-		hub:            hub,
-		adapter:        adapter,
-		model:          model,
-		sessionManager: sessionManager,
-		hostCh:         make(chan string, 16),
+		svc:     svc,
+		cwd:     cwd,
+		hub:     hub,
+		adapter: adapter,
+		model:   model,
+		hostCh:  make(chan string, 16),
 	}
 }
 
@@ -99,13 +96,6 @@ func (s *agenticSupervisor) run(ctx context.Context) {
 	}
 	sessionID := result.Session.SessionID
 	s.log("started", fmt.Sprintf("session=%s job=%s", sessionID, result.Job.JobID))
-
-	// Mark this session as the supervisor session for MCP provenance (VAL-SUPERVISOR-003).
-	// This ensures supervisor-triggered MCP mutations emit ActorSupervisor.
-	// The session manager creates per-session server instances, so concurrent traffic is safe.
-	if s.sessionManager != nil {
-		s.sessionManager.SetSupervisorSession(sessionID)
-	}
 
 	outcome := s.waitForJob(ctx, ch, result.Job.JobID)
 

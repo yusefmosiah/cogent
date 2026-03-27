@@ -1,13 +1,16 @@
 commands:
   install: go mod download
-  build: make build
+  build: go build ./...
   test: go list ./internal/... | grep -v 'github.com/yusefmosiah/cogent/internal/adapters/codex' | grep -v 'github.com/yusefmosiah/cogent/internal/mcpserver' | xargs env GOMAXPROCS=4 go test
   full_test: GOMAXPROCS=4 go test ./internal/...
   lint: go vet ./...
+  make_lint: make lint
+  staticcheck: /Users/wiz/go/bin/staticcheck ./...
+  install_binary: make install
 
 services:
   serve:
-    start: ./build/cogent serve --port 5380
+    start: go run ./cmd/cogent serve --port 5380
     stop: lsof -ti :5380 | xargs kill
     healthcheck: curl -sf http://localhost:5380/api/runtime
     port: 5380

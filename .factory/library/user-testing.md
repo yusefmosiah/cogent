@@ -1,48 +1,59 @@
 # User Testing
 
-Testing surface, required testing skills/tools, and resource cost classification.
+Validation surface and concurrency guidance for the strip/refactor mission.
 
 ---
 
 ## Validation Surface
 
-**Primary surface:** CLI (terminal commands)
+**Primary surface:** CLI and shell-level source inspection.
 
-The cogent binary is a CLI tool. Validation involves:
-1. Running CLI commands (`cogent --help`, `cogent version`, `cogent work list`, `cogent check create --help`, `cogent work attest --help`)
-2. Running build/test validators (`go build ./...`, `go test`, `go vet ./...`)
-3. Grepping source code for stale references or structural assertions
-4. Reading specific code sections to verify structural changes
+Validators prove this mission by:
+1. Running repo-wide commands (`go build ./...`, `go test`, `go vet ./...`, `staticcheck ./...`, `make install`)
+2. Running installed-binary checks (`cogent --help`, `cogent version`)
+3. Verifying source structure with `ls`, `rg`, `wc -l`, and `git diff --exit-code`
 
-**Tools:** Shell command execution (no browser, no TUI framework). All validation is done via direct command execution and output inspection.
+No browser, TUI, or external-service validation is required.
 
-**Setup required:** `make install` to build and install the binary to `~/.local/bin/cogent`.
+## Phase-specific command guidance
 
-**No auth/login required.** CLI commands work without authentication for local operations.
+### Before strip completes
+```bash
+go build ./...
+go list ./internal/... | grep -v 'github.com/yusefmosiah/cogent/internal/adapters/codex' | grep -v 'github.com/yusefmosiah/cogent/internal/mcpserver' | xargs env GOMAXPROCS=4 go test
+go vet ./...
+```
+
+### After strip completes
+```bash
+go build ./...
+GOMAXPROCS=4 go test ./internal/...
+go vet ./...
+```
+
+### Final quality validation
+```bash
+go build ./...
+GOMAXPROCS=4 go test ./internal/...
+go vet ./...
+make lint
+/Users/wiz/go/bin/staticcheck ./...
+make install
+cogent --help
+cogent version
+git diff --exit-code -- internal/adapterapi
+git diff --exit-code -- mind-graph
+```
 
 ## Validation Concurrency
 
-**Surface: CLI/shell**
-- Each validator instance: ~50 MB (Go binary execution + shell)
-- Machine: 16 GB RAM, 8 CPU cores, ~10 GB available
-- Max concurrent validators: **5**
-- Rationale: CLI execution is extremely lightweight. 5 concurrent shell processes consume <250 MB total. Well within 70% headroom (7 GB).
+**Surface: CLI / shell**
+- Estimated per validator cost: low CPU + low memory (single Go command or grep pipeline)
+- Conservative parallelism: **5 concurrent validators max**
+- Rationale: shell-based validation is lightweight; `GOMAXPROCS=4` already bounds test parallelism inside each validator process.
 
-## Flow Validator Guidance: CLI
+## Validator notes
 
-**Isolation boundaries:**
-- Most CLI commands (help, version, work list, check create) are read-only and can run concurrently without interference
-- State directory tests (migration, state file operations) MUST use isolated temporary directories with custom HOME or working directory
-- Build/test commands operate on the shared codebase but don't modify state - safe to run concurrently
-- Code search operations (grep, file reading) are read-only - safe concurrent
-
-**Constraints for safe concurrent testing:**
-- Do NOT modify the actual ~/.cogent/ or /Users/wiz/fase/.cogent/ directory during testing
-- For state directory migration tests, create a temporary directory and use HOME=<tempdir> or cd to isolated workdir
-- Build/test commands should run from the repo root (/Users/wiz/fase) - no isolation needed
-- GitHub repo checks are read-only via gh CLI - no isolation needed
-
-**Evidence collection:**
-- Save terminal output as .txt files in the evidence directory
-- For grep results, save both the command and full output
-- For migration tests, capture before/after ls output
+- Use `/Users/wiz/cogent` as the working directory
+- Treat `internal/adapterapi/` and `mind-graph/` as boundary assertions, not places to “fix” issues
+- Capture command output as evidence files when a validator runs a milestone or final contract pass

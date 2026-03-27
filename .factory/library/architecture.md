@@ -1,41 +1,58 @@
 # Architecture
 
-Key architectural decisions and patterns for the cogent (formerly fase) codebase.
+How cogent is structured today and what this mission is changing.
 
-**What belongs here:** Architectural decisions, discovered patterns, module boundaries.
-**What does NOT belong here:** Service ports/commands (use `.factory/services.yaml`).
+**What belongs here:** component boundaries, retained vs deprecated surfaces, refactor seams.
+**What does NOT belong here:** service commands and ports (use `.factory/services.yaml`).
 
 ---
 
-## Module Structure
+## Repository shape
 
-- `cmd/cogent/` (formerly `cmd/fase/`) — CLI entry point (cobra)
-- `internal/service/` — Core service (~8800 lines), work lifecycle, briefings, notifications
-- `internal/store/` — SQLite persistence layer (~4000 lines)
-- `internal/core/` — Types, constants, work states
-- `internal/adapters/native/` — Active multi-LLM adapter (GLM, GPT, Claude, Gemini)
-- `internal/adapters/*/` — Deprecated subprocess adapters (do not modify)
-- `internal/notify/` — Email via Resend API, digest collector
-- `internal/mcpserver/` — MCP server (tools being disabled, channel relay kept)
-- `internal/cli/` — CLI commands, serve.go (HTTP/WS server, housekeeping)
-- `mind-graph/` — Poincaré disk visualization UI
-- `skills/` — Worker/checker skill markdown files (loaded at runtime)
+- `cmd/cogent/` — CLI entrypoint
+- `internal/cli/` — cobra commands, HTTP server, housekeeping, supervisor wiring
+- `internal/service/` — primary service layer; `service.go` is the monolith being split
+- `internal/store/` — SQLite persistence
+- `internal/core/` — shared types/config/path resolution
+- `internal/adapters/native/` — retained in-process adapter
+- `internal/adapters/claude/`, `internal/adapters/pi_rust/`, `internal/adapters/registry.go` — retained adapter surfaces if still needed
+- `internal/adapterapi/` — shared adapter contracts; mission boundary says preserve unchanged
+- `mind-graph/` — UI surface; mission boundary says untouched
 
-## Key Patterns
+## Deprecated surfaces being stripped
 
-- Work items form a graph (parent-child, dependency edges) stored in SQLite
-- Jobs are execution attempts on work items (multiple jobs per work)
-- Event bus (`EventBus`) for internal notifications
-- Housekeeping loop in serve.go: 30s tick for WAL checkpoint, lease reconciliation, stall/orphan detection; hourly tick for digest flush
-- Config from TOML file + environment variables
-- State directory (`.cogent/`, formerly `.fase/`): SQLite DB, supervisor brief, raw stdout
+Milestone 1 removes:
+- `internal/mcpserver/`
+- `internal/cli/mcp.go`
+- `internal/adapters/codex/`
+- `internal/adapters/factory/`
+- `internal/adapters/pi/`
+- `internal/adapters/gemini/`
+- `internal/adapters/opencode/`
+- module dependencies that only supported those deleted packages
 
-## Peer Agent Channel Pattern
+Any retained surfaces that reference deleted packages must be cleaned in place rather than removed wholesale.
 
-The async peer coagent system (introduced in core-simplification) uses a background auto-loop pattern:
+## Service refactor seams
 
-1. **Spawn**: `spawn_agent` starts a goroutine (`runAgent`) for the peer agent
-2. **Auto-loop**: The goroutine continuously waits for channel messages via `wait_for_message`, processes each with a new LLM turn, and posts responses back via `post_message`
-3. **Close**: `close_agent` cancels the context and shuts down the goroutine
+Milestone 2 is a same-package extraction only. The target files are:
+- `service_usage.go`
+- `service_proof.go`
+- `service_docs.go`
+- `service_graph.go`
+- `service_notify.go`
+- `service_briefing.go`
+- `service_attestation.go`
+- `service_state.go`
+- `service_work.go`
+- `service_supervisor.go`
+- `service_job.go`
 
-This replaces the old synchronous `send_turn` pattern. The peer agent automatically responds to all non-self messages in the channel until closed. Key files: `internal/adapters/native/channel.go` (ChannelManager, AgentChannel), `internal/adapters/native/tools_coagent.go` (tool implementations, runAgent goroutine).
+`service.go` should end the mission as the core shell for the `Service` type, open/constructor logic, and shared helpers still used across the extracted files.
+
+## Invariants for this mission
+
+- `internal/adapterapi/` must not change
+- `mind-graph/` must not change
+- The refactor must preserve buildable call paths across `internal/cli/`, `internal/service/`, and retained adapters
+- Validation is CLI/source based; no browser surface is required for this mission

@@ -25,10 +25,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yusefmosiah/cogent/internal/adapters"
 	"github.com/yusefmosiah/cogent/internal/core"
-	"github.com/yusefmosiah/cogent/internal/mcpserver"
 	"github.com/yusefmosiah/cogent/internal/service"
 	"github.com/yusefmosiah/cogent/internal/web"
 )
@@ -80,6 +78,14 @@ func (h *wsHub) broadcast(eventType string, data any) {
 
 func (h *wsHub) Drops() int64 {
 	return h.drops.Load()
+}
+
+func broadcastChannelMessage(hub *wsHub, content string, meta map[string]string) {
+	payload := map[string]any{"content": content}
+	if len(meta) > 0 {
+		payload["meta"] = meta
+	}
+	hub.broadcast("channel_message", payload)
 }
 
 // wsUpgrade performs the WebSocket HTTP upgrade handshake.
@@ -277,26 +283,17 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	// WebSocket hub — shared across all goroutines
 	hub := newWSHub()
 
-	// MCP endpoint with per-session server isolation for correct provenance.
-	// SessionManager ensures supervisor-triggered and external MCP traffic
-	// don't share mutable state (VAL-SUPERVISOR-003, round-5 scrutiny fix).
-	sessionManager := mcpserver.NewSessionManager(svc)
-
 	// Agentic supervisor (ADR-0041) — created before API handlers so
 	// pause/resume endpoints have a reference. Goroutine started below.
 	var sup *agenticSupervisor
 	if auto {
-		sup = newAgenticSupervisor(svc, cwd, hub, supAdapter, supModel, sessionManager)
+		sup = newAgenticSupervisor(svc, cwd, hub, supAdapter, supModel)
 	}
 
 	mux := http.NewServeMux()
 	registerAPIHandlers(mux, svc, cwd, hub, sup)
-	// Route channel notifications through the WebSocket hub so the MCP proxy
-	// can relay them as notifications/claude/channel to Claude Code.
-	sessionManager.SetBroadcastFunc(hub.broadcast)
-	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(sessionManager.GetServerForRequest, nil))
 
-	// Channel send — push notifications to connected Claude Code session
+	// Channel send — push notifications to connected WebSocket listeners.
 	mux.HandleFunc("/api/channel/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONHTTP(w, 405, map[string]string{"error": "method not allowed"})
@@ -314,18 +311,9 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 			writeJSONHTTP(w, 400, map[string]string{"error": "content must not be empty"})
 			return
 		}
-		// Get or create a server for this request to send channel events.
-		// For channel send, we use a default session since there's no explicit session ID.
-		server := sessionManager.GetServerInstance("channel-send")
-		if err := server.SendChannelEvent(req.Content, req.Meta); err != nil {
-			writeJSONHTTP(w, 500, map[string]string{"error": err.Error()})
-			return
-		}
+		broadcastChannelMessage(hub, req.Content, req.Meta)
 		writeJSONHTTP(w, 200, map[string]string{"status": "sent"})
 	})
-
-	// Store sessionManager reference for use in goroutines
-	sm := sessionManager
 
 	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +347,7 @@ func runServe(cmd *cobra.Command, root *rootOptions, port int, host string, auto
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runHousekeeping(ctx, svc, cwd, hub, sup, sm)
+		runHousekeeping(ctx, svc, cwd, hub, sup)
 	}()
 
 	// Always run change watcher — detects work/job/attestation changes and pushes via WebSocket
@@ -543,7 +531,7 @@ func digestInterval() time.Duration {
 	return time.Hour
 }
 
-func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub *wsHub, sup *agenticSupervisor, sm *mcpserver.SessionManager) {
+func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub *wsHub, sup *agenticSupervisor) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -633,10 +621,9 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 					})
 					hub.broadcast("work_updated", map[string]string{"work_id": workID})
 
-					// If no supervisor is running (one-off dispatch), send channel notification to host
-					if sup == nil && sm != nil {
-						mcpSrv := sm.GetServerInstance("housekeeping")
-						_ = mcpSrv.SendChannelEvent(
+					// If no supervisor is running (one-off dispatch), send a channel notification to listeners.
+					if sup == nil {
+						broadcastChannelMessage(hub,
 							fmt.Sprintf("⚠️ Stall detected: job %s has no output for 30 minutes and worker is dead. Work: %s (%s)", jobID, workResult.Work.Title, workID),
 							map[string]string{"type": "stall_warning", "work_id": workID, "job_id": jobID},
 						)
@@ -675,10 +662,9 @@ func runHousekeeping(ctx context.Context, svc *service.Service, cwd string, hub 
 					})
 					hub.broadcast("work_updated", map[string]string{"work_id": item.WorkID})
 
-					// If no supervisor is running, send channel notification
-					if sup == nil && sm != nil {
-						mcpSrv := sm.GetServerInstance("housekeeping")
-						_ = mcpSrv.SendChannelEvent(
+					// If no supervisor is running, send a channel notification to listeners.
+					if sup == nil {
+						broadcastChannelMessage(hub,
 							fmt.Sprintf("⚠️ Orphan worker detected: process %d for job %s is dead. Work: %s (%s)", rt.SupervisorPID, item.CurrentJobID, item.Title, item.WorkID),
 							map[string]string{"type": "orphan_warning", "work_id": item.WorkID, "job_id": item.CurrentJobID},
 						)
